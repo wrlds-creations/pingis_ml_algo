@@ -13,9 +13,11 @@ import type { PlayerSetup } from './types';
 
 interface Props {
   onDone: (setup: PlayerSetup) => void;
+  onAudioMode?: (setup: PlayerSetup) => void;
+  onLiveMode?: (setup: PlayerSetup) => void;
 }
 
-export function SetupScreen({ onDone }: Props) {
+export function SetupScreen({ onDone, onAudioMode, onLiveMode }: Props) {
   const [name, setName] = useState('');
   const [handedness, setHandedness] = useState<'right' | 'left'>('right');
 
@@ -83,7 +85,7 @@ export function SetupScreen({ onDone }: Props) {
           </Text>
         </View>
 
-        {/* Fortsätt-knapp */}
+        {/* Fortsätt-knappar */}
         <TouchableOpacity
           style={[s.continueBtn, !canContinue && s.continueBtnOff]}
           onPress={() => canContinue && onDone({ name: name.trim(), handedness })}
@@ -93,6 +95,30 @@ export function SetupScreen({ onDone }: Props) {
             Fortsätt → Kalibrering
           </Text>
         </TouchableOpacity>
+
+        {onAudioMode && (
+          <TouchableOpacity
+            style={[s.audioBtn, !canContinue && s.audioBtnOff]}
+            onPress={() => canContinue && onAudioMode({ name: name.trim(), handedness })}
+            activeOpacity={0.7}
+          >
+            <Text style={[s.audioTxt, !canContinue && s.audioTxtOff]}>
+              Ljud-insamling
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {onLiveMode && (
+          <TouchableOpacity
+            style={[s.liveBtn, !canContinue && s.liveBtnOff]}
+            onPress={() => canContinue && onLiveMode({ name: name.trim(), handedness })}
+            activeOpacity={0.7}
+          >
+            <Text style={[s.liveTxt, !canContinue && s.liveTxtOff]}>
+              Live-klassificering
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
     </KeyboardAvoidingView>
   );
@@ -146,4 +172,26 @@ const s = StyleSheet.create({
   continueBtnOff: { backgroundColor: '#111' },
   continueTxt:    { color: '#2ecc71', fontWeight: '700', fontSize: 16, letterSpacing: 1 },
   continueTxtOff: { color: '#2a2a2a' },
+
+  audioBtn: {
+    backgroundColor: '#0d1f33',
+    borderRadius: 12,
+    padding: 18,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  audioBtnOff: { backgroundColor: '#111' },
+  audioTxt:    { color: '#4a9eff', fontWeight: '700', fontSize: 16, letterSpacing: 1 },
+  audioTxtOff: { color: '#2a2a2a' },
+
+  liveBtn: {
+    backgroundColor: '#1a0d2d',
+    borderRadius: 12,
+    padding: 18,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  liveBtnOff: { backgroundColor: '#111' },
+  liveTxt:    { color: '#a855f7', fontWeight: '700', fontSize: 16, letterSpacing: 1 },
+  liveTxtOff: { color: '#2a2a2a' },
 });

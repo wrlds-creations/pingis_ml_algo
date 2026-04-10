@@ -14,6 +14,9 @@
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
+    <!-- Microphone — audio recording -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <!-- File storage (needed below API 29) -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />

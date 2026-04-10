@@ -5,8 +5,10 @@ import type { PlayerSetup, CalibrationData } from './src/types';
 import { SetupScreen } from './src/SetupScreen';
 import { CalibrationScreen } from './src/CalibrationScreen';
 import { DataCollectionScreen } from './src/DataCollectionScreen';
+import { AudioCollectionScreen } from './src/AudioCollectionScreen';
+import { LiveClassificationScreen } from './src/LiveClassificationScreen';
 
-type Screen = 'setup' | 'calibration' | 'collection';
+type Screen = 'setup' | 'calibration' | 'collection' | 'audio_collection' | 'live_classification';
 
 interface AppState {
   screen: Screen;
@@ -23,6 +25,30 @@ export default function App() {
       <SafeAreaProvider>
         <SetupScreen
           onDone={setup => setState({ screen: 'calibration', setup })}
+          onAudioMode={setup => setState({ screen: 'audio_collection', setup })}
+          onLiveMode={setup => setState({ screen: 'live_classification', setup })}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'audio_collection' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <AudioCollectionScreen
+          setup={state.setup}
+          onDone={() => setState({ screen: 'setup' })}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'live_classification' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <LiveClassificationScreen
+          setup={state.setup}
+          onDone={() => setState({ screen: 'setup' })}
         />
       </SafeAreaProvider>
     );
@@ -65,6 +91,7 @@ export default function App() {
     <SafeAreaProvider>
       <SetupScreen
         onDone={setup => setState({ screen: 'calibration', setup })}
+        onAudioMode={setup => setState({ screen: 'audio_collection', setup })}
       />
     </SafeAreaProvider>
   );

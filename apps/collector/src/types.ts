@@ -41,3 +41,24 @@ export interface SessionFile {
   };
   events: LabeledEvent[];
 }
+
+// ---- Audio bounce detection ----
+
+export type AudioLabel = 'racket_bounce' | 'table_bounce' | 'floor_bounce' | 'noise';
+
+export interface AudioEvent {
+  label: AudioLabel;
+  recorded_at: string;   // ISO timestamp för trycket
+  wav_filename: string;  // relativ filnamn t.ex. "racket_bounce_000.m4a"
+  duration_ms: number;   // faktisk inspelningstid
+}
+
+export interface AudioSessionFile {
+  session_meta: {
+    recorder_name: string;
+    session_date: string;
+    app_version: string;
+    clip_duration_ms: number;
+  };
+  events: AudioEvent[];
+}
