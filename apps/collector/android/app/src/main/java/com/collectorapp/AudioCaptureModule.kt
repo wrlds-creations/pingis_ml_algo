@@ -7,7 +7,12 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.util.Base64
 import androidx.core.app.ActivityCompat
-import com.facebook.react.bridge.*
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.Promise
+import com.facebook.react.bridge.ReactApplicationContext
+import com.facebook.react.bridge.ReactContextBaseJavaModule
+import com.facebook.react.bridge.ReactMethod
+import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
@@ -18,26 +23,29 @@ import java.nio.ByteOrder
  * Två funktioner:
  *
  * 1. capture(durationMs) — spelar in ett kort klipp och returnerar base64 PCM.
- *    Används av live-klassificeringen (nu ersatt av AudioStreamModule).
+ * 2. startSession(outputPath, targetDurationMs) / stopSession() — spelar in en lång WAV-session
+ *    (22 050 Hz, mono, PCM-16) för guided audio collection.
  *
- * 2. startSession(outputPath) / stopSession() — spelar in en lång WAV-session
- *    (22 050 Hz, mono, PCM-16). Används av datainsamlingsskärmen.
- *    WAV-headern skrivs korrekt med rätt data-chunk-storlek vid stop.
+ * Sessioninspelningen stoppas nu native när mål-längden nås, och stopSession väntar
+ * in worker-tråden innan WAV-headern patchas och duration returneras.
  */
 class AudioCaptureModule(private val ctx: ReactApplicationContext)
     : ReactContextBaseJavaModule(ctx) {
 
     override fun getName() = "AudioCapture"
 
-    // ── Session-state ──────────────────────────────────────────────────────────
-
     @Volatile private var sessionRecord: AudioRecord? = null
     @Volatile private var sessionRunning = false
-    @Volatile private var sessionStart   = 0L
+    @Volatile private var sessionStopRequested = false
+    @Volatile private var sessionStart = 0L
+    @Volatile private var sessionTargetDurationMs = 0L
+    @Volatile private var sessionCompletedDurationMs: Long? = null
     @Volatile private var sessionFos: FileOutputStream? = null
     @Volatile private var sessionPath: String? = null
-
-    // ── capture (befintlig funktion) ───────────────────────────────────────────
+    @Volatile private var sessionThread: Thread? = null
+    @Volatile private var sessionWrittenSamples = 0L
+    @Volatile private var sessionSampleRate = 22_050
+    @Volatile private var sessionAutoStopped = false
 
     @ReactMethod
     fun capture(durationMs: Int, promise: Promise) {
@@ -48,10 +56,10 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
         }
 
         val sampleRate = 22_050
-        val nSamples   = sampleRate * durationMs / 1_000
-        val minBuf     = AudioRecord.getMinBufferSize(
+        val nSamples = sampleRate * durationMs / 1_000
+        val minBuf = AudioRecord.getMinBufferSize(
             sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val bufSize    = maxOf(minBuf, nSamples * 2)
+        val bufSize = maxOf(minBuf, nSamples * 2)
 
         Thread {
             val rec = AudioRecord(
@@ -80,10 +88,18 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
         }.start()
     }
 
-    // ── startSession ───────────────────────────────────────────────────────────
+    @ReactMethod
+    fun addListener(eventName: String) {
+        // Required for NativeEventEmitter on Android.
+    }
 
     @ReactMethod
-    fun startSession(outputPath: String, promise: Promise) {
+    fun removeListeners(count: Int) {
+        // Required for NativeEventEmitter on Android.
+    }
+
+    @ReactMethod
+    fun startSession(outputPath: String, targetDurationMs: Int, promise: Promise) {
         if (sessionRunning) {
             promise.reject("SESSION_ACTIVE", "A session is already running")
             return
@@ -94,114 +110,186 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
             return
         }
 
-        val sr      = 22_050
-        val minBuf  = AudioRecord.getMinBufferSize(
+        val sr = 22_050
+        val minBuf = AudioRecord.getMinBufferSize(
             sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val bufSize = maxOf(minBuf, sr / 5 * 2) // ≥ 200ms buffer
+        val bufSize = maxOf(minBuf, sr / 5 * 2)
 
         try {
             val file = File(outputPath)
             file.parentFile?.mkdirs()
             val fos = FileOutputStream(file)
-            writeWavHeader(fos, sr, 0) // placeholder — size patched in stopSession
+            writeWavHeader(fos, sr, 0)
 
             val rec = AudioRecord(
                 MediaRecorder.AudioSource.MIC, sr,
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, bufSize)
 
-            sessionRecord  = rec
-            sessionFos     = fos
+            sessionRecord = rec
+            sessionFos = fos
             sessionRunning = true
-            sessionStart   = System.currentTimeMillis()
-            sessionPath    = outputPath
+            sessionStopRequested = false
+            sessionStart = System.currentTimeMillis()
+            sessionTargetDurationMs = targetDurationMs.toLong()
+            sessionCompletedDurationMs = null
+            sessionPath = outputPath
+            sessionWrittenSamples = 0L
+            sessionSampleRate = sr
+            sessionAutoStopped = false
 
-            Thread {
-                val buf = ShortArray(sr / 10) // 100ms chunks
-                rec.startRecording()
-                val bytesBuf = ByteArray(buf.size * 2)
-                while (sessionRunning) {
-                    val read = rec.read(buf, 0, buf.size)
-                    if (read > 0) {
-                        // interleave shorts → bytes LE
-                        val bb = ByteBuffer.wrap(bytesBuf).order(ByteOrder.LITTLE_ENDIAN)
-                        for (i in 0 until read) bb.putShort(buf[i])
-                        fos.write(bytesBuf, 0, read * 2)
-                    }
-                }
-            }.start()
+            val worker = Thread {
+                runSessionLoop(rec, fos, sr)
+            }
+            sessionThread = worker
+            worker.start()
 
             promise.resolve("started")
         } catch (e: Exception) {
+            sessionRunning = false
+            sessionStopRequested = false
+            sessionRecord = null
+            sessionFos = null
+            sessionPath = null
             promise.reject("SESSION_ERROR", e.message)
         }
     }
 
-    // ── stopSession ────────────────────────────────────────────────────────────
-
     @ReactMethod
     fun stopSession(promise: Promise) {
+        val completed = sessionCompletedDurationMs
+        if (!sessionRunning && completed != null) {
+            promise.resolve(completed.toDouble())
+            return
+        }
         if (!sessionRunning) {
             promise.reject("NO_SESSION", "No session is running")
             return
         }
-        sessionRunning = false
-        val durationMs = System.currentTimeMillis() - sessionStart
+
+        sessionStopRequested = true
 
         Thread {
             try {
-                sessionRecord?.stop()
-                sessionRecord?.release()
-                sessionRecord = null
-
-                sessionFos?.flush()
-                sessionFos?.close()
-                sessionFos = null
-
-                // Patch WAV header with correct data chunk size
-                sessionPath?.let { path ->
-                    val file = File(path)
-                    if (file.exists()) {
-                        val dataSize = (file.length() - 44).toInt()
-                        RandomAccessFile(file, "rw").use { raf ->
-                            // RIFF chunk size = dataSize + 36
-                            raf.seek(4)
-                            raf.write(intToLEBytes(dataSize + 36))
-                            // data chunk size
-                            raf.seek(40)
-                            raf.write(intToLEBytes(dataSize))
-                        }
-                    }
-                }
-                sessionPath = null
-                promise.resolve(durationMs.toDouble())
+                sessionThread?.join(2_000)
+                val duration = sessionCompletedDurationMs ?: (System.currentTimeMillis() - sessionStart)
+                promise.resolve(duration.toDouble())
             } catch (e: Exception) {
                 promise.reject("STOP_ERROR", e.message)
             }
         }.start()
     }
 
-    // ── WAV header helpers ─────────────────────────────────────────────────────
+    private fun runSessionLoop(rec: AudioRecord, fos: FileOutputStream, sr: Int) {
+        val buf = ShortArray(sr / 10)
+        val bytesBuf = ByteArray(buf.size * 2)
+        val targetSamples = if (sessionTargetDurationMs > 0L) {
+            sessionTargetDurationMs * sr / 1000L
+        } else {
+            Long.MAX_VALUE
+        }
+
+        try {
+            rec.startRecording()
+            while (!sessionStopRequested) {
+                val read = rec.read(buf, 0, buf.size)
+                if (read <= 0) continue
+
+                val bb = ByteBuffer.wrap(bytesBuf).order(ByteOrder.LITTLE_ENDIAN)
+                for (i in 0 until read) bb.putShort(buf[i])
+                fos.write(bytesBuf, 0, read * 2)
+                sessionWrittenSamples += read.toLong()
+
+                if (sessionWrittenSamples >= targetSamples) {
+                    sessionAutoStopped = sessionTargetDurationMs > 0L
+                    sessionStopRequested = true
+                }
+            }
+        } catch (_: Exception) {
+            // finaliseringen hanterar redan delvis inspelade filer
+        } finally {
+            finalizeSession()
+        }
+    }
+
+    private fun finalizeSession() {
+        val finishedPath = sessionPath
+        try {
+            sessionRecord?.stop()
+        } catch (_: Exception) {
+        }
+        try {
+            sessionRecord?.release()
+        } catch (_: Exception) {
+        }
+        sessionRecord = null
+
+        try {
+            sessionFos?.flush()
+            sessionFos?.close()
+        } catch (_: Exception) {
+        }
+        sessionFos = null
+
+        finishedPath?.let { path ->
+            val file = File(path)
+            if (file.exists()) {
+                try {
+                    val dataSize = (file.length() - 44).toInt().coerceAtLeast(0)
+                    RandomAccessFile(file, "rw").use { raf ->
+                        raf.seek(4)
+                        raf.write(intToLEBytes(dataSize + 36))
+                        raf.seek(40)
+                        raf.write(intToLEBytes(dataSize))
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        val durationMs = if (sessionSampleRate > 0) {
+            sessionWrittenSamples * 1000L / sessionSampleRate
+        } else {
+            System.currentTimeMillis() - sessionStart
+        }
+        sessionCompletedDurationMs = durationMs
+        sessionPath = null
+        sessionThread = null
+        sessionRunning = false
+        sessionStopRequested = false
+        val writtenSamples = sessionWrittenSamples
+        val autoStopped = sessionAutoStopped
+        sessionWrittenSamples = 0L
+        sessionAutoStopped = false
+
+        if (autoStopped && finishedPath != null && ctx.hasActiveCatalystInstance()) {
+            val payload = Arguments.createMap().apply {
+                putString("outputPath", finishedPath)
+                putDouble("durationMs", durationMs.toDouble())
+                putDouble("writtenSamples", writtenSamples.toDouble())
+            }
+            ctx
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit("onAudioSessionStopped", payload)
+        }
+    }
 
     private fun writeWavHeader(fos: FileOutputStream, sr: Int, dataBytes: Int) {
-        val byteRate    = sr * 2       // mono 16-bit
-        val blockAlign  = 2
+        val byteRate = sr * 2
+        val blockAlign = 2
         val bitsPerSample = 16
 
         val bb = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
-        // RIFF
         bb.put("RIFF".toByteArray())
         bb.putInt(dataBytes + 36)
         bb.put("WAVE".toByteArray())
-        // fmt
         bb.put("fmt ".toByteArray())
-        bb.putInt(16)              // sub-chunk size
-        bb.putShort(1)             // PCM
-        bb.putShort(1)             // mono
+        bb.putInt(16)
+        bb.putShort(1)
+        bb.putShort(1)
         bb.putInt(sr)
         bb.putInt(byteRate)
         bb.putShort(blockAlign.toShort())
         bb.putShort(bitsPerSample.toShort())
-        // data
         bb.put("data".toByteArray())
         bb.putInt(dataBytes)
 

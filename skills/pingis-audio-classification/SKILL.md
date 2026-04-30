@@ -1,3 +1,8 @@
+---
+name: pingis-audio-classification
+description: Work on the pingis audio collection, review, preprocessing, training, model export, live racket-contact detection, table/floor/noise veto behavior, and scripts under this skill.
+---
+
 # Skill: pingis-audio-classification
 
 ## Trigger

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Intake"
+  short_description: "Fill WRLDS project context without over-asking"
+  default_prompt: "Use $project-intake to read PROJECT_CONTEXT.md and DECISIONS.md, ask only the missing questions that block the current phase, then update the project files with confirmed answers."

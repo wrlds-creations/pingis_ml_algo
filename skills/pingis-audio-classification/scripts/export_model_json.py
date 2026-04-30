@@ -48,15 +48,17 @@ def main() -> None:
     clf    = joblib.load(MODEL_DIR / "audio_rf_classifier.pkl")
     scaler = joblib.load(MODEL_DIR / "audio_feature_scaler.pkl")
     le     = joblib.load(MODEL_DIR / "audio_label_encoder.pkl")
+    feature_cols = joblib.load(MODEL_DIR / "audio_feature_cols.pkl")
 
     total_nodes = sum(t.tree_.node_count for t in clf.estimators_)
     print(f"Träd: {len(clf.estimators_)}  ·  Totalt antal noder: {total_nodes}")
 
     model = {
-        "labels":       le.classes_.tolist(),
-        "scaler_mean":  [round(float(v), 8) for v in scaler.mean_],
-        "scaler_std":   [round(float(v), 8) for v in scaler.scale_],
-        "trees":        [export_tree(t) for t in clf.estimators_],
+        "labels":        le.classes_.tolist(),
+        "feature_names": feature_cols,
+        "scaler_mean":   [round(float(v), 8) for v in scaler.mean_],
+        "scaler_std":    [round(float(v), 8) for v in scaler.scale_],
+        "trees":         [export_tree(t) for t in clf.estimators_],
     }
 
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)

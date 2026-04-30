@@ -1,18 +1,28 @@
-import { NativeModules } from 'react-native';
+import { NativeEventEmitter, NativeModules } from 'react-native';
 
 interface AudioCaptureInterface {
   /** Spelar in `durationMs` millisekunder PCM (22 050 Hz, mono, 16-bit).
    *  Returnerar base64-kodade Int16 little-endian bytes. */
   capture(durationMs: number): Promise<string>;
-  /** Startar en lång WAV-sessionsinspelning till angiven sökväg. */
-  startSession(outputPath: string): Promise<string>;
-  /** Stoppar pågående WAV-session. Returnerar faktisk inspelningstid (ms). */
+  /** Startar en lang WAV-sessionsinspelning till angiven sokvag. */
+  startSession(outputPath: string, targetDurationMs?: number): Promise<string>;
+  /** Stoppar pagaende WAV-session. Returnerar faktisk inspelningstid (ms). */
   stopSession(): Promise<number>;
+  addListener(eventName: string): void;
+  removeListeners(count: number): void;
 }
 
-export const AudioCapture: AudioCaptureInterface = NativeModules.AudioCapture;
+export interface AudioCaptureStoppedEvent {
+  outputPath: string;
+  durationMs: number;
+  writtenSamples: number;
+}
 
-/** Avkodar base64-sträng → Float32Array normerad till [-1, 1]. */
+export const AUDIO_CAPTURE_STOPPED_EVENT = 'onAudioSessionStopped';
+export const AudioCapture: AudioCaptureInterface = NativeModules.AudioCapture;
+export const AudioCaptureEmitter = new NativeEventEmitter(NativeModules.AudioCapture);
+
+/** Avkodar base64-strang -> Float32Array normerad till [-1, 1]. */
 export function decodeBase64PCM(b64: string): Float32Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);

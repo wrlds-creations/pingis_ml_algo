@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Creator"
+  short_description: "Create focused Codex skills"
+  default_prompt: "Use $skill-creator to create or update a focused WRLDS Codex skill with concise routing metadata, references, scripts, assets, OpenAI metadata, and validation."

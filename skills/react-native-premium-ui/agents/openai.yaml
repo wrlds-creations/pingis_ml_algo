@@ -1,0 +1,4 @@
+interface:
+  display_name: "React Native Premium UI"
+  short_description: "Build polished React Native UI surfaces"
+  default_prompt: "Use $react-native-premium-ui when creating or refactoring a polished React Native UI surface with the existing design-system guidance."

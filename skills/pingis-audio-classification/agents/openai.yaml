@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pingis Audio Classification"
+  short_description: "Train and debug pingis racket-contact audio models"
+  default_prompt: "Use $pingis-audio-classification for pingis audio collection, review labels, preprocessing, binary contact training, 4-class veto training, and live audio detection debugging."

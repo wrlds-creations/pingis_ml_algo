@@ -1,172 +1,112 @@
-/**
- * CalibrationScreen.tsx
- *
- * 1. Ansluter till AirHive via BLE
- * 2. Visar en visuell guide: lägg sensorn plant på bordet
- * 3. Detekterar automatiskt stabilitet: gyro_mag < 5 °/s i ≥150 samples (~3s)
- * 4. Beräknar gravity-baseline (medel accel) och gyro-bias (medel gyro)
- * 5. Visar bekräftelse med gravitationsvektor-indikator
- * 6. Skickar CalibrationData + Device-instansen vidare (undviker reconnect)
- */
-
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  View,
-  Text,
-  TouchableOpacity,
-  StyleSheet,
-  StatusBar,
+  Alert,
   PermissionsAndroid,
   Platform,
-  Alert,
   ScrollView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  TouchableOpacity,
+  View,
 } from 'react-native';
 import { BleManager } from 'react-native-ble-plx';
-import type { Device, BleError, Characteristic } from 'react-native-ble-plx';
-import type { PlayerSetup, CalibrationData, ImuSample } from './types';
-
-// ── BLE UUIDs ─────────────────────────────────────────────────────────────────
-
-const SERVICE_UUID   = '07C80000-07C8-07C8-07C8-07C807C807C8';
-const ACCEL_UUID     = '07C80001-07C8-07C8-07C8-07C807C807C8';
-const ACCEL_UUID_ALT = '07C80203-07C8-07C8-07C8-07C807C807C8';
-const GYRO_UUID      = '07C80004-07C8-07C8-07C8-07C807C807C8';
-const MAG_UUID       = '07C80010-07C8-07C8-07C8-07C807C807C8';
+import type { BleError, Characteristic, Device } from 'react-native-ble-plx';
+import {
+  ACCEL_UUID,
+  ACCEL_UUID_ALT,
+  GYRO_UUID,
+  MAG_UUID,
+  SERVICE_UUID,
+  averageVector,
+  magnitude3,
+  normalize,
+  parsePacket,
+} from './airhive';
+import type {
+  CalibrationData,
+  CalibrationMode,
+  ImuSample,
+  PlayerSetup,
+  Vector3,
+} from './types';
 
 const STABLE_SAMPLES_NEEDED = 150;
 const GYRO_STABLE_THRESHOLD = 5.0;
-
-// ── Paketparser ───────────────────────────────────────────────────────────────
-
-function parsePacket(
-  uuid: string,
-  base64Data: string,
-): { type: 'accel' | 'gyro' | 'mag'; x: number; y: number; z: number } | null {
-  const binaryStr = atob(base64Data);
-  if (binaryStr.length < 9) return null;
-  const bytes = new Uint8Array(binaryStr.length);
-  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
-  const view = new DataView(bytes.buffer);
-  const x = view.getInt16(0, false);
-  const y = view.getInt16(2, false);
-  const z = view.getInt16(4, false);
-  const u = uuid.toUpperCase();
-  if (u === ACCEL_UUID || u === ACCEL_UUID_ALT) return { type: 'accel', x, y, z };
-  if (u === GYRO_UUID) return { type: 'gyro', x, y, z };
-  if (u === MAG_UUID) return { type: 'mag', x: -x / 10, y: -y / 10, z: -z / 10 };
-  return null;
-}
-
-// ── Visuell sensor-på-bord diagram ────────────────────────────────────────────
-
-function SensorOnTableDiagram() {
-  return (
-    <View style={d.wrap}>
-      {/* Sensor ovanifrån */}
-      <View style={d.sensor}>
-        <View style={d.sensorLed} />
-        <Text style={d.sensorText}>AirHive</Text>
-        <Text style={d.sensorSub}>displayen uppåt</Text>
-      </View>
-
-      {/* Pil nedåt = gravitation */}
-      <View style={d.arrowCol}>
-        <View style={d.arrowLine} />
-        <View style={d.arrowHead} />
-        <Text style={d.arrowLabel}>gravitation</Text>
-      </View>
-
-      {/* Bords-yta */}
-      <View style={d.tableRow}>
-        <View style={d.tableLine} />
-        <Text style={d.tableLabel}>BORD</Text>
-        <View style={d.tableLine} />
-      </View>
-    </View>
-  );
-}
-
-// ── Gravitationsvektor-bekräftelse ────────────────────────────────────────────
-
-function GravityIndicator({ gravity }: { gravity: { x: number; y: number; z: number } }) {
-  const axes = [
-    { label: 'X', value: gravity.x },
-    { label: 'Y', value: gravity.y },
-    { label: 'Z', value: gravity.z },
-  ];
-  const maxAbs = Math.max(...axes.map(a => Math.abs(a.value)));
-  const dominant = axes.reduce((a, b) =>
-    Math.abs(a.value) > Math.abs(b.value) ? a : b,
-  );
-
-  return (
-    <View style={g.wrap}>
-      <Text style={g.title}>GRAVITATIONSVEKTOR</Text>
-      {axes.map(({ label, value }) => {
-        const pct = maxAbs > 0 ? Math.abs(value) / maxAbs : 0;
-        const isDom = label === dominant.label;
-        return (
-          <View key={label} style={g.row}>
-            <Text style={[g.axisLabel, isDom && g.axisLabelDom]}>{label}</Text>
-            <View style={g.barBg}>
-              <View
-                style={[
-                  g.barFill,
-                  { width: `${pct * 100}%` as any },
-                  isDom ? g.barDom : g.barOther,
-                ]}
-              />
-            </View>
-            <Text style={[g.valText, isDom && g.valTextDom]}>
-              {value.toFixed(0)}
-            </Text>
-          </View>
-        );
-      })}
-      <Text style={g.hint}>
-        {dominant.label}-axeln dominerar — gravitationen ser korrekt ut
-      </Text>
-    </View>
-  );
-}
-
-// ── Typer ─────────────────────────────────────────────────────────────────────
+const POSE_SAMPLES_NEEDED = 20;
+const POSE_GYRO_THRESHOLD = 25.0;
 
 type ConnState = 'idle' | 'scanning' | 'connecting' | 'connected';
-type CalState  = 'waiting' | 'measuring' | 'done';
+
+interface PoseSnapshot {
+  accel: Vector3;
+  gyro_mag: number;
+}
 
 interface Props {
   setup: PlayerSetup;
-  onCalibrated: (cal: CalibrationData, device: Device) => void;
+  mode?: CalibrationMode;
+  onCalibrated: (calibration: CalibrationData, device: Device) => void;
   onBack: () => void;
 }
 
 const bleManager = new BleManager();
 
-// ── Komponent ─────────────────────────────────────────────────────────────────
+function SensorOnTableDiagram() {
+  return (
+    <View style={diagram.wrap}>
+      <View style={diagram.sensor}>
+        <View style={diagram.sensorLed} />
+        <Text style={diagram.sensorText}>AirHive</Text>
+        <Text style={diagram.sensorSub}>display up</Text>
+      </View>
+      <View style={diagram.arrowCol}>
+        <View style={diagram.arrowLine} />
+        <View style={diagram.arrowHead} />
+        <Text style={diagram.arrowLabel}>gravity</Text>
+      </View>
+      <View style={diagram.tableRow}>
+        <View style={diagram.tableLine} />
+        <Text style={diagram.tableLabel}>TABLE</Text>
+        <View style={diagram.tableLine} />
+      </View>
+    </View>
+  );
+}
 
-export function CalibrationScreen({ setup, onCalibrated, onBack }: Props) {
+function VectorPreview({ title, vector }: { title: string; vector: Vector3 }) {
+  return (
+    <View style={preview.wrap}>
+      <Text style={preview.title}>{title}</Text>
+      <Text style={preview.value}>
+        X {vector.x.toFixed(0)}  Y {vector.y.toFixed(0)}  Z {vector.z.toFixed(0)}
+      </Text>
+    </View>
+  );
+}
+
+export function CalibrationScreen({ setup, mode = 'table_only', onCalibrated, onBack }: Props) {
   const [connState, setConnState] = useState<ConnState>('idle');
-  const [calState, setCalState] = useState<CalState>('waiting');
-  const [stableCount, setStableCount] = useState(0);
-  const [calibration, setCalibration] = useState<CalibrationData | null>(null);
   const [sampleHz, setSampleHz] = useState(0);
+  const [stableCount, setStableCount] = useState(0);
+  const [tableCalibration, setTableCalibration] = useState<CalibrationData['table'] | null>(null);
+  const [forehandPose, setForehandPose] = useState<Vector3 | null>(null);
+  const [backhandPose, setBackhandPose] = useState<Vector3 | null>(null);
+  const [statusText, setStatusText] = useState<string | null>(null);
 
   const deviceRef = useRef<Device | null>(null);
   const latestRef = useRef({
     accel: { x: 0, y: 0, z: 0 },
-    gyro:  { x: 0, y: 0, z: 0 },
-    mag:   { x: 0, y: 0, z: 0 },
+    gyro: { x: 0, y: 0, z: 0 },
+    mag: { x: 0, y: 0, z: 0 },
   });
 
   const stableBufferRef = useRef<ImuSample[]>([]);
   const consecutiveStableRef = useRef(0);
+  const poseBufferRef = useRef<PoseSnapshot[]>([]);
   const sampleCountRef = useRef(0);
   const hzTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const calDoneRef = useRef(false);
-  const calStateRef = useRef<CalState>('waiting');
-
-  // ── BLE-behörigheter ────────────────────────────────────────────────────────
+  const tableDoneRef = useRef(false);
 
   const requestPermissions = useCallback(async () => {
     if (Platform.OS !== 'android') return true;
@@ -177,23 +117,43 @@ export function CalibrationScreen({ setup, onCalibrated, onBack }: Props) {
         PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
         PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
       ]);
-      return Object.values(results).every(r => r === PermissionsAndroid.RESULTS.GRANTED);
+      return Object.values(results).every(value => value === PermissionsAndroid.RESULTS.GRANTED);
     }
-    const r = await PermissionsAndroid.request(
+    const result = await PermissionsAndroid.request(
       PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
     );
-    return r === PermissionsAndroid.RESULTS.GRANTED;
+    return result === PermissionsAndroid.RESULTS.GRANTED;
   }, []);
 
-  // ── Stabilitetsdetektering ───────────────────────────────────────────────────
+  const finishTableCalibration = useCallback((samples: ImuSample[]) => {
+    const count = samples.length;
+    const gravity = {
+      x: samples.reduce((sum, sample) => sum + sample.accel_x, 0) / count,
+      y: samples.reduce((sum, sample) => sum + sample.accel_y, 0) / count,
+      z: samples.reduce((sum, sample) => sum + sample.accel_z, 0) / count,
+    };
+    const gyroBias = {
+      x: samples.reduce((sum, sample) => sum + sample.gyro_x, 0) / count,
+      y: samples.reduce((sum, sample) => sum + sample.gyro_y, 0) / count,
+      z: samples.reduce((sum, sample) => sum + sample.gyro_z, 0) / count,
+    };
 
-  const processSampleForCalibration = useCallback((sample: ImuSample) => {
-    if (calDoneRef.current) return;
-
-    const gyroMag = Math.sqrt(
-      sample.gyro_x ** 2 + sample.gyro_y ** 2 + sample.gyro_z ** 2,
+    setTableCalibration({
+      gravity,
+      gyro_bias: gyroBias,
+      captured_at: new Date().toISOString(),
+    });
+    setStatusText(
+      mode === 'bounce_sides'
+        ? 'Table calibration ready. Capture bounce side poses next.'
+        : 'Table calibration ready.',
     );
+  }, [mode]);
 
+  const processSampleForTableCalibration = useCallback((sample: ImuSample) => {
+    if (tableDoneRef.current) return;
+
+    const gyroMag = magnitude3(sample.gyro_x, sample.gyro_y, sample.gyro_z);
     if (gyroMag < GYRO_STABLE_THRESHOLD) {
       consecutiveStableRef.current += 1;
       stableBufferRef.current.push(sample);
@@ -203,77 +163,75 @@ export function CalibrationScreen({ setup, onCalibrated, onBack }: Props) {
       setStableCount(consecutiveStableRef.current);
 
       if (consecutiveStableRef.current >= STABLE_SAMPLES_NEEDED) {
-        calDoneRef.current = true;
-        const buf = stableBufferRef.current;
-        const n = buf.length;
-
-        const cal: CalibrationData = {
-          gravity: {
-            x: buf.reduce((s, x) => s + x.accel_x, 0) / n,
-            y: buf.reduce((s, x) => s + x.accel_y, 0) / n,
-            z: buf.reduce((s, x) => s + x.accel_z, 0) / n,
-          },
-          gyro_bias: {
-            x: buf.reduce((s, x) => s + x.gyro_x, 0) / n,
-            y: buf.reduce((s, x) => s + x.gyro_y, 0) / n,
-            z: buf.reduce((s, x) => s + x.gyro_z, 0) / n,
-          },
-        };
-        setCalibration(cal);
-        setCalState('done');
-        calStateRef.current = 'done';
+        tableDoneRef.current = true;
+        finishTableCalibration(stableBufferRef.current);
       }
-    } else {
-      consecutiveStableRef.current = 0;
-      stableBufferRef.current = [];
-      setStableCount(0);
-      if (calStateRef.current !== 'measuring') {
-        setCalState('measuring');
-        calStateRef.current = 'measuring';
-      }
+      return;
     }
-  }, []);
 
-  // ── BLE-notifikation ────────────────────────────────────────────────────────
+    consecutiveStableRef.current = 0;
+    stableBufferRef.current = [];
+    setStableCount(0);
+  }, [finishTableCalibration]);
 
   const handleNotification = useCallback(
-    (_err: BleError | null, char: Characteristic | null) => {
-      if (!char?.value || !char.uuid) return;
-      const parsed = parsePacket(char.uuid, char.value);
+    (_error: BleError | null, characteristic: Characteristic | null) => {
+      if (!characteristic?.value || !characteristic.uuid) return;
+      const parsed = parsePacket(characteristic.uuid, characteristic.value);
       if (!parsed) return;
 
-      const l = latestRef.current;
-      if (parsed.type === 'accel') l.accel = parsed;
-      else if (parsed.type === 'gyro') l.gyro = parsed;
-      else if (parsed.type === 'mag') l.mag = parsed;
+      const latest = latestRef.current;
+      if (parsed.type === 'accel') latest.accel = parsed;
+      else if (parsed.type === 'gyro') latest.gyro = parsed;
+      else latest.mag = parsed;
 
       sampleCountRef.current += 1;
 
       const sample: ImuSample = {
-        accel_x: l.accel.x, accel_y: l.accel.y, accel_z: l.accel.z,
-        gyro_x:  l.gyro.x,  gyro_y:  l.gyro.y,  gyro_z:  l.gyro.z,
-        mag_x:   l.mag.x,   mag_y:   l.mag.y,   mag_z:   l.mag.z,
+        accel_x: latest.accel.x,
+        accel_y: latest.accel.y,
+        accel_z: latest.accel.z,
+        gyro_x: latest.gyro.x,
+        gyro_y: latest.gyro.y,
+        gyro_z: latest.gyro.z,
+        mag_x: latest.mag.x,
+        mag_y: latest.mag.y,
+        mag_z: latest.mag.z,
         ts_ms: Date.now(),
       };
-      processSampleForCalibration(sample);
-    },
-    [processSampleForCalibration],
-  );
 
-  // ── Anslut ──────────────────────────────────────────────────────────────────
+      const poseSnapshot: PoseSnapshot = {
+        accel: {
+          x: sample.accel_x,
+          y: sample.accel_y,
+          z: sample.accel_z,
+        },
+        gyro_mag: magnitude3(sample.gyro_x, sample.gyro_y, sample.gyro_z),
+      };
+      poseBufferRef.current.push(poseSnapshot);
+      if (poseBufferRef.current.length > 60) {
+        poseBufferRef.current.shift();
+      }
+
+      processSampleForTableCalibration(sample);
+    },
+    [processSampleForTableCalibration],
+  );
 
   const connect = useCallback(async () => {
     if (!(await requestPermissions())) {
-      Alert.alert('Behörighet nekad', 'Bluetooth-behörighet krävs.');
+      Alert.alert('Permission denied', 'Bluetooth permission is required.');
       return;
     }
 
     setConnState('scanning');
+    setStatusText('Scanning for AirHive...');
 
     bleManager.startDeviceScan(null, { allowDuplicates: false }, async (error, device) => {
       if (error) {
         setConnState('idle');
-        Alert.alert('Skanningsfel', error.message);
+        setStatusText(null);
+        Alert.alert('Scan error', error.message);
         return;
       }
       if (!device) return;
@@ -283,14 +241,14 @@ export function CalibrationScreen({ setup, onCalibrated, onBack }: Props) {
 
       bleManager.stopDeviceScan();
       setConnState('connecting');
+      setStatusText(`Connecting to ${name}...`);
 
       try {
         const connected = await device.connect();
         await connected.discoverAllServicesAndCharacteristics();
         deviceRef.current = connected;
         setConnState('connected');
-        setCalState('measuring');
-        calStateRef.current = 'measuring';
+        setStatusText('Sensor connected. Start table calibration.');
 
         for (const uuid of [ACCEL_UUID, ACCEL_UUID_ALT, GYRO_UUID, MAG_UUID]) {
           try {
@@ -298,20 +256,22 @@ export function CalibrationScreen({ setup, onCalibrated, onBack }: Props) {
           } catch (_) {}
         }
 
-        let last = 0;
+        let lastCount = 0;
         hzTimerRef.current = setInterval(() => {
-          setSampleHz(sampleCountRef.current - last);
-          last = sampleCountRef.current;
+          setSampleHz(sampleCountRef.current - lastCount);
+          lastCount = sampleCountRef.current;
         }, 1000);
 
         connected.onDisconnected(() => {
           setConnState('idle');
+          setStatusText('Sensor disconnected.');
           setSampleHz(0);
           if (hzTimerRef.current) clearInterval(hzTimerRef.current);
         });
-      } catch (e: any) {
+      } catch (error: any) {
         setConnState('idle');
-        Alert.alert('Anslutning misslyckades', e.message);
+        setStatusText(null);
+        Alert.alert('Connection failed', error?.message ?? 'Unknown error');
       }
     });
   }, [handleNotification, requestPermissions]);
@@ -322,135 +282,195 @@ export function CalibrationScreen({ setup, onCalibrated, onBack }: Props) {
     };
   }, []);
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  const resetTableCalibration = useCallback(() => {
+    tableDoneRef.current = false;
+    stableBufferRef.current = [];
+    consecutiveStableRef.current = 0;
+    setStableCount(0);
+    setTableCalibration(null);
+    setForehandPose(null);
+    setBackhandPose(null);
+    setStatusText('Table calibration reset. Place the sensor flat again.');
+  }, []);
 
-  const progressPct = Math.min(
-    (stableCount / STABLE_SAMPLES_NEEDED) * 100,
-    100,
-  );
+  const capturePose = useCallback((side: 'forehand' | 'backhand') => {
+    if (!tableCalibration) {
+      Alert.alert('Table first', 'Complete table calibration before capturing bounce side poses.');
+      return;
+    }
+
+    const snapshots = poseBufferRef.current.slice(-POSE_SAMPLES_NEEDED);
+    if (snapshots.length < POSE_SAMPLES_NEEDED) {
+      Alert.alert('Too few samples', 'Hold the racket still for another second and try again.');
+      return;
+    }
+
+    const avgGyro = snapshots.reduce((sum, item) => sum + item.gyro_mag, 0) / snapshots.length;
+    if (avgGyro > POSE_GYRO_THRESHOLD) {
+      Alert.alert('Hold still', 'Keep your wrist still when capturing a bounce side pose.');
+      return;
+    }
+
+    const averagePose = normalize(averageVector(snapshots.map(item => item.accel)));
+    if (side === 'forehand') {
+      setForehandPose(averagePose);
+      setStatusText('Forehand-side pose captured.');
+    } else {
+      setBackhandPose(averagePose);
+      setStatusText('Backhand-side pose captured.');
+    }
+  }, [tableCalibration]);
+
+  const start = useCallback(() => {
+    if (!deviceRef.current || !tableCalibration) return;
+
+    const calibration: CalibrationData = {
+      calibration_id: `cal-${Date.now()}`,
+      captured_at: new Date().toISOString(),
+      gravity: tableCalibration.gravity,
+      gyro_bias: tableCalibration.gyro_bias,
+      table: tableCalibration,
+      ...(mode === 'bounce_sides' && forehandPose && backhandPose
+        ? {
+            bounce_sides: {
+              forehand: {
+                side: 'forehand',
+                pose_accel: forehandPose,
+                captured_at: new Date().toISOString(),
+              },
+              backhand: {
+                side: 'backhand',
+                pose_accel: backhandPose,
+                captured_at: new Date().toISOString(),
+              },
+            },
+          }
+        : {}),
+    };
+
+    onCalibrated(calibration, deviceRef.current);
+  }, [backhandPose, forehandPose, mode, onCalibrated, tableCalibration]);
+
+  const tableReady = tableCalibration !== null;
+  const bounceReady = mode === 'table_only' || (!!forehandPose && !!backhandPose);
+  const progressPct = Math.min((stableCount / STABLE_SAMPLES_NEEDED) * 100, 100);
 
   return (
-    <ScrollView style={s.root} contentContainerStyle={s.content}>
+    <ScrollView style={styles.root} contentContainerStyle={styles.content}>
       <StatusBar barStyle="light-content" backgroundColor="#0d0d0d" />
 
-      {/* Header */}
-      <View style={s.header}>
-        <TouchableOpacity onPress={onBack} style={s.backBtn}>
-          <Text style={s.backTxt}>← Tillbaka</Text>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={onBack} style={styles.backBtn}>
+          <Text style={styles.backTxt}>Back</Text>
         </TouchableOpacity>
-        <Text style={s.playerTxt}>
-          {setup.name} · {setup.handedness === 'right' ? 'Höger' : 'Vänster'}hand
+        <Text style={styles.playerTxt}>
+          {setup.name} · {setup.handedness === 'right' ? 'Right' : 'Left'} hand
         </Text>
       </View>
 
-      <Text style={s.title}>Kalibrering</Text>
+      <Text style={styles.title}>Calibration</Text>
+      <Text style={styles.subtitle}>
+        {mode === 'bounce_sides'
+          ? 'Table calibration + bounce side poses for Studs-test.'
+          : 'Table calibration for data collection or internal tooling.'}
+      </Text>
 
-      {/* ── STEG 1: Anslut ── */}
-      {connState !== 'connected' && (
-        <View style={s.stepBox}>
-          <Text style={s.stepNum}>STEG 1 AV 2</Text>
-          <Text style={s.stepTitle}>Anslut sensorn</Text>
-          <Text style={s.stepText}>
-            Se till att AirHive är påslagen och nära telefonen.
+      <View style={styles.stepBox}>
+        <Text style={styles.stepNum}>STEP 1</Text>
+        <Text style={styles.stepTitle}>Connect sensor</Text>
+        <Text style={styles.stepText}>
+          Turn on the AirHive sensor and keep it close to the phone.
+        </Text>
+        <TouchableOpacity
+          style={[styles.actionBtn, connState !== 'idle' && styles.actionBtnBusy]}
+          onPress={connect}
+          disabled={connState !== 'idle'}
+        >
+          <Text style={styles.actionBtnTxt}>
+            {connState === 'idle'
+              ? 'Connect AirHive'
+              : connState === 'scanning'
+                ? 'Scanning...'
+                : connState === 'connecting'
+                  ? 'Connecting...'
+                  : 'Connected'}
           </Text>
-          <TouchableOpacity
-            style={[s.connectBtn, connState !== 'idle' && s.connectBtnBusy]}
-            onPress={connect}
-            disabled={connState !== 'idle'}
-          >
-            <Text style={s.connectBtnTxt}>
-              {connState === 'idle'
-                ? 'Anslut AirHive'
-                : connState === 'scanning'
-                ? 'Skannar efter sensor...'
-                : 'Kopplar upp...'}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      )}
+        </TouchableOpacity>
+        {statusText && <Text style={styles.infoTxt}>{statusText}</Text>}
+      </View>
 
-      {/* ── STEG 2: Lägg på bordet ── */}
-      {connState === 'connected' && calState !== 'done' && (
-        <View style={s.stepBox}>
-          <Text style={s.stepNum}>STEG 2 AV 2  ·  {sampleHz} Hz</Text>
-          <Text style={s.stepTitle}>Lägg sensorn plant på bordet</Text>
-          <Text style={s.stepText}>
-            Placera AirHive-sensorn med <Text style={s.stepEmphasis}>displayen uppåt</Text>, plant och orörlig på bordet.{'\n'}
-            Håll den still tills mätningen är klar (~3 sekunder).
+      {connState === 'connected' && (
+        <View style={styles.stepBox}>
+          <Text style={styles.stepNum}>STEP 2</Text>
+          <Text style={styles.stepTitle}>Table calibration</Text>
+          <Text style={styles.stepText}>
+            Place the sensor flat on a table with the display facing up. This step finds gravity
+            and gyro bias. Keep it completely still for about 3 seconds.
           </Text>
-
-          {/* Visuell guide */}
           <SensorOnTableDiagram />
-
-          {/* Progress */}
-          <View style={s.progressBg}>
-            <View style={[s.progressFill, { width: `${progressPct}%` as any }]} />
+          <Text style={styles.hzTxt}>{sampleHz} Hz</Text>
+          <View style={styles.progressBg}>
+            <View style={[styles.progressFill, { width: `${progressPct}%` as const }]} />
           </View>
-          <Text style={s.progressTxt}>
-            {stableCount < STABLE_SAMPLES_NEEDED
-              ? `Mäter stabilitet... ${stableCount} / ${STABLE_SAMPLES_NEEDED}`
-              : 'Klar!'}
+          <Text style={styles.progressTxt}>
+            {tableReady
+              ? 'Table calibration ready.'
+              : `Collecting stable samples... ${stableCount} / ${STABLE_SAMPLES_NEEDED}`}
           </Text>
-          <Text style={s.hintTxt}>
-            Rör du sensorn nollställs räknaren — håll helt still.
-          </Text>
+          <TouchableOpacity style={styles.linkBtn} onPress={resetTableCalibration}>
+            <Text style={styles.linkTxt}>Reset table calibration</Text>
+          </TouchableOpacity>
         </View>
       )}
 
-      {/* ── Kalibrering klar ── */}
-      {calState === 'done' && calibration && (
-        <>
-          <View style={s.doneBox}>
-            <Text style={s.doneTick}>✓</Text>
-            <Text style={s.doneTitle}>Kalibrering klar!</Text>
-            <Text style={s.doneSubtitle}>
-              Granska att gravitationsvektorn ser rimlig ut nedan:
-            </Text>
-          </View>
+      {tableReady && tableCalibration && (
+        <VectorPreview title="Table gravity" vector={tableCalibration.gravity} />
+      )}
 
-          <GravityIndicator gravity={calibration.gravity} />
-
-          <View style={s.biasBox}>
-            <Text style={s.biasTitle}>GYRO-BIAS (°/s)</Text>
-            <Text style={s.biasTxt}>
-              X {calibration.gyro_bias.x.toFixed(2)}  ·  Y {calibration.gyro_bias.y.toFixed(2)}  ·  Z {calibration.gyro_bias.z.toFixed(2)}
-            </Text>
-          </View>
+      {mode === 'bounce_sides' && tableReady && (
+        <View style={styles.stepBox}>
+          <Text style={styles.stepNum}>STEP 3</Text>
+          <Text style={styles.stepTitle}>Bounce side poses</Text>
+          <Text style={styles.stepText}>
+            Capture one still wrist pose for the forehand side bounce and one for the backhand side
+            bounce. This is only used by Studs-test to decide which racket side was used.
+          </Text>
 
           <TouchableOpacity
-            style={s.startBtn}
-            onPress={() =>
-              deviceRef.current && onCalibrated(calibration, deviceRef.current)
-            }
-            activeOpacity={0.7}
+            style={[styles.secondaryBtn, forehandPose && styles.secondaryBtnReady]}
+            onPress={() => capturePose('forehand')}
           >
-            <Text style={s.startBtnTxt}>Ser bra ut — Börja spela in →</Text>
+            <Text style={[styles.secondaryTxt, forehandPose && styles.secondaryTxtReady]}>
+              {forehandPose ? 'Recapture forehand-side pose' : 'Capture forehand-side pose'}
+            </Text>
           </TouchableOpacity>
+          {forehandPose && <VectorPreview title="Forehand-side pose" vector={forehandPose} />}
 
           <TouchableOpacity
-            style={s.recalBtn}
-            onPress={() => {
-              calDoneRef.current = false;
-              consecutiveStableRef.current = 0;
-              stableBufferRef.current = [];
-              setStableCount(0);
-              setCalibration(null);
-              setCalState('measuring');
-              calStateRef.current = 'measuring';
-            }}
+            style={[styles.secondaryBtn, backhandPose && styles.secondaryBtnReady]}
+            onPress={() => capturePose('backhand')}
           >
-            <Text style={s.recalTxt}>Kalibrera om</Text>
+            <Text style={[styles.secondaryTxt, backhandPose && styles.secondaryTxtReady]}>
+              {backhandPose ? 'Recapture backhand-side pose' : 'Capture backhand-side pose'}
+            </Text>
           </TouchableOpacity>
-        </>
+          {backhandPose && <VectorPreview title="Backhand-side pose" vector={backhandPose} />}
+        </View>
+      )}
+
+      {tableReady && bounceReady && (
+        <TouchableOpacity style={styles.startBtn} onPress={start} activeOpacity={0.7}>
+          <Text style={styles.startBtnTxt}>
+            {mode === 'bounce_sides' ? 'Start Studs-test' : 'Continue to next screen'}
+          </Text>
+        </TouchableOpacity>
       )}
     </ScrollView>
   );
 }
 
-// ── SensorOnTable styles ──────────────────────────────────────────────────────
-
-const d = StyleSheet.create({
-  wrap:       { alignItems: 'center', marginVertical: 20 },
+const diagram = StyleSheet.create({
+  wrap: { alignItems: 'center', marginVertical: 18 },
   sensor: {
     width: 140,
     height: 80,
@@ -462,82 +482,115 @@ const d = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 8,
   },
-  sensorLed:  { width: 10, height: 10, borderRadius: 5, backgroundColor: '#2ecc71', marginBottom: 6 },
+  sensorLed: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#2ecc71',
+    marginBottom: 6,
+  },
   sensorText: { color: '#4a9eff', fontWeight: '700', fontSize: 13 },
-  sensorSub:  { color: '#778', fontSize: 10, marginTop: 2 },
-
-  arrowCol:   { alignItems: 'center', marginBottom: 4 },
-  arrowLine:  { width: 2, height: 20, backgroundColor: '#555' },
+  sensorSub: { color: '#778', fontSize: 10, marginTop: 2 },
+  arrowCol: { alignItems: 'center', marginBottom: 4 },
+  arrowLine: { width: 2, height: 20, backgroundColor: '#555' },
   arrowHead: {
-    width: 0, height: 0,
-    borderLeftWidth: 6, borderRightWidth: 6, borderTopWidth: 10,
-    borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#555',
+    width: 0,
+    height: 0,
+    borderLeftWidth: 6,
+    borderRightWidth: 6,
+    borderTopWidth: 10,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: '#555',
     marginBottom: 2,
   },
   arrowLabel: { color: '#778', fontSize: 10 },
-
-  tableRow:   { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  tableLine:  { flex: 1, height: 2, backgroundColor: '#444' },
+  tableRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  tableLine: { flex: 1, height: 2, backgroundColor: '#444' },
   tableLabel: { color: '#aaa', fontSize: 11, fontWeight: '600', letterSpacing: 2 },
 });
 
-// ── GravityIndicator styles ───────────────────────────────────────────────────
-
-const g = StyleSheet.create({
-  wrap:         { backgroundColor: '#111', borderRadius: 12, padding: 16, marginBottom: 16 },
-  title:        { color: '#666', fontSize: 10, letterSpacing: 2, marginBottom: 12 },
-  row:          { flexDirection: 'row', alignItems: 'center', marginBottom: 8 },
-  axisLabel:    { color: '#666', fontSize: 13, fontWeight: '700', width: 20 },
-  axisLabelDom: { color: '#2ecc71' },
-  barBg:        { flex: 1, height: 8, backgroundColor: '#1a1a1a', borderRadius: 4, marginHorizontal: 10, overflow: 'hidden' },
-  barFill:      { height: '100%', borderRadius: 4 },
-  barDom:       { backgroundColor: '#2ecc71' },
-  barOther:     { backgroundColor: '#2a2a2a' },
-  valText:      { color: '#666', fontSize: 11, width: 52, textAlign: 'right', fontFamily: 'monospace' },
-  valTextDom:   { color: '#2ecc71' },
-  hint:         { color: '#2ecc71', fontSize: 12, marginTop: 8, textAlign: 'center' },
+const preview = StyleSheet.create({
+  wrap: {
+    backgroundColor: '#111',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+  },
+  title: {
+    color: '#777',
+    fontSize: 11,
+    letterSpacing: 1.5,
+    marginBottom: 8,
+  },
+  value: {
+    color: '#cfd7ff',
+    fontSize: 13,
+    fontFamily: 'monospace',
+  },
 });
 
-// ── Main styles ───────────────────────────────────────────────────────────────
-
-const s = StyleSheet.create({
-  root:    { flex: 1, backgroundColor: '#0d0d0d' },
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: '#0d0d0d' },
   content: { padding: 20, paddingBottom: 40 },
-
-  header:    { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
-  backBtn:   { padding: 4 },
-  backTxt:   { color: '#888', fontSize: 14 },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 20,
+  },
+  backBtn: { padding: 4 },
+  backTxt: { color: '#888', fontSize: 14 },
   playerTxt: { color: '#666', fontSize: 12 },
-
-  title:     { color: '#fff', fontSize: 26, fontWeight: '800', marginBottom: 20 },
-
-  stepBox:      { backgroundColor: '#111', borderRadius: 14, padding: 20, marginBottom: 16 },
-  stepNum:      { color: '#555', fontSize: 10, letterSpacing: 2, marginBottom: 6 },
-  stepTitle:    { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 10 },
-  stepText:     { color: '#888', fontSize: 14, lineHeight: 22 },
-  stepEmphasis: { color: '#fff', fontWeight: '700' },
-
-  connectBtn:     { backgroundColor: '#0d2d0d', borderRadius: 12, padding: 18, alignItems: 'center', marginTop: 16 },
-  connectBtnBusy: { backgroundColor: '#1a1a1a' },
-  connectBtnTxt:  { color: '#2ecc71', fontWeight: '700', fontSize: 16 },
-
-  progressBg:   { height: 8, backgroundColor: '#1a1a1a', borderRadius: 4, marginTop: 20, marginBottom: 10, overflow: 'hidden' },
-  progressFill: { height: '100%', backgroundColor: '#2ecc71', borderRadius: 4 },
-  progressTxt:  { color: '#aaa', fontSize: 13, textAlign: 'center' },
-  hintTxt:      { color: '#666', fontSize: 12, textAlign: 'center', marginTop: 8 },
-
-  doneBox:      { backgroundColor: '#0d2d1a', borderRadius: 14, padding: 20, alignItems: 'center', marginBottom: 16 },
-  doneTick:     { fontSize: 40, marginBottom: 6 },
-  doneTitle:    { color: '#2ecc71', fontSize: 22, fontWeight: '800', marginBottom: 4 },
-  doneSubtitle: { color: '#888', fontSize: 13 },
-
-  biasBox:   { backgroundColor: '#111', borderRadius: 10, padding: 14, marginBottom: 16 },
-  biasTitle: { color: '#555', fontSize: 10, letterSpacing: 2, marginBottom: 6 },
-  biasTxt:   { color: '#888', fontSize: 12, fontFamily: 'monospace' },
-
-  startBtn:    { backgroundColor: '#0d2d0d', borderRadius: 12, padding: 20, alignItems: 'center', marginBottom: 12 },
+  title: { color: '#fff', fontSize: 28, fontWeight: '800' },
+  subtitle: { color: '#777', fontSize: 14, marginTop: 6, marginBottom: 20, lineHeight: 20 },
+  stepBox: {
+    backgroundColor: '#111',
+    borderRadius: 14,
+    padding: 20,
+    marginBottom: 16,
+  },
+  stepNum: { color: '#555', fontSize: 10, letterSpacing: 2, marginBottom: 6 },
+  stepTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 10 },
+  stepText: { color: '#888', fontSize: 14, lineHeight: 22 },
+  actionBtn: {
+    backgroundColor: '#0d2d0d',
+    borderRadius: 12,
+    padding: 18,
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  actionBtnBusy: { backgroundColor: '#1a1a1a' },
+  actionBtnTxt: { color: '#2ecc71', fontWeight: '700', fontSize: 16 },
+  infoTxt: { color: '#f5c76d', fontSize: 12, marginTop: 12, lineHeight: 18 },
+  hzTxt: { color: '#aaa', fontSize: 12, textAlign: 'center', marginBottom: 10 },
+  progressBg: {
+    height: 8,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 4,
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  progressFill: { height: '100%', backgroundColor: '#2ecc71' },
+  progressTxt: { color: '#aaa', fontSize: 13, textAlign: 'center' },
+  linkBtn: { marginTop: 12, alignSelf: 'center' },
+  linkTxt: { color: '#777', fontSize: 12 },
+  secondaryBtn: {
+    backgroundColor: '#15152a',
+    borderRadius: 12,
+    padding: 16,
+    alignItems: 'center',
+    marginTop: 14,
+  },
+  secondaryBtnReady: { backgroundColor: '#0d1f33' },
+  secondaryTxt: { color: '#c9d0ff', fontWeight: '700', fontSize: 14 },
+  secondaryTxtReady: { color: '#4a9eff' },
+  startBtn: {
+    backgroundColor: '#0d2d0d',
+    borderRadius: 12,
+    padding: 20,
+    alignItems: 'center',
+    marginTop: 8,
+  },
   startBtnTxt: { color: '#2ecc71', fontWeight: '800', fontSize: 17, letterSpacing: 1 },
-
-  recalBtn:  { padding: 14, alignItems: 'center' },
-  recalTxt:  { color: '#666', fontSize: 14 },
 });

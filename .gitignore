@@ -12,6 +12,10 @@ __pycache__/
 venv/
 .env
 
+# Local dependency/debug downloads
+tmp_media3_*/
+tmp_media3_*.zip
+
 # Model artifacts (keep .tflite in git, exclude large checkpoints)
 *.pkl
 *.h5

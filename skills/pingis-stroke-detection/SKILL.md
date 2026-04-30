@@ -1,3 +1,8 @@
+---
+name: pingis-stroke-detection
+description: Work on pingis AirHive IMU collection, stroke detection, bounce-motion experiments, preprocessing, training, model export, and scripts under this skill.
+---
+
 # Skill: pingis-stroke-detection
 
 ## Trigger
@@ -56,6 +61,9 @@ ImuSample stream  ←── same contract as berg-airhive-imu-3d-view skill
 - `scripts/preprocess.py` — Window extraction + feature engineering
 - `scripts/train_rf.py` — Phase 1 model training
 - `scripts/train_cnn.py` — Phase 2 CNN + TFLite export
+- `scripts/preprocess_bounce_imu.py` — Build a binary bounce-contact IMU dataset from reviewed audio + IMU takes
+- `scripts/train_rf_bounce_imu.py` — Train the first bounce-contact RandomForest
+- `scripts/export_bounce_imu_model_json.py` — Export bounce IMU RF to app JSON when data exists
 - `scripts/visualize_features.py` — Plot raw sensor data to verify labels
 - `scripts/infer_test.py` — Offline inference test
 - `assets/DataCollectionScreen.tsx` — React Native data collection component

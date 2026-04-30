@@ -1,0 +1,4 @@
+interface:
+  display_name: "GitHub CI Fix"
+  short_description: "Fix CI and build failures safely"
+  default_prompt: "Use $github-ci-fix to inspect failing CI or build logs, find the root cause, make the smallest safe fix, and run relevant validation."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pingis Stroke Detection"
+  short_description: "Train and debug pingis AirHive IMU models"
+  default_prompt: "Use $pingis-stroke-detection for AirHive IMU collection, stroke and bounce-motion preprocessing, RandomForest training, model export, and future audio-plus-IMU fusion work."

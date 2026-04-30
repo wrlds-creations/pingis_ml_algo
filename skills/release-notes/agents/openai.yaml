@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Notes"
+  short_description: "Draft customer-readable change summaries"
+  default_prompt: "Use $release-notes to draft release notes or a PR summary from commits, merged PRs, or my provided change list."

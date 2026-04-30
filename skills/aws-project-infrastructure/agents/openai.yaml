@@ -1,0 +1,4 @@
+interface:
+  display_name: "AWS Project Infrastructure"
+  short_description: "Govern AWS tags, IaC, CI/CD, and inventory"
+  default_prompt: "Use $aws-project-infrastructure to plan or change AWS resources with WRLDS tags, safe CI/CD, and AWS_RESOURCES.md inventory updates."

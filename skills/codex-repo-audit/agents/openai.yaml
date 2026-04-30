@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Repo Audit"
+  short_description: "Check a repo for Codex-readiness"
+  default_prompt: "Use $codex-repo-audit to inspect a repository for WRLDS Codex readiness and list gaps in context, decisions, validation, AWS inventory, and reusable skills."

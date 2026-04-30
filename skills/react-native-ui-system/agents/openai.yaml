@@ -1,0 +1,4 @@
+interface:
+  display_name: "React Native UI System"
+  short_description: "Choose the right RN UI approach"
+  default_prompt: "Use $react-native-ui-system to choose a React Native or cross-platform UI system based on app context, brand needs, accessibility, and long-term ownership."

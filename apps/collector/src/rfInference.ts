@@ -15,10 +15,11 @@ type LeafNode     = number[];
 type Node         = InternalNode | LeafNode;
 
 const MODEL = modelJson as {
-  labels:       string[];
-  scaler_mean:  number[];
-  scaler_std:   number[];
-  trees:        Node[][];
+  labels:        string[];
+  feature_names: string[];
+  scaler_mean:   number[];
+  scaler_std:    number[];
+  trees:         Node[][];
 };
 
 const N_CLASSES = MODEL.labels.length;
@@ -60,10 +61,10 @@ export interface Prediction {
 }
 
 export function rfPredict(features: Record<string, number>): Prediction {
-  // Bygg feature-vektor i rätt ordning (samma som träning)
-  const keys = Object.keys(features);
-  const raw  = new Float64Array(keys.length);
-  for (let i = 0; i < keys.length; i++) raw[i] = features[keys[i]];
+  // Bygg feature-vektor i EXAKT samma ordning som modellen tränades med
+  const names = MODEL.feature_names;
+  const raw   = new Float64Array(names.length);
+  for (let i = 0; i < names.length; i++) raw[i] = features[names[i]] ?? 0;
 
   // Standardisera (z-score) med sparad scaler
   const scaled = new Float64Array(raw.length);

@@ -25,4 +25,13 @@ subprojects {
     tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
         kotlinOptions.jvmTarget = "17"
     }
+
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == "androidx.media3") {
+                details.useVersion("1.9.0")
+                details.because("VisionCamera CameraX video pulls Media3 1.9.0; align react-native-video to the same runtime API.")
+            }
+        }
+    }
 }

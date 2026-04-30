@@ -11,6 +11,8 @@ import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.cos
+import kotlin.math.log10
 import kotlin.math.sqrt
 
 /**
@@ -35,18 +37,29 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         const val POST_SAMPLES  = 15_435        // 700 ms
         const val CLIP_SAMPLES  = SR            // 22 050 = 1 s
         const val RING_SIZE     = SR * 3        // 3 s cirkulär buffer
-        const val RETRIGGER_MS  = 150L          // min ms mellan onsets
+        const val RETRIGGER_MS  = 380L          // min ms mellan onsets (förhindrar dubbeldetektering)
 
         // Adaptiv tröskel: hur många gånger starkare än bakgrunden en studs måste vara
         const val ONSET_RATIO   = 2.5
 
-        // Bakgrundsestimat: rullande medel över de senaste N frames (500ms = 50 frames)
-        const val BG_FRAMES     = 50
+        // Bakgrundsestimat: rullande medel över de senaste N frames (300ms = 30 frames)
+        const val BG_FRAMES     = 30
 
         // Absolut minimumtröskel — ignorerar extremt tysta rum (undviker noise floor)
-        const val ABS_MIN_RMS   = 0.005
+        const val ABS_MIN_RMS   = 0.003
 
         const val EVENT_NAME    = "onBounceDetected"
+
+        // Spektral gate: avvisa icke-bollljud (prat, klapp, steg)
+        const val SPECTRAL_FFT  = 256
+        const val BALL_LO_HZ    = 200.0
+        const val BALL_HI_HZ    = 6000.0
+        const val MIN_BALL_RATIO = 0.55  // minst 55% av energin i boll-bandet
+        const val MAX_FLATNESS   = 0.6   // spectral flatness > detta = broadband brus
+
+        // Duration gate: avvisa sustained ljud (prat, musik)
+        const val SUSTAIN_FRAMES    = 8   // 80ms (8 × 10ms)
+        const val SUSTAIN_MAX_ABOVE = 5   // om > 5 av 8 frames fortfarande höga → skippa
     }
 
     @Volatile private var isRunning     = false
@@ -141,12 +154,21 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                     val adaptiveThreshold = maxOf(bgAvg * onsetRatio, ABS_MIN_RMS)
 
                     if (rms >= adaptiveThreshold) {
+                        if (!spectralGate(frame, read)) {
+                            bgBuffer[bgIdx % BG_FRAMES] = rms
+                            bgIdx++
+                            if (bgIdx >= BG_FRAMES) bgFilled = true
+                            continue
+                        }
+
                         lastOnsetTime = now
                         val capturedOnsetPos = writePos - read
                         scheduleExtraction(capturedOnsetPos)
-                        // Fyll bakgrundsbuffern med onset-RMS så att efterklangen
-                        // inte triggar en ny onset (eko ser "normal" ut)
-                        bgBuffer.fill(rms)
+                        // Höj bakgrunden måttligt — inte till onset-nivå (som
+                        // blockerar nästa slag i 500ms) utan till 2× bakgrunden.
+                        // RETRIGGER_MS (300ms) hanterar eko/decay.
+                        val elevatedBg = bgAvg * 2.0
+                        bgBuffer.fill(elevatedBg)
                         bgIdx = 0
                         bgFilled = true
                     } else {
@@ -196,5 +218,97 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         var sum = 0.0
         for (i in 0 until n) sum += (frame[i].toDouble() / 32768.0).let { it * it }
         return sqrt(sum / n)
+    }
+
+    // ── Spektral gate: avvisar icke-boll-ljud ────────────────────────────────
+
+    /**
+     * Kör en snabb 256-punkts FFT på onset-framen och kontrollerar:
+     * 1. Att minst MIN_BALL_RATIO av energin ligger i 200-6000 Hz (boll-bandet)
+     * 2. Att spectral flatness < MAX_FLATNESS (inte broadband brus/klapp)
+     *
+     * Returnerar true om framen passerar (sannolikt boll-studs).
+     */
+    private fun spectralGate(frame: ShortArray, n: Int): Boolean {
+        val nFft = SPECTRAL_FFT
+        val re = DoubleArray(nFft)
+        val im = DoubleArray(nFft)
+
+        // Hann-fönster + ladda samples
+        val len = minOf(n, nFft)
+        for (i in 0 until len) {
+            val w = 0.5 - 0.5 * cos(2.0 * Math.PI * i / (len - 1))
+            re[i] = frame[i].toDouble() / 32768.0 * w
+        }
+
+        // Iterativ FFT (radix-2, Cooley-Tukey)
+        var j = 0
+        for (i in 1 until nFft) {
+            var bit = nFft shr 1
+            while (j and bit != 0) { j = j xor bit; bit = bit shr 1 }
+            j = j xor bit
+            if (i < j) {
+                val tr = re[i]; re[i] = re[j]; re[j] = tr
+                val ti = im[i]; im[i] = im[j]; im[j] = ti
+            }
+        }
+        var half = 1
+        while (half < nFft) {
+            val ang = -Math.PI / half
+            val wr0 = cos(ang)
+            val wi0 = kotlin.math.sin(ang)
+            for (i in 0 until nFft step half * 2) {
+                var wr = 1.0; var wi = 0.0
+                for (k in 0 until half) {
+                    val ur = re[i + k];          val ui = im[i + k]
+                    val vr = re[i+k+half]*wr - im[i+k+half]*wi
+                    val vi = re[i+k+half]*wi + im[i+k+half]*wr
+                    re[i + k]       = ur + vr
+                    im[i + k]       = ui + vi
+                    re[i + k + half] = ur - vr
+                    im[i + k + half] = ui - vi
+                    val nwr = wr * wr0 - wi * wi0
+                    wi = wr * wi0 + wi * wr0
+                    wr = nwr
+                }
+            }
+            half *= 2
+        }
+
+        // Power-spektrum (bara positiva frekvenser)
+        val nBins = nFft / 2 + 1
+        var totalEnergy = 0.0
+        var ballEnergy = 0.0
+        var logSum = 0.0
+        var arithSum = 0.0
+        val binHz = SR.toDouble() / nFft
+
+        for (k in 1 until nBins) {  // skip DC
+            val power = re[k] * re[k] + im[k] * im[k]
+            val freq = k * binHz
+            totalEnergy += power
+            if (freq in BALL_LO_HZ..BALL_HI_HZ) ballEnergy += power
+
+            // Spectral flatness
+            val p = power + 1e-10
+            logSum += kotlin.math.ln(p)
+            arithSum += p
+        }
+
+        // Check 1: tillräckligt med energi i boll-bandet?
+        if (totalEnergy > 0 && ballEnergy / totalEnergy < MIN_BALL_RATIO) {
+            return false
+        }
+
+        // Check 2: spectral flatness (broadband brus = hög flatness)
+        val validBins = nBins - 1
+        if (validBins > 0 && arithSum > 0) {
+            val geoMean = kotlin.math.exp(logSum / validBins)
+            val ariMean = arithSum / validBins
+            val flatness = geoMean / ariMean
+            if (flatness > MAX_FLATNESS) return false
+        }
+
+        return true
     }
 }
