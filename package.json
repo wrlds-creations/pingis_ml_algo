@@ -1,0 +1,12 @@
+{
+  "name": "pingis-ml-algo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "WRLDS pingis ML app workflow and validation helpers.",
+  "scripts": {
+    "validate": "npm run validate:template && npm run validate:skills && npm run validate:aws",
+    "validate:template": "node scripts/validate-template.js",
+    "validate:skills": "node scripts/validate-skills.js",
+    "validate:aws": "node scripts/validate-aws-tags.js"
+  }
+}

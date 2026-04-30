@@ -1,0 +1,4 @@
+interface:
+  display_name: "React Native Amplify"
+  short_description: "Add Amplify with WRLDS AWS governance"
+  default_prompt: "Use $react-native-amplify to decide whether Amplify fits my React Native or Expo app, choose Gen 2 or Gen 1, and coordinate AWS tags and inventory."

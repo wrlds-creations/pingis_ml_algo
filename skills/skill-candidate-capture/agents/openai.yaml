@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill Candidate Capture"
+  short_description: "Spot reusable workflows worth preserving"
+  default_prompt: "Use $skill-candidate-capture to decide whether the workflow we just solved should become a reusable WRLDS skill, then propose the skill shape."

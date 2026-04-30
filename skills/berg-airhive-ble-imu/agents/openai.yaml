@@ -1,0 +1,4 @@
+interface:
+  display_name: "BERG AirHive BLE IMU"
+  short_description: "Preserve validated AirHive BLE IMU behavior"
+  default_prompt: "Use $berg-airhive-ble-imu to integrate or debug BERG AirHive BLE IMU parsing, baseline quaternion orientation, pose calibration, and renderer adaptation without changing validated behavior accidentally."
