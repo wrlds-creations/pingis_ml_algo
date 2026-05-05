@@ -22,6 +22,7 @@ from pathlib import Path
 SAMPLE_RATE = 50          # Hz (approximate; BERG AirHive emits ~50 samples/sec)
 WINDOW_MS = 800           # ms — total window around each event
 WINDOW_SAMPLES = 40       # WINDOW_MS / (1000 / SAMPLE_RATE)
+DT_S = WINDOW_MS / WINDOW_SAMPLES / 1000.0
 CHANNELS = ["accel_x", "accel_y", "accel_z", "gyro_x", "gyro_y", "gyro_z"]
 
 RAW_DIR = Path("data/raw")
@@ -48,6 +49,18 @@ def extract_features(window: np.ndarray) -> dict:
         features[f"{ch}_max"] = float(np.max(x))
         features[f"{ch}_ptp"] = float(np.ptp(x))                    # peak-to-peak
         features[f"{ch}_rms"] = float(np.sqrt(np.mean(x ** 2)))
+        if ch in {"accel_x", "gyro_x"}:
+            midpoint = max(1, len(x) // 2)
+            pre = x[:midpoint]
+            post = x[midpoint:]
+            pre_mean = float(np.mean(pre))
+            post_mean = float(np.mean(post)) if len(post) else pre_mean
+            features[f"{ch}_signed_integral"] = float(np.sum(x) * DT_S)
+            features[f"{ch}_pre_mean"] = pre_mean
+            features[f"{ch}_post_mean"] = post_mean
+            features[f"{ch}_post_minus_pre"] = float(post_mean - pre_mean)
+            features[f"{ch}_positive_peak"] = float(np.max(x))
+            features[f"{ch}_negative_peak"] = float(np.min(x))
 
     # Magnitude features (orientation-independent)
     accel = window[:, 0:3].astype(float)
@@ -63,6 +76,16 @@ def extract_features(window: np.ndarray) -> dict:
     features["gyro_mag_peak"] = float(np.max(gyro_mag))
 
     return features
+
+
+def add_handedness_normalized_x_features(features: dict, handedness: str) -> None:
+    sign = -1.0 if handedness == "left" else 1.0
+    features["handedness_sign"] = sign
+    for channel in ("accel_x", "gyro_x"):
+        for suffix in ("mean", "signed_integral", "pre_mean", "post_mean", "post_minus_pre"):
+            key = f"{channel}_{suffix}"
+            if key in features:
+                features[f"{key}_hand_norm"] = float(features[key] * sign)
 
 
 def extract_window(samples: list[dict], center_idx: int) -> np.ndarray | None:
@@ -216,6 +239,7 @@ def main():
                 continue
 
             features = extract_features(window)
+            add_handedness_normalized_x_features(features, handedness)
             features["label"] = label
             features["stroke_type"] = stroke_type
             features["player_name"] = player_name

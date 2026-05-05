@@ -7,7 +7,7 @@ export const GYRO_UUID = '07C80004-07C8-07C8-07C8-07C807C807C8';
 export const MAG_UUID = '07C80010-07C8-07C8-07C8-07C807C807C8';
 
 export type ParsedPacket =
-  | { type: 'accel' | 'gyro' | 'mag'; x: number; y: number; z: number }
+  | { type: 'accel' | 'gyro' | 'mag'; x: number; y: number; z: number; sensor_ts: number }
   | null;
 
 export function parsePacket(uuid: string, base64Data: string): ParsedPacket {
@@ -19,10 +19,11 @@ export function parsePacket(uuid: string, base64Data: string): ParsedPacket {
   const x = view.getInt16(0, false);
   const y = view.getInt16(2, false);
   const z = view.getInt16(4, false);
+  const sensor_ts = (bytes[6] << 16) | (bytes[7] << 8) | bytes[8];
   const upper = uuid.toUpperCase();
-  if (upper === ACCEL_UUID || upper === ACCEL_UUID_ALT) return { type: 'accel', x, y, z };
-  if (upper === GYRO_UUID) return { type: 'gyro', x, y, z };
-  if (upper === MAG_UUID) return { type: 'mag', x: -x / 10, y: -y / 10, z: -z / 10 };
+  if (upper === ACCEL_UUID || upper === ACCEL_UUID_ALT) return { type: 'accel', x, y, z, sensor_ts };
+  if (upper === GYRO_UUID) return { type: 'gyro', x, y, z, sensor_ts };
+  if (upper === MAG_UUID) return { type: 'mag', x: -x / 10, y: -y / 10, z: -z / 10, sensor_ts };
   return null;
 }
 

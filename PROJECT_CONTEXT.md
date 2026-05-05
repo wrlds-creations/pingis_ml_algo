@@ -39,7 +39,7 @@ This file is the living project memory for Codex and WRLDS. Use it together with
 ## Product Requirements
 
 - Core user flows: Collect takes on-device, review markers, save session JSON/media, pull data to computer, train models, export app artifacts, install test APK, validate live.
-- Required app surfaces: Audio collection, audio review, `Studsdetektor`, `Studs fritt`, `Studs vaxla sida`, calibration/setup, and future IMU collection/test surfaces.
+- Required app surfaces: Audio collection, audio review, `Audio plus IMU` with `Racketstuds` and `Playing` scenarios, `Studsdetektor`, `Studs fritt`, `Studs vaxla sida`, calibration/setup, and future IMU collection/test surfaces.
 - Performance requirements: Live counting must avoid duplicate counts and keep latency low enough for interactive testing.
 - Offline requirements: Local deterministic training must work from pulled session files without cloud services.
 - Accessibility requirements: TBD.
@@ -80,6 +80,10 @@ This file is the living project memory for Codex and WRLDS. Use it together with
 ## Data Model
 
 - Main entities: Audio session files, takes/events, review markers, waveform/audio clips, model datasets, model artifacts.
+- Audio review markers now carry explicit `review_status`, `contact_kind`, `not_racket_kind`, and `bounce_side` fields. `ignore` means skipped data, not a negative label.
+- Playing review markers are intentionally compact: human labels are `forehand_hit`, `backhand_hit`, or `table_bounce`; auto-candidates carry audio confidence and can be saved as `filtered` so they do not become training truth.
+- Audio+IMU takes store AirHive `sensor_ts`, absolute `received_at_ms`, and take-relative `take_ts_ms` for IMU samples, plus per-take target/measured sample-rate and quality metadata.
+- Audio session events now distinguish high-level `scenario` (`audio_sound`, `racket_bouncing`, `playing`) from detailed `scenario_id`; racket-bounce side coverage is stored as `bounce_context` (`forehand_side`, `backhand_side`, `mixed`).
 - Data ownership: TBD.
 - Data retention: Raw training data is local and can be large; keep `/data/` gitignored.
 - Data import/export requirements: Pull `audio_session_*.json` and matching media folders from device storage into local raw data folders.
@@ -88,9 +92,9 @@ This file is the living project memory for Codex and WRLDS. Use it together with
 
 - Hardware involved: Motorola Android device, microphone, camera for review support, AirHive IMU sensor for future fusion.
 - Sensor protocols: AirHive BLE details live in local AirHive skills.
-- BLE requirements: AirHive stream support exists but active product focus is audio.
+- BLE requirements: AirHive stream support exists; raw synced collection targets 150 Hz when the sensor/BLE path is stable, but the app reports measured rate instead of assuming it.
 - Firmware assumptions: TBD.
-- Calibration requirements: AirHive calibration exists for synced collection, but IMU model work is paused.
+- Calibration requirements: AirHive/table-baseline is required for synced IMU capture; FH/BH pose calibration is optional helper metadata for Audio plus IMU and is not a forehand/backhand ground-truth label.
 
 ## Active Models
 
@@ -102,10 +106,10 @@ This file is the living project memory for Codex and WRLDS. Use it together with
 
 ## Current Known Problems
 
-- One physical racket contact can sometimes count twice, especially with catch/after-sound.
-- Forehand/backhand-style racket contacts are under-covered and can be missed.
-- Floor bounce rejection is improved but not solved.
-- Review video/audio offset exists but is not the current priority unless it blocks labeling.
+- One physical racket contact can sometimes count twice, especially with catch/after-sound; live JS now adds `contact_group` debug and duplicate suppression, but Motorola validation is still required.
+- Collection modes are separated: `Ljudinsamling` is audio-only sound data for racket/table/floor/noise; `Audio plus IMU` contains `Racketstuds` for controlled racket-bounce IMU and `Playing` for longer review-first sequences. The old separate `Fri inspelning` card is hidden from the startsida.
+- Floor/table/catch-after-sound rejection now requires reviewed hard-negative takes before primary contact training.
+- Review video/audio offset is handled in Review with saved `audio_origin_in_video_ms`, per-take `video_sync_offset_ms`, and an optional clap/tap sync event at the start of new takes.
 
 ## Commands
 

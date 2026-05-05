@@ -16,8 +16,8 @@ Load this skill when working on:
 Collect labeled audio clips of ping pong ball bounces and train a machine learning
 model that can distinguish between:
 - `racket_bounce` — ball hitting racket rubber
-- `table_bounce` — ball bouncing on the table
-- `floor_bounce` — ball missing the table and hitting the floor
+- `table_bounce` — ball bouncing on an actual ping-pong table or table-like playing surface relevant to STIGA Smart Pingis, not an arbitrary desk/table
+- `floor_bounce` — ball bouncing on the floor
 - `noise` — background sounds (shouting, applause, conversation)
 
 ## Architecture Overview

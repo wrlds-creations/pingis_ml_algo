@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import {
+  Alert,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -13,9 +14,11 @@ import {
 import type { PlayerSetup } from './types';
 
 interface Props {
-  onCollectionMode: (setup: PlayerSetup) => void;
+  onCollectionMode?: (setup: PlayerSetup) => void;
   onAudioMode?: (setup: PlayerSetup) => void;
   onBounceAudioImuMode?: (setup: PlayerSetup) => void;
+  onFreeRecordingMode?: (setup: PlayerSetup) => void;
+  onFreeRecordingImuMode?: (setup: PlayerSetup) => void;
   onLiveMode?: (setup: PlayerSetup) => void;
   onBounceFreeMode?: (setup: PlayerSetup) => void;
   onBounceAlternatingMode?: (setup: PlayerSetup) => void;
@@ -25,6 +28,8 @@ export function SetupScreen({
   onCollectionMode,
   onAudioMode,
   onBounceAudioImuMode,
+  onFreeRecordingMode,
+  onFreeRecordingImuMode,
   onLiveMode,
   onBounceFreeMode,
   onBounceAlternatingMode,
@@ -34,6 +39,22 @@ export function SetupScreen({
 
   const canContinue = name.trim().length > 0;
   const setup = { name: name.trim(), handedness };
+  const openFreeRecordingChoice = () => {
+    if (!canContinue || !onFreeRecordingMode) return;
+    if (!onFreeRecordingImuMode) {
+      onFreeRecordingMode(setup);
+      return;
+    }
+    Alert.alert(
+      'Fri inspelning',
+      'Välj om du vill spela in med AirHive IMU eller bara video + ljud.',
+      [
+        { text: 'Video + ljud', onPress: () => onFreeRecordingMode(setup) },
+        { text: 'Med AirHive IMU', onPress: () => onFreeRecordingImuMode(setup) },
+        { text: 'Avbryt', style: 'cancel' },
+      ],
+    );
+  };
 
   return (
     <KeyboardAvoidingView
@@ -124,18 +145,20 @@ export function SetupScreen({
         )}
 
         <Text style={styles.sectionLabel}>DATA</Text>
-        <ModeButton
-          disabled={!canContinue}
-          title="Datainsamling"
-          subtitle="Collect labeled IMU sessions for model training"
-          colorStyle="darkGreen"
-          onPress={() => canContinue && onCollectionMode(setup)}
-        />
+        {onCollectionMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Datainsamling"
+            subtitle="Collect labeled IMU sessions for model training"
+            colorStyle="darkGreen"
+            onPress={() => canContinue && onCollectionMode(setup)}
+          />
+        )}
         {onAudioMode && (
           <ModeButton
             disabled={!canContinue}
-            title="Ljud-insamling"
-            subtitle="Record labeled bounce sounds"
+            title="Ljudinsamling"
+            subtitle="Spela in ljudklasser utan IMU: racket, bord, golv och brus."
             colorStyle="purple"
             onPress={() => canContinue && onAudioMode(setup)}
           />
@@ -143,10 +166,19 @@ export function SetupScreen({
         {onBounceAudioImuMode && (
           <ModeButton
             disabled={!canContinue}
-            title="Studs audio + IMU"
-            subtitle="Review audio as usual, but save synchronized AirHive IMU for a future bounce model"
+            title="Audio plus IMU"
+            subtitle="Samla ljud och rörelse tillsammans: racketstuds eller playing."
             colorStyle="blue"
             onPress={() => canContinue && onBounceAudioImuMode(setup)}
+          />
+        )}
+        {onFreeRecordingMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Fri inspelning"
+            subtitle="Spela in längre sekvenser med video, ljud och IMU. Märk händelser i efterhand."
+            colorStyle="darkGreen"
+            onPress={openFreeRecordingChoice}
           />
         )}
       </ScrollView>

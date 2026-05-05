@@ -453,6 +453,7 @@ export function StrokeTestScreen({ setup, calibration, device, onDone }: Props) 
       if (!isRunningRef.current) return;
 
       const now = Date.now();
+      const takeTsMs = sessionStartRef.current === null ? 0 : Math.max(0, now - sessionStartRef.current);
       sampleLogRef.current.push({
         accel_x: latest.accel.x - calibration.gravity.x,
         accel_y: latest.accel.y - calibration.gravity.y,
@@ -464,6 +465,9 @@ export function StrokeTestScreen({ setup, calibration, device, onDone }: Props) 
         mag_y: latest.mag.y,
         mag_z: latest.mag.z,
         ts_ms: now,
+        received_at_ms: now,
+        take_ts_ms: takeTsMs,
+        sensor_ts: parsed.sensor_ts,
       });
 
       if (now - lastInferenceAtRef.current < STEP_MS) return;

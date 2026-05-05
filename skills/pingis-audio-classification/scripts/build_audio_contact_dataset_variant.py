@@ -4,17 +4,17 @@ build_audio_contact_dataset_variant.py
 Build binary racket-contact dataset variants from raw audio sessions.
 
 Modes:
-  reviewed_only
+  human_reviewed / reviewed_only
     Use only reviewed markers.
 
-  trusted_legacy
+  legacy_hybrid / trusted_legacy
     Use reviewed markers plus explicit one-second legacy clips.
 
-  all_legacy
+  bootstrap / all_legacy
     Use reviewed markers plus all legacy clips, including auto/onset-derived ones.
 
 Run:
-  python skills/pingis-audio-classification/scripts/build_audio_contact_dataset_variant.py --mode reviewed_only
+  python skills/pingis-audio-classification/scripts/build_audio_contact_dataset_variant.py --mode human_reviewed
 """
 
 from __future__ import annotations
@@ -32,12 +32,16 @@ from preprocess_audio import (
     OUT_DIR,
     RAW_DIR,
     TARGET_SR,
+    contact_kind_for,
     extract_clip_around_ms,
     extract_clips_chunks,
     extract_clips_onset,
     extract_features,
     load_audio,
     mix_with_noise,
+    multiclass_label_for_marker,
+    not_racket_kind_for,
+    event_type_for_class_label,
 )
 
 TARGET_LABELS = {"racket_bounce", "table_bounce", "floor_bounce", "noise"}
@@ -64,6 +68,20 @@ def append_contact_row(
     marker_source: str = "auto",
     anchor_rule: str | None = None,
     contact_origin: str = "unknown",
+    source_trust: str = "legacy_auto",
+    review_status: str = "",
+    contact_kind: str = "",
+    not_racket_kind: str = "",
+    bounce_side: str = "",
+    binary_label: str = "",
+    class_label: str = "",
+    event_type: str = "",
+    scenario: str = "",
+    bounce_context: str = "",
+    calibration_status: str = "",
+    contact_confidence: str | float = "",
+    surface_label: str = "",
+    surface_confidence: str | float = "",
 ) -> bool:
     try:
         feats = extract_features(clip, sr)
@@ -72,6 +90,9 @@ def append_contact_row(
         return False
 
     feats["label"] = label
+    feats["binary_label"] = binary_label or label
+    feats["class_label"] = class_label or label
+    feats["event_type"] = event_type or event_type_for_class_label(class_label or label)
     feats["recorder_name"] = recorder
     feats["session_id"] = session_id
     feats["source_file"] = source_file
@@ -83,6 +104,17 @@ def append_contact_row(
     feats["clip_id"] = clip_id
     feats["augmentation"] = augmentation
     feats["contact_origin"] = contact_origin
+    feats["source_trust"] = source_trust
+    feats["review_status"] = review_status
+    feats["contact_kind"] = contact_kind
+    feats["not_racket_kind"] = not_racket_kind
+    feats["bounce_side"] = bounce_side
+    feats["scenario"] = scenario
+    feats["bounce_context"] = bounce_context
+    feats["calibration_status"] = calibration_status
+    feats["contact_confidence"] = contact_confidence
+    feats["surface_label"] = surface_label
+    feats["surface_confidence"] = surface_confidence
     if review_completed is not None:
         feats["review_completed"] = review_completed
         feats["marker_source"] = marker_source
@@ -106,7 +138,18 @@ def contact_label_from_audio_label(label: str) -> str | None:
     return "racket_contact" if label == "racket_bounce" else "not_racket_contact"
 
 
+def canonical_mode(mode: str) -> str:
+    if mode in {"human_reviewed", "reviewed_only"}:
+        return "reviewed_only"
+    if mode in {"legacy_hybrid", "trusted_legacy"}:
+        return "trusted_legacy"
+    if mode in {"bootstrap", "all_legacy"}:
+        return "all_legacy"
+    raise ValueError(f"Unknown mode: {mode}")
+
+
 def should_include_unreviewed(mode: str, session_mode: bool) -> bool:
+    mode = canonical_mode(mode)
     if mode == "reviewed_only":
         return False
     if mode == "trusted_legacy":
@@ -117,6 +160,7 @@ def should_include_unreviewed(mode: str, session_mode: bool) -> bool:
 
 
 def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
+    mode = canonical_mode(mode)
     rows: list[dict] = []
     positive_examples: list[dict] = []
     negative_clips: list[np.ndarray] = []
@@ -140,13 +184,16 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
 
             label = str(event.get("label", ""))
             contact_label = contact_label_from_audio_label(label)
-            if contact_label is None:
-                continue
 
             session_id = session_path.stem
             source_file = str(event["wav_filename"])
             group_id = str(event.get("group_id") or f"{session_id}:{source_file}")
             scenario_id = str(event.get("scenario_id", "legacy_unspecified"))
+            recording_scenario = str(event.get("scenario") or "")
+            bounce_context = str(event.get("bounce_context") or "")
+            calibration_status = str(
+                event.get("calibration_status") or session["session_meta"].get("calibration_status") or ""
+            )
             background_condition = str(event.get("background_condition", "quiet"))
             take_index = int(event.get("take_index", 0))
             target_duration_s = int(event.get("target_duration_s", 0))
@@ -166,11 +213,29 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                 accepted_markers = 0
                 for marker_idx, marker in enumerate(markers):
                     final_label = str(marker.get("final_label", "ignore"))
-                    if final_label == "ignore":
+                    review_status = str(marker.get("review_status") or "confirmed")
+                    if review_status in {"pending", "deleted", "filtered"} or final_label == "ignore":
+                        continue
+                    if final_label not in {"racket_contact", "not_racket_contact"}:
                         continue
 
                     timestamp_ms = int(marker.get("timestamp_ms", 0))
                     marker_source = str(marker.get("source", "auto"))
+                    contact_kind = str(
+                        marker.get("contact_kind")
+                        or ("racket_bounce" if final_label == "racket_contact" else "")
+                    )
+                    not_racket_kind = str(
+                        marker.get("not_racket_kind")
+                        or (not_racket_kind_for(label, scenario_id) if final_label == "not_racket_contact" else "")
+                    )
+                    bounce_side = str(marker.get("bounce_side") or "unknown")
+                    multi_label = multiclass_label_for_marker(final_label, contact_kind, not_racket_kind)
+                    class_label = str(marker.get("class_label") or multi_label)
+                    event_type = str(marker.get("event_type") or event_type_for_class_label(class_label))
+                    marker_contact_confidence = marker.get("contact_confidence", "")
+                    marker_surface_label = str(marker.get("surface_label") or "")
+                    marker_surface_confidence = marker.get("surface_confidence", "")
                     clip = extract_clip_around_ms(y, sr, timestamp_ms)
                     clip_id = f"{group_id}:review:{marker_idx:03d}"
                     if append_contact_row(
@@ -192,6 +257,20 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                         marker_source=marker_source,
                         anchor_rule=anchor_rule,
                         contact_origin="reviewed_marker",
+                        source_trust="human_reviewed",
+                        review_status=review_status,
+                        contact_kind=contact_kind,
+                        not_racket_kind=not_racket_kind,
+                        bounce_side=bounce_side,
+                        binary_label=final_label,
+                        class_label=class_label,
+                        event_type=event_type,
+                        scenario=recording_scenario,
+                        bounce_context=bounce_context,
+                        calibration_status=calibration_status,
+                        contact_confidence=marker_contact_confidence,
+                        surface_label=marker_surface_label,
+                        surface_confidence=marker_surface_confidence,
                     ):
                         raw_count += 1
                         accepted_markers += 1
@@ -210,6 +289,20 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                                     "take_index": take_index,
                                     "target_duration_s": target_duration_s,
                                     "contact_origin": "reviewed_marker",
+                                    "source_trust": "human_reviewed_augmented",
+                                    "review_status": review_status,
+                                    "contact_kind": contact_kind,
+                                    "not_racket_kind": not_racket_kind,
+                                    "bounce_side": bounce_side,
+                                    "binary_label": final_label,
+                                    "class_label": class_label,
+                                    "event_type": event_type,
+                                    "scenario": recording_scenario,
+                                    "bounce_context": bounce_context,
+                                    "calibration_status": calibration_status,
+                                    "contact_confidence": marker_contact_confidence,
+                                    "surface_label": marker_surface_label,
+                                    "surface_confidence": marker_surface_confidence,
                                 }
                             )
                         else:
@@ -218,6 +311,9 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                 continue
 
             if not should_include_unreviewed(mode, session_mode):
+                continue
+            if contact_label is None:
+                print(f"  {audio_path.name}: skipping unreviewed unsupported label '{label}'")
                 continue
 
             if session_mode:
@@ -229,6 +325,9 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
             else:
                 clips = [y]
                 origin = "legacy_explicit"
+            source_trust = "legacy_explicit" if origin == "legacy_explicit" else "legacy_auto"
+            contact_kind = contact_kind_for(label, scenario_id) if contact_label == "racket_contact" else ""
+            not_racket_kind = not_racket_kind_for(label, scenario_id) if contact_label == "not_racket_contact" else ""
 
             for clip_idx, clip in enumerate(clips):
                 clip_id = f"{group_id}:{clip_idx:03d}"
@@ -250,6 +349,16 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                     review_completed=False,
                     marker_source="auto",
                     contact_origin=origin,
+                    source_trust=source_trust,
+                    contact_kind=contact_kind,
+                    not_racket_kind=not_racket_kind,
+                    bounce_side="unknown",
+                    binary_label=contact_label,
+                    class_label=label,
+                    event_type=event_type_for_class_label(label),
+                    scenario=recording_scenario,
+                    bounce_context=bounce_context,
+                    calibration_status=calibration_status,
                 ):
                     raw_count += 1
                     fixed_clip = librosa.util.fix_length(clip.copy(), size=TARGET_SR)
@@ -267,6 +376,17 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                                 "take_index": take_index,
                                 "target_duration_s": target_duration_s,
                                 "contact_origin": origin,
+                                "source_trust": f"{source_trust}_augmented",
+                                "review_status": "",
+                                "contact_kind": contact_kind,
+                                "not_racket_kind": not_racket_kind,
+                                "bounce_side": "unknown",
+                                "binary_label": contact_label,
+                                "class_label": label,
+                                "event_type": event_type_for_class_label(label),
+                                "scenario": recording_scenario,
+                                "bounce_context": bounce_context,
+                                "calibration_status": calibration_status,
                             }
                         )
                     else:
@@ -297,6 +417,17 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                     review_completed=True,
                     marker_source="augmented",
                     contact_origin="augmented_from_positive",
+                    source_trust=example.get("source_trust", "human_reviewed_augmented"),
+                    review_status=example.get("review_status", ""),
+                    contact_kind=example.get("contact_kind", ""),
+                    not_racket_kind=example.get("not_racket_kind", ""),
+                    bounce_side=example.get("bounce_side", "unknown"),
+                    binary_label=example.get("binary_label", example["label"]),
+                    class_label=example.get("class_label", ""),
+                    event_type=example.get("event_type", ""),
+                    scenario=example.get("scenario", ""),
+                    bounce_context=example.get("bounce_context", ""),
+                    calibration_status=example.get("calibration_status", ""),
                 ):
                     aug_count += 1
 
@@ -307,7 +438,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Build a binary audio contact dataset variant.")
     parser.add_argument(
         "--mode",
-        choices=["reviewed_only", "trusted_legacy", "all_legacy"],
+        choices=["human_reviewed", "legacy_hybrid", "bootstrap", "reviewed_only", "trusted_legacy", "all_legacy"],
         required=True,
         help="Which legacy inclusion strategy to use.",
     )
@@ -332,6 +463,12 @@ def main() -> None:
     print(f"  labels={df['label'].value_counts().to_dict()}")
     if "contact_origin" in df.columns:
         print(f"  origins={df['contact_origin'].value_counts().to_dict()}")
+    if "source_trust" in df.columns:
+        print(f"  source_trust={df['source_trust'].value_counts().to_dict()}")
+    if "not_racket_kind" in df.columns:
+        print(f"  hard_negatives={df['not_racket_kind'].value_counts().to_dict()}")
+    if "bounce_side" in df.columns:
+        print(f"  bounce_side={df['bounce_side'].value_counts().to_dict()}")
     if "scenario_id" in df.columns:
         scenario_counts = df["scenario_id"].value_counts().to_dict()
         print(f"  scenarios={scenario_counts}")

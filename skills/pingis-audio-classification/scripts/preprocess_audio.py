@@ -86,6 +86,53 @@ WINDOW_AFTER_S = 0.70
 MIN_CLIP_RMS = 0.005
 
 AUGMENT_SNR_DB = [20.0, 8.0]
+VALID_AUDIO_LABELS = {"racket_bounce", "table_bounce", "floor_bounce", "noise"}
+
+
+def contact_kind_for(label: str, scenario_id: str) -> str:
+    if label == "racket_bounce" or scenario_id.startswith("racket_bounce") or scenario_id == "free_recording":
+        return "racket_bounce"
+    return ""
+
+
+def not_racket_kind_for(label: str, scenario_id: str) -> str:
+    if label == "table_bounce" or scenario_id == "table_bounce":
+        return "table_bounce"
+    if label == "floor_bounce" or scenario_id == "floor_bounce":
+        return "floor_bounce"
+    if scenario_id == "catch_after_sound":
+        return "catch_after_sound"
+    if scenario_id == "speech_music_noise":
+        return "voice_music_noise"
+    if label == "noise":
+        return "other_impact"
+    return ""
+
+
+def multiclass_label_for_marker(final_label: str, contact_kind: str, not_racket_kind: str) -> str:
+    if final_label == "racket_contact":
+        return contact_kind or "racket_bounce"
+    if not_racket_kind in {"table_bounce", "floor_bounce"}:
+        return not_racket_kind
+    return "noise"
+
+
+def binary_label_for_audio_label(label: str) -> str:
+    if label == "racket_bounce":
+        return "racket_contact"
+    if label in {"table_bounce", "floor_bounce", "noise"}:
+        return "not_racket_contact"
+    return ""
+
+
+def event_type_for_class_label(class_label: str) -> str:
+    if class_label in {"racket_bounce", "forehand", "backhand", "forehand_hit", "backhand_hit"}:
+        return "racket_hit"
+    if class_label in {"table_bounce", "floor_bounce"}:
+        return "bounce"
+    if class_label == "ignore":
+        return "ignore"
+    return "noise"
 
 
 def extract_transient_features(y: np.ndarray, sr: int = TARGET_SR) -> dict:
@@ -306,7 +353,7 @@ def main() -> None:
     parser.add_argument(
         "--bootstrap-unreviewed",
         action="store_true",
-        help="Include unreviewed racket/noise takes in the contact dataset as a temporary bootstrap.",
+        help="Include unreviewed racket/noise/table/floor takes in the contact dataset as a temporary bootstrap.",
     )
     args = parser.parse_args()
 
@@ -348,6 +395,20 @@ def main() -> None:
         review_completed: bool | None = None,
         marker_source: str = "auto",
         anchor_rule: str | None = None,
+        source_trust: str = "legacy_auto",
+        review_status: str = "",
+        contact_kind: str = "",
+        not_racket_kind: str = "",
+        bounce_side: str = "",
+        binary_label: str = "",
+        class_label: str = "",
+        event_type: str = "",
+        scenario: str = "",
+        bounce_context: str = "",
+        calibration_status: str = "",
+        contact_confidence: str | float = "",
+        surface_label: str = "",
+        surface_confidence: str | float = "",
     ) -> bool:
         try:
             feats = extract_features(clip, sr)
@@ -356,6 +417,9 @@ def main() -> None:
             return False
 
         feats["label"] = label
+        feats["binary_label"] = binary_label or binary_label_for_audio_label(label)
+        feats["class_label"] = class_label or label
+        feats["event_type"] = event_type or event_type_for_class_label(class_label or label)
         feats["recorder_name"] = recorder
         feats["session_id"] = session_id
         feats["source_file"] = source_file
@@ -366,6 +430,17 @@ def main() -> None:
         feats["target_duration_s"] = target_duration_s
         feats["clip_id"] = clip_id
         feats["augmentation"] = augmentation
+        feats["source_trust"] = source_trust
+        feats["review_status"] = review_status
+        feats["contact_kind"] = contact_kind
+        feats["not_racket_kind"] = not_racket_kind
+        feats["bounce_side"] = bounce_side
+        feats["scenario"] = scenario
+        feats["bounce_context"] = bounce_context
+        feats["calibration_status"] = calibration_status
+        feats["contact_confidence"] = contact_confidence
+        feats["surface_label"] = surface_label
+        feats["surface_confidence"] = surface_confidence
         if review_completed is not None:
             feats["review_completed"] = review_completed
             feats["marker_source"] = marker_source
@@ -401,6 +476,11 @@ def main() -> None:
             source_file = str(event["wav_filename"])
             group_id = str(event.get("group_id") or f"{session_id}:{source_file}")
             scenario_id = str(event.get("scenario_id", "legacy_unspecified"))
+            recording_scenario = str(event.get("scenario") or "")
+            bounce_context = str(event.get("bounce_context") or "")
+            calibration_status = str(
+                event.get("calibration_status") or session["session_meta"].get("calibration_status") or ""
+            )
             background_condition = str(event.get("background_condition", "quiet"))
             take_index = int(event.get("take_index", 0))
             target_duration_s = int(event.get("target_duration_s", 0))
@@ -420,15 +500,34 @@ def main() -> None:
                 accepted_markers = 0
                 for marker_idx, marker in enumerate(markers):
                     final_label = marker.get("final_label")
-                    if final_label == "ignore":
+                    review_status = str(marker.get("review_status") or "confirmed")
+                    if review_status in {"pending", "deleted", "filtered"} or final_label == "ignore":
+                        continue
+                    if final_label not in {"racket_contact", "not_racket_contact"}:
                         continue
 
                     timestamp_ms = int(marker.get("timestamp_ms", 0))
                     marker_source = str(marker.get("source", "auto"))
+                    contact_kind = str(
+                        marker.get("contact_kind")
+                        or ("racket_bounce" if final_label == "racket_contact" else "")
+                    )
+                    not_racket_kind = str(
+                        marker.get("not_racket_kind")
+                        or (not_racket_kind_for(label, scenario_id) if final_label == "not_racket_contact" else "")
+                    )
+                    bounce_side = str(marker.get("bounce_side") or "unknown")
+                    marker_class_label = str(marker.get("class_label") or "")
+                    marker_event_type = str(marker.get("event_type") or "")
+                    marker_contact_confidence = marker.get("contact_confidence", "")
+                    marker_surface_label = str(marker.get("surface_label") or "")
+                    marker_surface_confidence = marker.get("surface_confidence", "")
                     clip = extract_clip_around_ms(y, sr, timestamp_ms)
                     clip_id = f"{group_id}:review:{marker_idx:03d}"
 
-                    multi_label = "racket_bounce" if final_label == "racket_contact" else "noise"
+                    multi_label = multiclass_label_for_marker(str(final_label), contact_kind, not_racket_kind)
+                    export_class_label = marker_class_label or multi_label
+                    export_event_type = marker_event_type or event_type_for_class_label(export_class_label)
                     if append_row(
                         multiclass_rows,
                         multi_label,
@@ -445,6 +544,20 @@ def main() -> None:
                         clip_id,
                         "none",
                         anchor_rule=anchor_rule,
+                        source_trust="human_reviewed",
+                        review_status=review_status,
+                        contact_kind=contact_kind,
+                        not_racket_kind=not_racket_kind,
+                        bounce_side=bounce_side,
+                        binary_label=str(final_label),
+                        class_label=export_class_label,
+                        event_type=export_event_type,
+                        scenario=recording_scenario,
+                        bounce_context=bounce_context,
+                        calibration_status=calibration_status,
+                        contact_confidence=marker_contact_confidence,
+                        surface_label=marker_surface_label,
+                        surface_confidence=marker_surface_confidence,
                     ):
                         raw_multiclass += 1
                         fixed_clip = librosa.util.fix_length(clip.copy(), size=TARGET_SR)
@@ -462,6 +575,20 @@ def main() -> None:
                                 "background_condition": background_condition,
                                 "take_index": take_index,
                                 "target_duration_s": target_duration_s,
+                                "source_trust": "human_reviewed_augmented",
+                                "review_status": review_status,
+                                "contact_kind": contact_kind,
+                                "not_racket_kind": not_racket_kind,
+                                "bounce_side": bounce_side,
+                                "binary_label": str(final_label),
+                                "class_label": export_class_label,
+                                "event_type": export_event_type,
+                                "scenario": recording_scenario,
+                                "bounce_context": bounce_context,
+                                "calibration_status": calibration_status,
+                                "contact_confidence": marker_contact_confidence,
+                                "surface_label": marker_surface_label,
+                                "surface_confidence": marker_surface_confidence,
                             })
 
                     if append_row(
@@ -482,6 +609,20 @@ def main() -> None:
                         review_completed=True,
                         marker_source=marker_source,
                         anchor_rule=anchor_rule,
+                        source_trust="human_reviewed",
+                        review_status=review_status,
+                        contact_kind=contact_kind,
+                        not_racket_kind=not_racket_kind,
+                        bounce_side=bounce_side,
+                        binary_label=str(final_label),
+                        class_label=export_class_label,
+                        event_type=export_event_type,
+                        scenario=recording_scenario,
+                        bounce_context=bounce_context,
+                        calibration_status=calibration_status,
+                        contact_confidence=marker_contact_confidence,
+                        surface_label=marker_surface_label,
+                        surface_confidence=marker_surface_confidence,
                     ):
                         raw_contact += 1
                         accepted_markers += 1
@@ -498,11 +639,29 @@ def main() -> None:
                                 "background_condition": background_condition,
                                 "take_index": take_index,
                                 "target_duration_s": target_duration_s,
-                            })
+                                "source_trust": "human_reviewed_augmented",
+                                "review_status": review_status,
+                                "contact_kind": contact_kind,
+                                "not_racket_kind": not_racket_kind,
+                                "bounce_side": bounce_side,
+                                "binary_label": str(final_label),
+                                "class_label": export_class_label,
+                                "event_type": export_event_type,
+                                    "scenario": recording_scenario,
+                                    "bounce_context": bounce_context,
+                                    "calibration_status": calibration_status,
+                                    "contact_confidence": marker_contact_confidence,
+                                    "surface_label": marker_surface_label,
+                                    "surface_confidence": marker_surface_confidence,
+                                })
                         else:
                             contact_negative_clips.append(fixed_clip)
 
                 print(f"  {audio_path.name}: {accepted_markers} review-markorer")
+                continue
+
+            if label not in VALID_AUDIO_LABELS:
+                print(f"  {audio_path.name}: hoppar över ogranskad label '{label}'")
                 continue
 
             auto_clips, dropped = auto_segment(label, y, sr, session_mode)
@@ -527,6 +686,16 @@ def main() -> None:
                     target_duration_s,
                     clip_id,
                     "none",
+                    source_trust="legacy_auto",
+                    contact_kind=contact_kind_for(label, scenario_id),
+                    not_racket_kind=not_racket_kind_for(label, scenario_id),
+                    bounce_side="unknown",
+                    binary_label=binary_label_for_audio_label(label),
+                    class_label=label,
+                    event_type=event_type_for_class_label(label),
+                    scenario=recording_scenario,
+                    bounce_context=bounce_context,
+                    calibration_status=calibration_status,
                 )
                 if added_multi:
                     raw_multiclass += 1
@@ -545,14 +714,27 @@ def main() -> None:
                             "background_condition": background_condition,
                             "take_index": take_index,
                             "target_duration_s": target_duration_s,
+                            "source_trust": "legacy_auto_augmented",
+                            "review_status": "",
+                            "contact_kind": contact_kind_for(label, scenario_id),
+                            "not_racket_kind": not_racket_kind_for(label, scenario_id),
+                            "bounce_side": "unknown",
+                            "binary_label": binary_label_for_audio_label(label),
+                            "class_label": label,
+                            "event_type": event_type_for_class_label(label),
+                            "scenario": recording_scenario,
+                            "bounce_context": bounce_context,
+                            "calibration_status": calibration_status,
                         })
 
                 should_bootstrap_contact = args.bootstrap_unreviewed and label in {"racket_bounce", "noise"}
-                should_auto_negative = label in {"table_bounce", "floor_bounce"}
+                should_auto_negative = args.bootstrap_unreviewed and label in {"table_bounce", "floor_bounce"}
                 if not should_bootstrap_contact and not should_auto_negative:
                     continue
 
                 contact_label = "racket_contact" if label == "racket_bounce" else "not_racket_contact"
+                contact_kind = contact_kind_for(label, scenario_id) if contact_label == "racket_contact" else ""
+                not_racket_kind = not_racket_kind_for(label, scenario_id) if contact_label == "not_racket_contact" else ""
                 added_contact = append_row(
                     contact_rows,
                     contact_label,
@@ -570,6 +752,17 @@ def main() -> None:
                     "none",
                     review_completed=False,
                     marker_source="auto",
+                    source_trust="bootstrap",
+                    review_status="",
+                    contact_kind=contact_kind,
+                    not_racket_kind=not_racket_kind,
+                    bounce_side="unknown",
+                    binary_label=contact_label,
+                    class_label=label,
+                    event_type=event_type_for_class_label(label),
+                    scenario=recording_scenario,
+                    bounce_context=bounce_context,
+                    calibration_status=calibration_status,
                 )
                 if added_contact:
                     raw_contact += 1
@@ -586,6 +779,17 @@ def main() -> None:
                             "background_condition": background_condition,
                             "take_index": take_index,
                             "target_duration_s": target_duration_s,
+                            "source_trust": "bootstrap_augmented",
+                            "review_status": "",
+                            "contact_kind": contact_kind,
+                            "not_racket_kind": not_racket_kind,
+                            "bounce_side": "unknown",
+                            "binary_label": contact_label,
+                            "class_label": label,
+                            "event_type": event_type_for_class_label(label),
+                            "scenario": recording_scenario,
+                            "bounce_context": bounce_context,
+                            "calibration_status": calibration_status,
                         })
                     else:
                         contact_negative_clips.append(fixed_clip)
@@ -616,6 +820,17 @@ def main() -> None:
                     example["target_duration_s"],
                     f"{example['group_id']}:snr:{int(snr)}db",
                     f"snr_{int(snr)}db",
+                    source_trust=example.get("source_trust", "legacy_auto_augmented"),
+                    review_status=example.get("review_status", ""),
+                    contact_kind=example.get("contact_kind", ""),
+                    not_racket_kind=example.get("not_racket_kind", ""),
+                    bounce_side=example.get("bounce_side", "unknown"),
+                    binary_label=example.get("binary_label", ""),
+                    class_label=example.get("class_label", example["label"]),
+                    event_type=example.get("event_type", ""),
+                    scenario=example.get("scenario", ""),
+                    bounce_context=example.get("bounce_context", ""),
+                    calibration_status=example.get("calibration_status", ""),
                 ):
                     multiclass_aug_count += 1
         print(f"  Multiclass SNR-augmenterat: {multiclass_aug_count} extra klipp")
@@ -644,6 +859,17 @@ def main() -> None:
                     f"snr_{int(snr)}db",
                     review_completed=True,
                     marker_source="augmented",
+                    source_trust=example.get("source_trust", "human_reviewed_augmented"),
+                    review_status=example.get("review_status", ""),
+                    contact_kind=example.get("contact_kind", ""),
+                    not_racket_kind=example.get("not_racket_kind", ""),
+                    bounce_side=example.get("bounce_side", "unknown"),
+                    binary_label=example.get("binary_label", example["label"]),
+                    class_label=example.get("class_label", ""),
+                    event_type=example.get("event_type", ""),
+                    scenario=example.get("scenario", ""),
+                    bounce_context=example.get("bounce_context", ""),
+                    calibration_status=example.get("calibration_status", ""),
                 ):
                     contact_aug_count += 1
         print(f"  Contact SNR-augmenterat: {contact_aug_count} extra klipp")
@@ -658,16 +884,23 @@ def main() -> None:
 
     multi_df = pd.DataFrame(multiclass_rows)
     multi_df.to_csv(OUT_FILE, index=False)
+    multi_source_counts = multi_df["source_trust"].value_counts().to_dict() if "source_trust" in multi_df.columns else {}
     print(f"\nMulticlass dataset sparat: {OUT_FILE}")
     print(f"  {len(multi_df)} rader totalt ({raw_multiclass} råa + {multiclass_aug_count} augmenterade)")
     print(f"  Etikettfördelning: {multi_df['label'].value_counts().to_dict()}")
 
+    print(f"  Source/trust: {multi_source_counts}")
+
     if contact_rows:
         contact_df = pd.DataFrame(contact_rows)
         contact_df.to_csv(OUT_CONTACT_FILE, index=False)
+        contact_source_counts = contact_df["source_trust"].value_counts().to_dict() if "source_trust" in contact_df.columns else {}
+        hard_negative_counts = contact_df["not_racket_kind"].value_counts().to_dict() if "not_racket_kind" in contact_df.columns else {}
         print(f"\nContact dataset sparat: {OUT_CONTACT_FILE}")
         print(f"  {len(contact_df)} rader totalt ({raw_contact} råa + {contact_aug_count} augmenterade)")
         print(f"  Etikettfördelning: {contact_df['label'].value_counts().to_dict()}")
+        print(f"  Source/trust: {contact_source_counts}")
+        print(f"  Hard negatives: {hard_negative_counts}")
         if "scenario_id" in contact_df.columns:
             print(f"  Scenariofördelning: {contact_df['scenario_id'].value_counts().to_dict()}")
     else:

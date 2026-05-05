@@ -76,14 +76,27 @@ def normalize_samples(samples: list[dict], calibration_profile: dict | None) -> 
     return normalized
 
 
-def extract_window(samples: list[dict], center_ts_ms: int) -> list[dict]:
-    start_ms = center_ts_ms - WINDOW_PRE_MS
-    end_ms = center_ts_ms + WINDOW_POST_MS
-    return [
-        sample
-        for sample in samples
-        if start_ms <= int(sample["ts_ms"]) <= end_ms
-    ]
+def sample_take_ts_ms(sample: dict, take_start_ms: int) -> int:
+    if sample.get("take_ts_ms") is not None:
+        return int(sample["take_ts_ms"])
+    if sample.get("received_at_ms") is not None:
+        return max(0, int(sample["received_at_ms"]) - take_start_ms)
+
+    ts_ms = int(sample.get("ts_ms", 0))
+    if ts_ms > 1_000_000_000_000:
+        return max(0, ts_ms - take_start_ms)
+    return ts_ms
+
+
+def extract_window(samples: list[dict], center_take_ts_ms: int, take_start_ms: int) -> list[dict]:
+    start_ms = center_take_ts_ms - WINDOW_PRE_MS
+    end_ms = center_take_ts_ms + WINDOW_POST_MS
+    window: list[dict] = []
+    for sample in samples:
+        ts_ms = sample_take_ts_ms(sample, take_start_ms)
+        if start_ms <= ts_ms <= end_ms:
+            window.append({**sample, "sample_take_ts_ms": ts_ms})
+    return window
 
 
 def add_axis_features(features: dict, values: np.ndarray, prefix: str) -> None:
@@ -117,7 +130,9 @@ def extract_features(window: list[dict]) -> dict:
     add_axis_features(features, accel_mag, "accel_mag")
     add_axis_features(features, gyro_mag, "gyro_mag")
     features["window_samples"] = float(matrix.shape[0])
-    features["window_duration_ms"] = float(int(window[-1]["ts_ms"]) - int(window[0]["ts_ms"]))
+    features["window_duration_ms"] = float(
+        int(window[-1]["sample_take_ts_ms"]) - int(window[0]["sample_take_ts_ms"])
+    )
     return features
 
 
@@ -152,6 +167,13 @@ def main() -> None:
         session_id = session_path.stem
 
         for event in session.get("events", []):
+            event_scenario = str(event.get("scenario") or "")
+            if not event_scenario and str(event.get("scenario_id", "")).startswith("racket_bounce"):
+                event_scenario = "racket_bouncing"
+            if event_scenario != "racket_bouncing":
+                skipped_events += 1
+                continue
+
             review = event.get("review") or {}
             imu_recording = event.get("imu_recording") or {}
             if not review.get("completed_at"):
@@ -165,14 +187,21 @@ def main() -> None:
             normalized_samples = normalize_samples(raw_samples, calibration_profile)
             take_group = f"{session_id}:{event['scenario_id']}:{event['take_index']}"
             take_start_ms = int(imu_recording.get("started_at_ms", 0))
+            imu_partial = bool(imu_recording.get("partial", False))
+            imu_disconnected = bool(imu_recording.get("disconnected", False))
+            imu_sample_count = int(imu_recording.get("sample_count") or len(raw_samples))
+            imu_hz_estimate = float(imu_recording.get("sample_hz_estimate") or 0.0)
 
             for marker in review.get("markers", []):
+                review_status = str(marker.get("review_status") or "confirmed")
+                if review_status in {"pending", "deleted", "filtered"}:
+                    continue
                 target_label = marker_to_label(marker.get("final_label", "ignore"))
                 if target_label is None:
                     continue
 
-                center_ts_ms = take_start_ms + int(marker["timestamp_ms"])
-                window = extract_window(normalized_samples, center_ts_ms)
+                center_take_ts_ms = int(marker["timestamp_ms"])
+                window = extract_window(normalized_samples, center_take_ts_ms, take_start_ms)
                 if len(window) < MIN_WINDOW_SAMPLES:
                     continue
 
@@ -181,10 +210,25 @@ def main() -> None:
                 row["session_id"] = session_id
                 row["group_id"] = take_group
                 row["scenario_id"] = event["scenario_id"]
+                row["scenario"] = event_scenario
+                row["bounce_context"] = event.get("bounce_context", "")
+                row["calibration_status"] = event.get(
+                    "calibration_status",
+                    session_meta.get("calibration_status", ""),
+                )
                 row["background_condition"] = event["background_condition"]
                 row["take_index"] = int(event["take_index"])
                 row["marker_id"] = marker["id"]
                 row["marker_label"] = marker["final_label"]
+                row["review_status"] = review_status
+                row["contact_kind"] = marker.get("contact_kind", "")
+                row["not_racket_kind"] = marker.get("not_racket_kind", "")
+                row["bounce_side"] = marker.get("bounce_side", "unknown")
+                row["marker_take_ts_ms"] = center_take_ts_ms
+                row["imu_sample_count"] = imu_sample_count
+                row["imu_hz_estimate"] = imu_hz_estimate
+                row["imu_partial"] = imu_partial
+                row["imu_disconnected"] = imu_disconnected
                 row["source_file"] = event["wav_filename"]
                 rows.append(row)
 

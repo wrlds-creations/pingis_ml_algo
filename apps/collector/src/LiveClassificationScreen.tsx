@@ -15,7 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { decodeBase64PCM } from './NativeAudioCapture';
 import { AudioStream, AudioStreamEmitter } from './NativeAudioStream';
 import { detectAudioContact } from './audioContactEngine';
-import type { PlayerSetup } from './types';
+import type { AudioDetectionEvent, PlayerSetup } from './types';
 
 const DEFAULT_THRESHOLD = 0.020;
 const THRESHOLD_MIN = 0.005;
@@ -25,6 +25,7 @@ const DEFAULT_CONF = 0.65;
 const CONF_MIN = 0.30;
 const CONF_MAX = 0.95;
 const DEFAULT_MERGE_WINDOW_MS = 260;
+const CONTACT_GROUP_WINDOW_MS = 650;
 
 const LABEL_CONFIG: Record<string, { name: string; color: string; bg: string }> = {
   racket_contact: { name: 'CONTACT', color: '#2ecc71', bg: '#0a2018' },
@@ -46,6 +47,8 @@ interface DebugInfo {
   probs: Record<string, number>;
   surfaceLabel?: string;
   surfaceConf?: number;
+  groupId?: number;
+  groupStatus?: AudioDetectionEvent['group_status'];
 }
 
 interface RecentEvent {
@@ -56,6 +59,13 @@ interface RecentEvent {
   surfaceConfidence?: number;
   counted: boolean;
   reason: string;
+  groupId?: number;
+  groupStatus?: AudioDetectionEvent['group_status'];
+}
+
+interface ContactGroupState {
+  id: number;
+  startedAtMs: number;
 }
 
 function surfaceLabelName(label?: string) {
@@ -99,6 +109,8 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
   const mergeWindowRef = useRef(DEFAULT_MERGE_WINDOW_MS);
   mergeWindowRef.current = mergeWindowMs;
   const lastQualifiedTsRef = useRef<number | undefined>(undefined);
+  const contactGroupRef = useRef<ContactGroupState | null>(null);
+  const groupCounterRef = useRef(0);
 
   function makeSlider(
     value: number,
@@ -153,6 +165,8 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
     }
 
     lastQualifiedTsRef.current = undefined;
+    contactGroupRef.current = null;
+    groupCounterRef.current = 0;
     AudioStream.startStreaming(threshold);
     setIsListening(true);
   }, [isListening, threshold]);
@@ -173,6 +187,25 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           lastQualifiedTsMs: lastQualifiedTsRef.current,
         });
 
+        const activeGroup = contactGroupRef.current;
+        const inActiveGroup = !!activeGroup && detectedAtMs - activeGroup.startedAtMs <= CONTACT_GROUP_WINDOW_MS;
+        if (result.qualified && inActiveGroup) {
+          result.qualified = false;
+          result.ignored_reason = 'group_duplicate';
+          result.group_id = activeGroup.id;
+          result.group_status = 'ignored_duplicate';
+        } else if (result.qualified) {
+          groupCounterRef.current += 1;
+          contactGroupRef.current = { id: groupCounterRef.current, startedAtMs: detectedAtMs };
+          result.group_id = groupCounterRef.current;
+          result.group_status = 'best_candidate';
+        } else if (inActiveGroup) {
+          result.group_id = activeGroup.id;
+          result.group_status = 'ignored_duplicate';
+        } else {
+          result.group_status = 'standalone';
+        }
+
         const ts = new Date().toLocaleTimeString('sv-SE', {
           hour: '2-digit', minute: '2-digit', second: '2-digit',
         });
@@ -186,6 +219,8 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
             surfaceConfidence: result.surface_confidence,
             counted,
             reason,
+            groupId: result.group_id,
+            groupStatus: result.group_status,
           }, ...prev.slice(0, 29)]);
         };
 
@@ -197,6 +232,8 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
             probs: result.probabilities,
             surfaceLabel: result.surface_label,
             surfaceConf: result.surface_confidence,
+            groupId: result.group_id,
+            groupStatus: result.group_status,
           });
           appendRecent(false, reasonLabel(result.ignored_reason ?? 'ignored'));
           return;
@@ -210,6 +247,8 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           probs: result.probabilities,
           surfaceLabel: result.surface_label,
           surfaceConf: result.surface_confidence,
+          groupId: result.group_id,
+          groupStatus: result.group_status,
         });
         appendRecent(true, 'counted');
         setHitCount(n => n + 1);
@@ -372,6 +411,8 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           style={styles.resetBtn}
           onPress={() => {
             lastQualifiedTsRef.current = undefined;
+            contactGroupRef.current = null;
+            groupCounterRef.current = 0;
             setHitCount(0);
             setHistory([]);
             setRecentEvents([]);
@@ -409,6 +450,7 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           (showIgnored ? recentEvents : recentEvents.filter(item => item.counted)).map((item, index) => (
             <Text key={`${item.ts}-${index}`} style={styles.debugRow}>
               {item.ts} · {item.counted ? 'counted' : item.reason}
+              {' | '}grp {item.groupId ?? '-'} {item.groupStatus ?? 'standalone'}
               {' | '}bin {LABEL_CONFIG[item.label]?.name ?? item.label} {Math.round(item.confidence * 100)}%
               {' | '}surf {surfaceLabelName(item.surfaceLabel)} {Math.round((item.surfaceConfidence ?? 0) * 100)}%
             </Text>

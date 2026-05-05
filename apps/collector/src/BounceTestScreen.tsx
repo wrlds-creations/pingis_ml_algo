@@ -48,6 +48,7 @@ const EXPORT_DIR = `${RNFS.ExternalStorageDirectoryPath}/Download/pingis_session
 
 const DEFAULT_BOUNCE_PRESET_ID: BouncePresetId = 'B0';
 const DEFAULT_BOUNCE_PRESET_LABEL = 'B0 Default';
+const CONTACT_GROUP_WINDOW_MS = 650;
 const DEFAULT_BOUNCE_SETTINGS: BounceSettings = {
   audioThreshold: 0.02,
   audioConfidence: 0.7,
@@ -241,6 +242,8 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
   const settingsRef = useRef(settings);
   const lastQualifiedLabelTsRef = useRef<Partial<Record<AudioDetectionEvent['label'], number>>>({});
   const lastConfirmedSideRef = useRef<BounceSide | null>(null);
+  const contactGroupRef = useRef<{ id: number; startedAtMs: number } | null>(null);
+  const groupCounterRef = useRef(0);
 
   const latestRef = useRef({
     accel: { x: 0, y: 0, z: 0 },
@@ -307,6 +310,8 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
     contactLogRef.current = [];
     lastQualifiedLabelTsRef.current = {};
     lastConfirmedSideRef.current = null;
+    contactGroupRef.current = null;
+    groupCounterRef.current = 0;
     setTotalCount(0);
     setForehandCount(0);
     setBackhandCount(0);
@@ -343,6 +348,25 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
         dedupMs: settingsRef.current.audioDedupMs,
         lastQualifiedTsMs: lastQualifiedLabelTsRef.current.racket_contact,
       });
+
+      const activeGroup = contactGroupRef.current;
+      const inActiveGroup = !!activeGroup && detectedAt - activeGroup.startedAtMs <= CONTACT_GROUP_WINDOW_MS;
+      if (audioEvent.qualified && inActiveGroup) {
+        audioEvent.qualified = false;
+        audioEvent.ignored_reason = 'group_duplicate';
+        audioEvent.group_id = activeGroup.id;
+        audioEvent.group_status = 'ignored_duplicate';
+      } else if (audioEvent.qualified) {
+        groupCounterRef.current += 1;
+        contactGroupRef.current = { id: groupCounterRef.current, startedAtMs: detectedAt };
+        audioEvent.group_id = groupCounterRef.current;
+        audioEvent.group_status = 'best_candidate';
+      } else if (inActiveGroup) {
+        audioEvent.group_id = activeGroup.id;
+        audioEvent.group_status = 'ignored_duplicate';
+      } else {
+        audioEvent.group_status = 'standalone';
+      }
 
       if (audioEvent.qualified) {
         lastQualifiedLabelTsRef.current.racket_contact = detectedAt;
@@ -435,6 +459,8 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
         orientation: contactOrientation,
         forehand_score: forehandScore,
         backhand_score: backhandScore,
+        group_id: audioEvent.group_id,
+        group_status: audioEvent.group_status,
         counted,
         total_after: totalAfter,
         alternation_after: alternationAfter,
@@ -472,6 +498,8 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
       sampleCountRef.current += 1;
       if (!isRunningRef.current) return;
 
+      const receivedAtMs = Date.now();
+      const takeTsMs = sessionStartRef.current === null ? 0 : Math.max(0, receivedAtMs - sessionStartRef.current);
       sampleLogRef.current.push({
         accel_x: latest.accel.x,
         accel_y: latest.accel.y,
@@ -482,7 +510,10 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
         mag_x: latest.mag.x,
         mag_y: latest.mag.y,
         mag_z: latest.mag.z,
-        ts_ms: Date.now(),
+        ts_ms: receivedAtMs,
+        received_at_ms: receivedAtMs,
+        take_ts_ms: takeTsMs,
+        sensor_ts: parsed.sensor_ts,
       });
     },
     [],
@@ -809,6 +840,7 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
         {recentContacts.map((contact, index) => (
           <Text key={`${contact.ts_ms}-${index}`} style={styles.debugRow}>
             {formatClock(contact.ts_ms)} · {contact.counted ? 'counted' : reasonLabel(contact.ignored_reason)}
+            {' | '}grp {contact.group_id ?? '-'} {contact.group_status ?? 'standalone'}
             {' | '}bin {audioLabelName(contact.audio_label)} {Math.round(contact.audio_confidence * 100)}%
             {' | '}surf {surfaceLabelName(contact.surface_label)} {Math.round((contact.surface_confidence ?? 0) * 100)}%
             {' | '}side {sideLabel(contact.side)} {'|'} gate {contact.motion_gate_open ? 'OPEN' : 'CLOSED'}
@@ -827,6 +859,7 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
         {visibleAudioEvents.map((event, index) => (
           <Text key={`${event.ts_ms}-${index}`} style={styles.debugRow}>
             {formatClock(event.ts_ms)} · bin {audioLabelName(event.label)} {Math.round(event.confidence * 100)}%
+            {' | '}grp {event.group_id ?? '-'} {event.group_status ?? 'standalone'}
             {' | '}surf {surfaceLabelName(event.surface_label)} {Math.round((event.surface_confidence ?? 0) * 100)}%
             {' | '}{event.qualified ? 'qualified' : reasonLabel(event.ignored_reason)}
           </Text>

@@ -45,8 +45,20 @@ META_COLS = {
     "marker_source",
     "anchor_rule",
     "contact_origin",
+    "source_trust",
+    "review_status",
+    "contact_kind",
+    "not_racket_kind",
+    "bounce_side",
 }
 SCENARIO_BREAKDOWN_IDS = [
+    "racket_bounce_fh",
+    "racket_bounce_bh",
+    "racket_bounce_mixed",
+    "table_bounce",
+    "floor_bounce",
+    "catch_after_sound",
+    "speech_music_noise",
     "racket_quiet",
     "racket_counting",
     "racket_music_low",
@@ -154,6 +166,50 @@ def print_scenario_breakdown(breakdown: dict[str, dict]) -> None:
         )
 
 
+def get_column_breakdown(
+    test_df: pd.DataFrame,
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    le: LabelEncoder,
+    column: str,
+) -> dict[str, dict]:
+    if column not in test_df.columns:
+        return {"_error": {"message": f"{column} missing in dataset"}}
+
+    breakdown: dict[str, dict] = {}
+    y_true_labels = le.inverse_transform(y_true)
+    y_pred_labels = le.inverse_transform(y_pred)
+    values = test_df[column].fillna("").astype(str)
+
+    for value in sorted(values.unique()):
+        display_value = value or "unspecified"
+        mask = values == value
+        rows = int(mask.sum())
+        expected = pd.Series(y_true_labels[mask.to_numpy()]).value_counts().to_dict()
+        predicted = pd.Series(y_pred_labels[mask.to_numpy()]).value_counts().to_dict()
+        accuracy = float(np.mean(y_true_labels[mask.to_numpy()] == y_pred_labels[mask.to_numpy()]))
+        breakdown[display_value] = {
+            "rows": rows,
+            "exact_match": accuracy,
+            "expected": expected,
+            "predicted": predicted,
+        }
+    return breakdown
+
+
+def print_column_breakdown(title: str, breakdown: dict[str, dict]) -> None:
+    if "_error" in breakdown:
+        print(f"\n{title}: {breakdown['_error']['message']}")
+        return
+
+    print(f"\n{title}:")
+    for value, item in sorted(breakdown.items(), key=lambda pair: (-int(pair[1].get("rows", 0)), pair[0])):
+        print(
+            f"  {value}: rows={item['rows']} | exact_match={item['exact_match']:.3f}"
+            f" | expected={item['expected']} | predicted={item['predicted']}"
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train binary audio contact RF model.")
     parser.add_argument("--dataset", default=str(DEFAULT_DATASET), help="Path to the contact CSV dataset.")
@@ -184,6 +240,9 @@ def main() -> None:
     counts = df["label"].value_counts()
     print(f"Loaded {len(df)} rows | labels: {counts.to_dict()}")
     print(f"Review completed rows: {int(df.get('review_completed', pd.Series([], dtype=bool)).fillna(False).sum())}")
+    for column in ["source_trust", "contact_origin", "bounce_side", "not_racket_kind"]:
+        if column in df.columns:
+            print(f"{column}: {df[column].fillna('').astype(str).value_counts().to_dict()}")
 
     feature_cols = [column for column in df.columns if column not in META_COLS]
     train_df, test_df = make_group_split(df)
@@ -238,6 +297,12 @@ def main() -> None:
     print(classification_report(y_test, y_pred, target_names=le.classes_, zero_division=0))
     scenario_breakdown = get_scenario_breakdown(test_df, y_test, y_pred, le)
     print_scenario_breakdown(scenario_breakdown)
+    source_trust_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "source_trust")
+    not_racket_kind_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "not_racket_kind")
+    bounce_side_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "bounce_side")
+    print_column_breakdown("Source/trust breakdown", source_trust_breakdown)
+    print_column_breakdown("Hard-negative breakdown", not_racket_kind_breakdown)
+    print_column_breakdown("Bounce-side breakdown", bounce_side_breakdown)
 
     X_full_raw = df[feature_cols].values.astype(np.float32)
     y_full = le.transform(df["label"].values)
@@ -293,6 +358,9 @@ def main() -> None:
                     "grouped_cv_f1_macro": float(grid.best_score_),
                     "grouped_test_report": report_dict,
                     "scenario_breakdown": scenario_breakdown,
+                    "source_trust_breakdown": source_trust_breakdown,
+                    "not_racket_kind_breakdown": not_racket_kind_breakdown,
+                    "bounce_side_breakdown": bounce_side_breakdown,
                 },
                 indent=2,
             ),
