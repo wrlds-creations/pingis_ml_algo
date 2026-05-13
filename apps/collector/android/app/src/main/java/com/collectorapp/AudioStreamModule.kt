@@ -33,11 +33,11 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     companion object {
         const val SR            = 22_050
         const val FRAME_SIZE    = 220           // 10 ms
-        const val PRE_SAMPLES   = 6_615         // 300 ms
-        const val POST_SAMPLES  = 15_435        // 700 ms
-        const val CLIP_SAMPLES  = SR            // 22 050 = 1 s
+        const val PRE_SAMPLES   = 2_205         // 100 ms
+        const val POST_SAMPLES  = 4_410         // 200 ms
+        const val CLIP_SAMPLES  = PRE_SAMPLES + POST_SAMPLES
         const val RING_SIZE     = SR * 3        // 3 s cirkulär buffer
-        const val RETRIGGER_MS  = 380L          // min ms mellan onsets (förhindrar dubbeldetektering)
+        const val DEFAULT_RETRIGGER_MS = 220L   // min ms mellan onsets (förhindrar dubbeldetektering)
 
         // Adaptiv tröskel: hur många gånger starkare än bakgrunden en studs måste vara
         const val ONSET_RATIO   = 2.5
@@ -64,6 +64,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
 
     @Volatile private var isRunning     = false
     @Volatile private var lastOnsetTime = 0L
+    @Volatile private var retriggerMs   = DEFAULT_RETRIGGER_MS
 
     // threshold-variabeln används nu som ONSET_RATIO-multiplier från slidern
     // (slider-värdet 0.005–0.15 mappas om till ratio 1.5–4.0 i startStreaming)
@@ -112,6 +113,12 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         promise.resolve("ok")
     }
 
+    @ReactMethod
+    fun setRetriggerMs(ms: Double, promise: Promise) {
+        retriggerMs = ms.toLong().coerceIn(0L, 800L)
+        promise.resolve("ok")
+    }
+
     // ── Huvud-loop ─────────────────────────────────────────────────────────────
 
     private fun streamLoop() {
@@ -140,7 +147,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                 // Uppdatera bakgrundsestimat med current RMS
                 // (vi lägger bara till i bakgrundsbuffern, inte vid onset)
                 val now = System.currentTimeMillis()
-                val inCooldown = now - lastOnsetTime < RETRIGGER_MS
+                val inCooldown = now - lastOnsetTime < retriggerMs
 
                 if (!inCooldown) {
                     // Beräkna bakgrundsnivå
@@ -166,7 +173,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                         scheduleExtraction(capturedOnsetPos)
                         // Höj bakgrunden måttligt — inte till onset-nivå (som
                         // blockerar nästa slag i 500ms) utan till 2× bakgrunden.
-                        // RETRIGGER_MS (300ms) hanterar eko/decay.
+                        // retriggerMs hanterar eko/decay och kan justeras från JS.
                         val elevatedBg = bgAvg * 2.0
                         bgBuffer.fill(elevatedBg)
                         bgIdx = 0

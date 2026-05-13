@@ -10,13 +10,17 @@ Round:
 ## How This File Is Used
 
 1. Record one take at a time in `Ljud-insamling` or `Studs audio + IMU`.
-2. For racket and noise scenarios, review the take directly after recording.
-3. I review, verifiera att skarmen visar `Simple Review UI | attack_start | r11c-overview-fit`.
-4. Testa dragbar playhead, playback, marker-val och marker-flytt.
-5. Fill in each testcase before moving on.
-6. Use `Studsdetektor` and `Studs fritt` only with `B0`.
-7. `Studs vaxla sida` is a regression check after contact count is acceptable.
-8. In `Studs audio + IMU`, keep roughly `0.5-1.0 s` between bounces. Do not collect fast double contacts in this round.
+2. Use the reviewed protocol presets: `racket_bounce_fh`, `racket_bounce_bh`, `racket_bounce_mixed`, `table_bounce`, `floor_bounce`, `catch_after_sound`, and `speech_music_noise`.
+3. Every training-relevant preset must open review directly after recording.
+4. Handle every auto-marker with `Confirm`, label edit, `Ignore`, or `Delete` before saving.
+5. Inspelningsvyn ska visa stor kameravy, `3 s` countdown, fast start/stop och ingen vertikal scroll.
+6. Review queue i collection-vyn ska bara visa pending takes fran aktuell session; gamla pending filer ska finnas kvar pa disk men inte synas dar.
+7. I review, verifiera att header/back/revision-text inte ligger bakom Motorola-notch eller statusbar.
+8. Testa dragbar playhead, playback, marker-val och marker-flytt.
+9. Fill in each testcase before moving on.
+10. Use `Studsdetektor` and `Studs fritt` only with `B0`.
+11. `Studs vaxla sida` is a regression check after contact count is acceptable.
+12. In `Studs audio + IMU`, keep roughly `0.5-1.0 s` between bounces. Do not collect fast double contacts in this round.
 
 ## Round Summary
 
@@ -43,7 +47,7 @@ Kommentar:
 Mode: `bounce_audio_imu_collection`
 Preset: `n/a`
 Kalibrering: `table_only`
-Forvantat utfall: En `30 s` take i `racket_quiet` auto-stoppar inom ungefaar `30.0-30.5 s`, fryser inte pa slutet, och review-skarmen oppnas direkt, precis som i audio-only-laget.
+Forvantat utfall: En `30 s` take i `racket_bounce_fh` auto-stoppar inom ungefaar `30.0-30.5 s`, fryser inte pa slutet, och review-skarmen oppnas direkt, precis som i audio-only-laget.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
@@ -52,7 +56,7 @@ Kommentar:
 Mode: `bounce_audio_imu_collection`
 Preset: `n/a`
 Kalibrering: `table_only`
-Forvantat utfall: Collectorn visar tydligt att den kor synced IMU och sample rate ligger rimligt nara `50 Hz` under inspelning.
+Forvantat utfall: Collectorn visar tydligt att den kor synced IMU, visar faktisk mottagen sample rate, och anger `150 Hz` som raw target dar datan sparas.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
@@ -61,7 +65,7 @@ Kommentar:
 Mode: `bounce_audio_imu_collection`
 Preset: `n/a`
 Kalibrering: `table_only`
-Forvantat utfall: Efter sparad take innehaller session-JSON både vanlig audio-eventdata och `imu_recording` med samples, start/slut-tid och sample count.
+Forvantat utfall: Efter sparad take innehaller session-JSON vanlig audio-eventdata och `imu_recording` med `target_hz: 150`, `sample_count`, `sample_hz_estimate`, intervallmetadata, `quality_flag`, `partial`, `disconnected`, samt samples med `sensor_ts`, `received_at_ms` och `take_ts_ms`.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
@@ -70,7 +74,45 @@ Kommentar:
 Mode: `bounce_audio_imu_collection`
 Preset: `n/a`
 Kalibrering: `table_only`
-Forvantat utfall: Review-flodet fungerar oforandrat pa synced takes: save, discard och `Review next pending` beter sig som i audio-only-laget.
+Forvantat utfall: Review-flodet fungerar oforandrat pa synced takes: save och discard fungerar, och `Review pending` visar bara aktuell sessions pending takes.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### AI-06
+Mode: `bounce_audio_imu_collection`
+Preset: `racket_bounce_fh`
+Kalibrering: `table_only`
+Forvantat utfall: Om faktisk IMU-rate ar lag eller ojamn markeras taket med quality-warning (`below_target`, `unstable`, eller `partial`) utan att kallas syncfel.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+## Playing Review Tests
+
+### PR-01
+Mode: `Audio plus IMU`
+Scenario: `Playing`
+Kalibrering: `table_only` eller `partial`
+Forvantat utfall: Review visar bara tre labelval: `Rackettraff forehand`, `Rackettraff backhand`, och `Bordsstuds`. Generisk rackettraff, golv, brus, ignore och other visas inte som Playing-labels.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### PR-02
+Mode: `Audio plus IMU`
+Scenario: `Playing`
+Kalibrering: `table_only` eller `partial`
+Forvantat utfall: Auto-markers visar sakerhet/confidence och filtret `Alla / Medium / Sakra` uppdaterar direkt hur manga auto-detekterade markers som visas utan att manuella eller bekraftade markers forsvinner.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### PR-03
+Mode: `Audio plus IMU`
+Scenario: `Playing`
+Kalibrering: `table_only` eller `partial`
+Forvantat utfall: En lang video startar snabbare vid `1x` playback, syncpanelen faller ihop efter `Synka har`, och `12x/16x` zoom gar att dra med playhead och edge-autoscroll.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
@@ -81,7 +123,7 @@ Kommentar:
 Mode: `audio_collection`
 Preset: `n/a`
 Kalibrering: `n/a`
-Forvantat utfall: En `30 s` take i `racket_quiet` auto-stoppar inom ungefaar `30.0-30.5 s`, fryser inte pa slutet, och review-skarmen oppnas direkt.
+Forvantat utfall: En `30 s` take i `racket_bounce_fh` visar stor kameravy, 3 s countdown, vibration vid start/stopp, auto-stoppar inom ungefaar `30.0-30.5 s`, fryser inte pa slutet, och review-skarmen oppnas direkt.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
@@ -90,7 +132,7 @@ Kommentar:
 Mode: `audio_collection`
 Preset: `n/a`
 Kalibrering: `n/a`
-Forvantat utfall: Det gar att vaxla mellan `Front camera` och `Back camera` fore take. Previewn byter kamera, visar mer av hela bilden utan hard crop, och den valda kameran anvands i den inspelade review-videon.
+Forvantat utfall: Det gar att vaxla mellan `Front` och `Back` fore take. Previewn byter kamera, visar mer av hela bilden utan hard crop, och den valda kameran anvands i den inspelade review-videon.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
@@ -203,6 +245,15 @@ Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
+### CR-09B
+Mode: `audio_collection`
+Preset: `racket_bounce_fh`, `table_bounce`, or `catch_after_sound`
+Kalibrering: `n/a`
+Forvantat utfall: `Save take` blockeras tills varje auto-marker ar hanterad med `Confirm`, label edit, `Ignore`, eller `Delete`. `Ignore` far inte raknas som negativ traningsdata.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
 ### CR-10
 Mode: `audio_collection`
 Preset: `n/a`
@@ -225,7 +276,16 @@ Kommentar:
 Mode: `audio_collection`
 Preset: `n/a`
 Kalibrering: `n/a`
-Forvantat utfall: `Review next pending` oppnar en aldre oreviewad take fran ko-listan.
+Forvantat utfall: `Review pending` oppnar bara oreviewade takes fran aktuell session. Aldre pending samples ska inte synas i collection-vyn.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### CR-13
+Mode: `audio_collection`
+Preset: `n/a`
+Kalibrering: `n/a`
+Forvantat utfall: Android navbar och statusbar ar dolda i setup, collection, recording, review, live detector och bounce-test.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
@@ -318,11 +378,12 @@ Kommentar:
 ## Acceptance For This Iteration
 
 - `AI-01` till `AI-05` ska passera eller ge tydliga, reproducerbara fel i synced collector-flodet.
-- `CR-01` till `CR-12` ska passera eller ge tydliga, reproducerbara UI-fel att fixa.
+- `CR-01` till `CR-12`, inklusive `CR-09B`, ska passera eller ge tydliga, reproducerbara UI-fel att fixa.
 - `DC-01` och `DC-02` ska passera.
 - `DC-03` eller `BF-03` ska na minst `14/20`.
 - `DC-04` eller `BF-04` ska na minst `14/20`.
 - `BA-01` far inte regressa tydligt.
+- Hard negatives: table, floor, and catch-after-sound ska visas som avvisade eller grupperade, inte dubbelraknade.
 
 
 ## Extra checks for current build
@@ -330,8 +391,9 @@ Kommentar:
 | # | Action | Expected result | Result | Notes |
 |---|--------|-----------------|--------|-------|
 | 1 | In `Studsdetektor`, move `Merge window` and bounce 10 times on racket | Higher merge window should reduce duplicate counts | ? Pass ? Fail | |
-| 2 | In `Studs fritt`, bounce only on floor | `AUDIO DEBUG` / `CONTACT DEBUG` should make it obvious if event was counted or vetoed | ? Pass ? Fail | |
-| 3 | In all three modes, compare binary + surface debug labels for one event | Debug should show both binary decision and surface (`RACKET/TABLE/FLOOR/NOISE`) | ? Pass ? Fail | |
+| 2 | In `Studsdetektor` and `Studs fritt`, create one racket bounce followed by a catch/stop sound | At most one `group_id` should count; after-sound should show `ignored_duplicate`, `surface_veto`, or another ignored reason | ? Pass ? Fail | |
+| 3 | In `Studs fritt`, bounce only on floor | `AUDIO DEBUG` / `CONTACT DEBUG` should show `group_id`, binary decision, surface label, and whether event was counted or vetoed | ? Pass ? Fail | |
+| 4 | In all three modes, compare binary + surface debug labels for one event | Debug should show both binary decision and surface (`RACKET/TABLE/FLOOR/NOISE`) | ? Pass ? Fail | |
 
 ## What To Send Me After A Test
 

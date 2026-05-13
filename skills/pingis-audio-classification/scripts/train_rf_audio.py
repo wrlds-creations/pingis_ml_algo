@@ -10,6 +10,8 @@ rows from the same source cannot leak across train and test.
 Run: python skills/pingis-audio-classification/scripts/train_rf_audio.py
 """
 
+import argparse
+import json
 import warnings
 from pathlib import Path
 
@@ -45,14 +47,51 @@ META_COLS = {
     "review_completed",
     "marker_source",
     "anchor_rule",
+    "source_trust",
+    "review_status",
+    "contact_kind",
+    "not_racket_kind",
+    "bounce_side",
+    "binary_label",
+    "class_label",
+    "event_type",
+    "scenario",
+    "bounce_context",
+    "calibration_status",
+    "contact_confidence",
+    "surface_label",
+    "surface_confidence",
+    "linked_candidate_id",
+    "detection_config_id",
+    "detection_sensitivity",
+    "detection_mode",
+    "nearest_prev_event_ms",
+    "nearest_next_event_ms",
+    "event_density_1s",
+    "close_event_bucket",
 }
 SCENARIO_BREAKDOWN_IDS = [
     "racket_quiet",
-    "racket_counting",
+    "racket_speech",
+    "racket_music",
     "racket_music_low",
+    "racket_other_bounces",
+    "racket_fast",
+    "playing_dense_audio",
+    "playing_dense_imu",
+    "table_bounce",
+    "table_noisy",
+    "floor_bounce",
+    "floor_noisy",
+    "other_bounce_noise",
+    "racket_counting",
     "racket_music_mid",
+    "catch_after_sound",
+    "speech_music_noise",
     "speech_only",
     "desk_keyboard_only",
+    "table_quiet",
+    "floor_quiet",
 ]
 
 
@@ -133,13 +172,57 @@ def print_scenario_breakdown(test_df: pd.DataFrame, y_true: np.ndarray, y_pred: 
         )
 
 
+def get_column_breakdown(test_df: pd.DataFrame, y_true: np.ndarray, y_pred: np.ndarray, le: LabelEncoder, column: str) -> dict[str, dict]:
+    if column not in test_df.columns:
+        return {"_error": {"message": f"{column} missing in dataset"}}
+
+    y_true_labels = le.inverse_transform(y_true)
+    y_pred_labels = le.inverse_transform(y_pred)
+    values = test_df[column].fillna("").astype(str)
+    breakdown: dict[str, dict] = {}
+
+    for value in sorted(values.unique()):
+        display_value = value or "unspecified"
+        mask = values == value
+        breakdown[display_value] = {
+            "rows": int(mask.sum()),
+            "exact_match": float(np.mean(y_true_labels[mask.to_numpy()] == y_pred_labels[mask.to_numpy()])),
+            "expected": pd.Series(y_true_labels[mask.to_numpy()]).value_counts().to_dict(),
+            "predicted": pd.Series(y_pred_labels[mask.to_numpy()]).value_counts().to_dict(),
+        }
+    return breakdown
+
+
+def print_column_breakdown(title: str, breakdown: dict[str, dict]) -> None:
+    if "_error" in breakdown:
+        print(f"\n{title}: {breakdown['_error']['message']}")
+        return
+
+    print(f"\n{title}:")
+    for value, item in sorted(breakdown.items(), key=lambda pair: (-int(pair[1].get("rows", 0)), pair[0])):
+        print(
+            f"  {value}: rows={item['rows']} | exact_match={item['exact_match']:.3f}"
+            f" | expected={item['expected']} | predicted={item['predicted']}"
+        )
+
+
 def main() -> None:
-    if not DATASET.exists():
-        print(f"Dataset missing: {DATASET}")
+    parser = argparse.ArgumentParser(description="Train 4-class audio RF model.")
+    parser.add_argument("--dataset", default=str(DATASET), help="Path to the multiclass audio CSV dataset.")
+    parser.add_argument("--model-dir", default=str(MODEL_DIR), help="Directory for saved model artifacts.")
+    parser.add_argument("--report-json", default="", help="Optional path to save a JSON metrics report.")
+    args = parser.parse_args()
+
+    dataset = Path(args.dataset)
+    model_dir = Path(args.model_dir)
+    report_json = Path(args.report_json) if args.report_json else None
+
+    if not dataset.exists():
+        print(f"Dataset missing: {dataset}")
         print("Run preprocess_audio.py first.")
         return
 
-    df = pd.read_csv(DATASET)
+    df = pd.read_csv(dataset)
     df = df[df["label"].isin(TARGET_LABELS)].copy()
     if "group_id" not in df.columns:
         df["group_id"] = df["source_file"].astype(str) if "source_file" in df.columns else df.index.astype(str)
@@ -203,9 +286,20 @@ def main() -> None:
     print(f"Grouped CV F1 (macro, {n_splits} folds): {grid.best_score_:.3f}")
 
     y_pred = clf.predict(X_test)
+    report_dict = classification_report(y_test, y_pred, target_names=le.classes_, zero_division=0, output_dict=True)
     print("\nGrouped test report:\n")
     print(classification_report(y_test, y_pred, target_names=le.classes_, zero_division=0))
     print_scenario_breakdown(test_df, y_test, y_pred, le)
+    source_trust_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "source_trust")
+    background_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "background_condition")
+    close_event_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "close_event_bucket")
+    detection_mode_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "detection_mode")
+    detection_sensitivity_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "detection_sensitivity")
+    print_column_breakdown("Source/trust breakdown", source_trust_breakdown)
+    print_column_breakdown("Background breakdown", background_breakdown)
+    print_column_breakdown("Close-event breakdown", close_event_breakdown)
+    print_column_breakdown("Detection-mode breakdown", detection_mode_breakdown)
+    print_column_breakdown("Detection-sensitivity breakdown", detection_sensitivity_breakdown)
 
     X_full_raw = df[feature_cols].values.astype(np.float32)
     y_full = le.transform(df["label"].values)
@@ -230,19 +324,19 @@ def main() -> None:
     if low_importance:
         print(f"\nFeatures with importance < 0.5%: {low_importance}")
 
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(final_clf, MODEL_DIR / "audio_rf_classifier.pkl")
-    joblib.dump(final_scaler, MODEL_DIR / "audio_feature_scaler.pkl")
-    joblib.dump(le, MODEL_DIR / "audio_label_encoder.pkl")
-    joblib.dump(feature_cols, MODEL_DIR / "audio_feature_cols.pkl")
-    print(f"\nFinal full-data model saved to {MODEL_DIR}")
+    model_dir.mkdir(parents=True, exist_ok=True)
+    joblib.dump(final_clf, model_dir / "audio_rf_classifier.pkl")
+    joblib.dump(final_scaler, model_dir / "audio_feature_scaler.pkl")
+    joblib.dump(le, model_dir / "audio_label_encoder.pkl")
+    joblib.dump(feature_cols, model_dir / "audio_feature_cols.pkl")
+    print(f"\nFinal full-data model saved to {model_dir}")
 
     cm = confusion_matrix(y_test, y_pred)
     disp = ConfusionMatrixDisplay(cm, display_labels=le.classes_)
     disp.plot(colorbar=False)
     plt.title("Audio bounce confusion matrix (grouped test)")
     plt.tight_layout()
-    out_fig = MODEL_DIR / "confusion_matrix.png"
+    out_fig = model_dir / "confusion_matrix.png"
     plt.savefig(out_fig, dpi=120)
     print(f"Confusion matrix saved: {out_fig}")
 
@@ -256,8 +350,35 @@ def main() -> None:
     ax.set_xlabel("Importance")
     ax.set_title("Top-25 feature importance")
     plt.tight_layout()
-    fig.savefig(MODEL_DIR / "feature_importance.png", dpi=120)
-    print(f"Feature importance saved: {MODEL_DIR / 'feature_importance.png'}")
+    fig.savefig(model_dir / "feature_importance.png", dpi=120)
+    print(f"Feature importance saved: {model_dir / 'feature_importance.png'}")
+
+    if report_json is not None:
+        report_json.parent.mkdir(parents=True, exist_ok=True)
+        report_json.write_text(
+            json.dumps(
+                {
+                    "dataset": str(dataset),
+                    "rows": int(len(df)),
+                    "labels": {str(k): int(v) for k, v in df["label"].value_counts().to_dict().items()},
+                    "train_rows": int(len(train_df)),
+                    "test_rows": int(len(test_df)),
+                    "train_groups": int(train_df["group_id"].nunique()),
+                    "test_groups": int(test_df["group_id"].nunique()),
+                    "best_params": grid.best_params_,
+                    "grouped_cv_f1_macro": float(grid.best_score_),
+                    "grouped_test_report": report_dict,
+                    "source_trust_breakdown": source_trust_breakdown,
+                    "background_breakdown": background_breakdown,
+                    "close_event_breakdown": close_event_breakdown,
+                    "detection_mode_breakdown": detection_mode_breakdown,
+                    "detection_sensitivity_breakdown": detection_sensitivity_breakdown,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"JSON report saved: {report_json}")
 
 
 if __name__ == "__main__":

@@ -43,6 +43,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Export binary audio contact RF to app JSON.")
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR), help="Directory containing trained contact model artifacts.")
     parser.add_argument("--out-path", default=str(DEFAULT_OUT_PATH), help="Output JSON path for the app model.")
+    parser.add_argument("--model-version", default=None, help="Human-readable model version id stored in JSON metadata.")
+    parser.add_argument("--train-dataset", default=None, help="Dataset id/variant stored in JSON metadata.")
+    parser.add_argument("--feature-version", default="audio_features_62_v1", help="Feature version stored in JSON metadata.")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
@@ -54,6 +57,14 @@ def main() -> None:
     feature_cols = joblib.load(model_dir / "audio_contact_feature_cols.pkl")
 
     model = {
+        "metadata": {
+            "model_version": args.model_version or model_dir.name,
+            "train_dataset": args.train_dataset or model_dir.name,
+            "feature_version": args.feature_version,
+            "model_type": "random_forest_binary_audio_contact",
+            "classes": le.classes_.tolist(),
+            "tree_count": len(clf.estimators_),
+        },
         "labels": le.classes_.tolist(),
         "feature_names": feature_cols,
         "scaler_mean": [round(float(v), 8) for v in scaler.mean_],

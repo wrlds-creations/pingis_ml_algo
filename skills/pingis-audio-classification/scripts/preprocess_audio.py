@@ -76,6 +76,7 @@ RAW_DIR = ROOT_DIR / "data" / "audio" / "raw"
 OUT_DIR = ROOT_DIR / "data" / "audio" / "processed"
 OUT_FILE = OUT_DIR / "audio_dataset.csv"
 OUT_CONTACT_FILE = OUT_DIR / "audio_contact_dataset.csv"
+OUT_CANDIDATE_REVIEW_FILE = OUT_DIR / "audio_candidate_review_report.csv"
 
 TARGET_SR = 22050
 CLIP_FRAMES = TARGET_SR
@@ -83,9 +84,70 @@ CLIP_FRAMES = TARGET_SR
 MIN_ONSET_GAP_S = 0.30
 WINDOW_BEFORE_S = 0.30
 WINDOW_AFTER_S = 0.70
+REVIEW_WINDOW_BEFORE_S = 0.12
+REVIEW_WINDOW_AFTER_S = 0.28
+TIGHT_REVIEW_WINDOW_BEFORE_S = 0.06
+TIGHT_REVIEW_WINDOW_AFTER_S = 0.14
 MIN_CLIP_RMS = 0.005
+TIGHT_EVENT_GAP_MS = 300
+NORMAL_EVENT_GAP_MS = 700
+NEGATIVE_OVERLAP_SKIP_MS = 300
 
 AUGMENT_SNR_DB = [20.0, 8.0]
+VALID_AUDIO_LABELS = {"racket_bounce", "table_bounce", "floor_bounce", "noise"}
+SKIPPED_REVIEW_STATUSES = {"pending", "deleted", "filtered"}
+TRAINABLE_REVIEW_LABELS = {"racket_contact", "not_racket_contact"}
+NON_AUDIO_REVIEW_CLASS_LABELS = {"no_bounce_motion"}
+EXCLUDED_TRAINING_SESSIONS = {
+    "audio_session_2026-05-11_001",
+}
+MUSIC_RACKET_SCENARIOS = {"racket_music", "racket_music_low", "racket_music_mid"}
+
+
+def contact_kind_for(label: str, scenario_id: str) -> str:
+    if label == "racket_bounce" or scenario_id.startswith("racket_bounce") or scenario_id == "free_recording":
+        return "racket_bounce"
+    return ""
+
+
+def not_racket_kind_for(label: str, scenario_id: str) -> str:
+    if label == "table_bounce" or scenario_id in {"table_bounce", "table_noisy"}:
+        return "table_bounce"
+    if label == "floor_bounce" or scenario_id in {"floor_bounce", "floor_noisy"}:
+        return "floor_bounce"
+    if scenario_id == "catch_after_sound":
+        return "catch_after_sound"
+    if scenario_id == "speech_music_noise":
+        return "voice_music_noise"
+    if label == "noise" or scenario_id == "other_bounce_noise":
+        return "other_impact"
+    return ""
+
+
+def multiclass_label_for_marker(final_label: str, contact_kind: str, not_racket_kind: str) -> str:
+    if final_label == "racket_contact":
+        return contact_kind or "racket_bounce"
+    if not_racket_kind in {"table_bounce", "floor_bounce"}:
+        return not_racket_kind
+    return "noise"
+
+
+def binary_label_for_audio_label(label: str) -> str:
+    if label == "racket_bounce":
+        return "racket_contact"
+    if label in {"table_bounce", "floor_bounce", "noise"}:
+        return "not_racket_contact"
+    return ""
+
+
+def event_type_for_class_label(class_label: str) -> str:
+    if class_label in {"racket_bounce", "forehand", "backhand", "forehand_hit", "backhand_hit"}:
+        return "racket_hit"
+    if class_label in {"table_bounce", "floor_bounce"}:
+        return "bounce"
+    if class_label == "ignore":
+        return "ignore"
+    return "noise"
 
 
 def extract_transient_features(y: np.ndarray, sr: int = TARGET_SR) -> dict:
@@ -274,12 +336,100 @@ def extract_clips_chunks(y: np.ndarray, sr: int) -> list[np.ndarray]:
     return [y[i * sr : (i + 1) * sr] for i in range(n_chunks)]
 
 
-def extract_clip_around_ms(y: np.ndarray, sr: int, timestamp_ms: int) -> np.ndarray:
+def extract_clip_around_ms(
+    y: np.ndarray,
+    sr: int,
+    timestamp_ms: int,
+    before_s: float = REVIEW_WINDOW_BEFORE_S,
+    after_s: float = REVIEW_WINDOW_AFTER_S,
+) -> np.ndarray:
     center_sample = int(round((timestamp_ms / 1000.0) * sr))
-    start = max(0, center_sample - int(WINDOW_BEFORE_S * sr))
-    end = min(len(y), start + CLIP_FRAMES)
+    start = max(0, center_sample - int(before_s * sr))
+    end = min(len(y), center_sample + int(after_s * sr))
     clip = y[start:end]
     return librosa.util.fix_length(clip, size=CLIP_FRAMES)
+
+
+def is_trainable_review_marker(marker: dict) -> bool:
+    final_label = marker.get("final_label")
+    review_status = str(marker.get("review_status") or "confirmed")
+    class_label = str(marker.get("class_label") or "")
+    return (
+        final_label in TRAINABLE_REVIEW_LABELS and
+        review_status not in SKIPPED_REVIEW_STATUSES and
+        class_label not in NON_AUDIO_REVIEW_CLASS_LABELS
+    )
+
+
+def is_trainable_racket_marker(marker: dict) -> bool:
+    return is_trainable_review_marker(marker) and marker.get("final_label") == "racket_contact"
+
+
+def reviewed_racket_timestamps(markers: list[dict]) -> list[int]:
+    return sorted(int(marker.get("timestamp_ms", 0)) for marker in markers if is_trainable_racket_marker(marker))
+
+
+def negative_marker_overlaps_racket(
+    marker: dict,
+    racket_timestamps_ms: list[int],
+    before_s: float = REVIEW_WINDOW_BEFORE_S,
+    after_s: float = REVIEW_WINDOW_AFTER_S,
+) -> bool:
+    if marker.get("final_label") != "not_racket_contact":
+        return False
+    timestamp_ms = int(marker.get("timestamp_ms", 0))
+    marker_start_ms = timestamp_ms - int(round(before_s * 1000))
+    marker_end_ms = timestamp_ms + int(round(after_s * 1000))
+    for racket_ts in racket_timestamps_ms:
+        racket_start_ms = racket_ts - int(round(before_s * 1000))
+        racket_end_ms = racket_ts + int(round(after_s * 1000))
+        if marker_start_ms < racket_end_ms and marker_end_ms > racket_start_ms:
+            return True
+    return False
+
+
+def trainable_marker_class_counts(markers: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for marker in markers:
+        status = str(marker.get("review_status") or "confirmed")
+        final_label = str(marker.get("final_label") or "")
+        if status in SKIPPED_REVIEW_STATUSES or final_label == "ignore":
+            continue
+        class_label = str(
+            marker.get("class_label")
+            or marker.get("contact_kind")
+            or marker.get("not_racket_kind")
+            or final_label
+        )
+        counts[class_label] = counts.get(class_label, 0) + 1
+    return counts
+
+
+def reviewed_marker_timestamps(markers: list[dict]) -> list[int]:
+    return sorted(int(marker.get("timestamp_ms", 0)) for marker in markers if is_trainable_review_marker(marker))
+
+
+def spacing_metadata_for_timestamp(timestamps_ms: list[int], timestamp_ms: int) -> dict:
+    prev_gaps = [timestamp_ms - ts for ts in timestamps_ms if ts < timestamp_ms]
+    next_gaps = [ts - timestamp_ms for ts in timestamps_ms if ts > timestamp_ms]
+    nearest_prev = min(prev_gaps) if prev_gaps else ""
+    nearest_next = min(next_gaps) if next_gaps else ""
+    neighbor_gaps = [gap for gap in (nearest_prev, nearest_next) if gap != ""]
+    nearest_gap = min(neighbor_gaps) if neighbor_gaps else None
+
+    if nearest_gap is None or nearest_gap > NORMAL_EVENT_GAP_MS:
+        bucket = "isolated"
+    elif nearest_gap <= TIGHT_EVENT_GAP_MS:
+        bucket = "tight"
+    else:
+        bucket = "normal"
+
+    return {
+        "nearest_prev_event_ms": nearest_prev,
+        "nearest_next_event_ms": nearest_next,
+        "event_density_1s": sum(1 for ts in timestamps_ms if abs(ts - timestamp_ms) <= 500),
+        "close_event_bucket": bucket,
+    }
 
 
 def mix_with_noise(signal: np.ndarray, noise_pool: list[np.ndarray], snr_db: float, rng: np.random.Generator) -> np.ndarray:
@@ -306,9 +456,54 @@ def main() -> None:
     parser.add_argument(
         "--bootstrap-unreviewed",
         action="store_true",
-        help="Include unreviewed racket/noise takes in the contact dataset as a temporary bootstrap.",
+        help="Include unreviewed racket/noise/table/floor takes in the contact dataset as a temporary bootstrap.",
+    )
+    parser.add_argument(
+        "--review-window-mode",
+        choices=["normal", "tight", "hybrid"],
+        default="normal",
+        help=(
+            "Reviewed marker clip window mode. normal uses the default reviewed window, "
+            "tight uses a shorter window for every reviewed marker, and hybrid uses the "
+            "shorter window only when another reviewed event is close."
+        ),
+    )
+    parser.add_argument(
+        "--review-window-before-ms",
+        type=float,
+        default=REVIEW_WINDOW_BEFORE_S * 1000,
+        help="Milliseconds before a reviewed marker in normal/hybrid-normal mode.",
+    )
+    parser.add_argument(
+        "--review-window-after-ms",
+        type=float,
+        default=REVIEW_WINDOW_AFTER_S * 1000,
+        help="Milliseconds after a reviewed marker in normal/hybrid-normal mode.",
+    )
+    parser.add_argument(
+        "--tight-review-window-before-ms",
+        type=float,
+        default=TIGHT_REVIEW_WINDOW_BEFORE_S * 1000,
+        help="Milliseconds before a reviewed marker in tight/hybrid-tight mode.",
+    )
+    parser.add_argument(
+        "--tight-review-window-after-ms",
+        type=float,
+        default=TIGHT_REVIEW_WINDOW_AFTER_S * 1000,
+        help="Milliseconds after a reviewed marker in tight/hybrid-tight mode.",
+    )
+    parser.add_argument(
+        "--tight-gap-ms",
+        type=float,
+        default=TIGHT_EVENT_GAP_MS,
+        help="Nearest-neighbor event gap threshold for hybrid tight windows.",
     )
     args = parser.parse_args()
+    normal_review_window = (args.review_window_before_ms / 1000.0, args.review_window_after_ms / 1000.0)
+    tight_review_window = (
+        args.tight_review_window_before_ms / 1000.0,
+        args.tight_review_window_after_ms / 1000.0,
+    )
 
     session_files = sorted(RAW_DIR.glob("audio_session_*.json"))
     archive_dir = RAW_DIR / "archive_m4a"
@@ -321,9 +516,11 @@ def main() -> None:
     rng = np.random.default_rng(42)
     multiclass_rows: list[dict] = []
     contact_rows: list[dict] = []
+    candidate_review_rows: list[dict] = []
     errors = 0
     raw_multiclass = 0
     raw_contact = 0
+    negative_overlap_skipped = 0
 
     multiclass_positive_examples: list[dict] = []
     multiclass_noise_clips: list[np.ndarray] = []
@@ -348,6 +545,28 @@ def main() -> None:
         review_completed: bool | None = None,
         marker_source: str = "auto",
         anchor_rule: str | None = None,
+        source_trust: str = "legacy_auto",
+        review_status: str = "",
+        contact_kind: str = "",
+        not_racket_kind: str = "",
+        bounce_side: str = "",
+        binary_label: str = "",
+        class_label: str = "",
+        event_type: str = "",
+        scenario: str = "",
+        bounce_context: str = "",
+        calibration_status: str = "",
+        contact_confidence: str | float = "",
+        surface_label: str = "",
+        surface_confidence: str | float = "",
+        linked_candidate_id: str = "",
+        detection_config_id: str = "",
+        detection_sensitivity: str = "",
+        detection_mode: str = "",
+        nearest_prev_event_ms: str | int | float = "",
+        nearest_next_event_ms: str | int | float = "",
+        event_density_1s: str | int = "",
+        close_event_bucket: str = "",
     ) -> bool:
         try:
             feats = extract_features(clip, sr)
@@ -356,6 +575,9 @@ def main() -> None:
             return False
 
         feats["label"] = label
+        feats["binary_label"] = binary_label or binary_label_for_audio_label(label)
+        feats["class_label"] = class_label or label
+        feats["event_type"] = event_type or event_type_for_class_label(class_label or label)
         feats["recorder_name"] = recorder
         feats["session_id"] = session_id
         feats["source_file"] = source_file
@@ -366,6 +588,25 @@ def main() -> None:
         feats["target_duration_s"] = target_duration_s
         feats["clip_id"] = clip_id
         feats["augmentation"] = augmentation
+        feats["source_trust"] = source_trust
+        feats["review_status"] = review_status
+        feats["contact_kind"] = contact_kind
+        feats["not_racket_kind"] = not_racket_kind
+        feats["bounce_side"] = bounce_side
+        feats["scenario"] = scenario
+        feats["bounce_context"] = bounce_context
+        feats["calibration_status"] = calibration_status
+        feats["contact_confidence"] = contact_confidence
+        feats["surface_label"] = surface_label
+        feats["surface_confidence"] = surface_confidence
+        feats["linked_candidate_id"] = linked_candidate_id
+        feats["detection_config_id"] = detection_config_id
+        feats["detection_sensitivity"] = detection_sensitivity
+        feats["detection_mode"] = detection_mode
+        feats["nearest_prev_event_ms"] = nearest_prev_event_ms
+        feats["nearest_next_event_ms"] = nearest_next_event_ms
+        feats["event_density_1s"] = event_density_1s
+        feats["close_event_bucket"] = close_event_bucket
         if review_completed is not None:
             feats["review_completed"] = review_completed
             feats["marker_source"] = marker_source
@@ -373,6 +614,125 @@ def main() -> None:
             feats["anchor_rule"] = anchor_rule
         rows.append(feats)
         return True
+
+    def append_candidate_review_rows(
+        *,
+        candidates: list[dict],
+        markers: list[dict],
+        recorder: str,
+        session_id: str,
+        source_file: str,
+        group_id: str,
+        scenario_id: str,
+        background_condition: str,
+        take_index: int,
+        scenario: str,
+        detection_config: dict,
+    ) -> None:
+        linked_markers = {
+            str(marker.get("linked_candidate_id")): marker
+            for marker in markers
+            if marker.get("linked_candidate_id")
+        }
+        racket_timestamps = reviewed_racket_timestamps(markers)
+
+        def marker_outcome(marker: dict | None, candidate: dict) -> str:
+            if marker is None:
+                return "filtered_or_deleted"
+            status = str(marker.get("review_status") or "pending")
+            final_label = str(marker.get("final_label") or "")
+            suggested_label = str(candidate.get("suggested_label") or "")
+            if status in {"pending", "filtered", "deleted"}:
+                return status
+            if final_label == "ignore" or status == "ignored":
+                return "ignored"
+            if negative_marker_overlaps_racket(marker, racket_timestamps):
+                return "negative_overlap_skipped"
+            if final_label == suggested_label:
+                return "true_positive"
+            return "false_positive_corrected"
+
+        for candidate in candidates:
+            candidate_id = str(candidate.get("id") or "")
+            marker = linked_markers.get(candidate_id)
+            candidate_review_rows.append({
+                "session_id": session_id,
+                "source_file": source_file,
+                "group_id": group_id,
+                "recorder_name": recorder,
+                "scenario_id": scenario_id,
+                "scenario": scenario,
+                "background_condition": background_condition,
+                "take_index": take_index,
+                "candidate_id": candidate_id,
+                "timestamp_ms": candidate.get("timestamp_ms", ""),
+                "review_relevant": bool(candidate.get("review_relevant")),
+                "candidate_outcome": marker_outcome(marker, candidate),
+                "suggested_label": candidate.get("suggested_label", ""),
+                "final_label": marker.get("final_label", "") if marker else "",
+                "review_status": marker.get("review_status", "") if marker else "",
+                "marker_source": marker.get("source", "") if marker else "",
+                "contact_confidence": candidate.get("contact_confidence", ""),
+                "surface_label": candidate.get("surface_label", ""),
+                "surface_confidence": candidate.get("surface_confidence", ""),
+                "detection_config_id": candidate.get("detection_config_id") or detection_config.get("config_id", ""),
+                "detection_sensitivity": detection_config.get("sensitivity", ""),
+                "detection_mode": candidate.get("detection_mode") or detection_config.get("detection_mode", ""),
+                "ignored_reason": candidate.get("ignored_reason", ""),
+            })
+
+        candidate_ids = {str(candidate.get("id") or "") for candidate in candidates}
+        for marker in markers:
+            status = str(marker.get("review_status") or "confirmed")
+            linked_candidate_id = str(marker.get("linked_candidate_id") or "")
+            if marker.get("source") != "manual":
+                continue
+            if status in SKIPPED_REVIEW_STATUSES or marker.get("final_label") == "ignore":
+                continue
+            if linked_candidate_id and linked_candidate_id in candidate_ids:
+                continue
+            candidate_outcome = "negative_overlap_skipped" if negative_marker_overlaps_racket(marker, racket_timestamps) else "false_negative_manual_added"
+            candidate_review_rows.append({
+                "session_id": session_id,
+                "source_file": source_file,
+                "group_id": group_id,
+                "recorder_name": recorder,
+                "scenario_id": scenario_id,
+                "scenario": scenario,
+                "background_condition": background_condition,
+                "take_index": take_index,
+                "candidate_id": "",
+                "timestamp_ms": marker.get("timestamp_ms", ""),
+                "review_relevant": False,
+                "candidate_outcome": candidate_outcome,
+                "suggested_label": "",
+                "final_label": marker.get("final_label", ""),
+                "review_status": status,
+                "marker_source": "manual",
+                "contact_confidence": marker.get("contact_confidence", ""),
+                "surface_label": marker.get("surface_label", ""),
+                "surface_confidence": marker.get("surface_confidence", ""),
+                "detection_config_id": detection_config.get("config_id", ""),
+                "detection_sensitivity": detection_config.get("sensitivity", ""),
+                "detection_mode": detection_config.get("detection_mode", ""),
+                "ignored_reason": "",
+            })
+
+    def review_window_for_spacing(spacing: dict) -> tuple[float, float]:
+        if args.review_window_mode == "tight":
+            return tight_review_window
+        if args.review_window_mode == "hybrid":
+            neighbor_gaps: list[float] = []
+            for key in ("nearest_prev_event_ms", "nearest_next_event_ms"):
+                value = spacing.get(key, "")
+                if value != "":
+                    try:
+                        neighbor_gaps.append(float(value))
+                    except (TypeError, ValueError):
+                        pass
+            if neighbor_gaps and min(neighbor_gaps) <= args.tight_gap_ms:
+                return tight_review_window
+        return normal_review_window
 
     def auto_segment(label: str, y: np.ndarray, sr: int, session_mode: bool) -> tuple[list[np.ndarray], int]:
         if session_mode:
@@ -382,6 +742,11 @@ def main() -> None:
         return [y], 0
 
     for session_path in session_files:
+        session_id = session_path.stem
+        if session_id in EXCLUDED_TRAINING_SESSIONS:
+            print(f"  Hoppar över diagnostic-only session: {session_id}")
+            continue
+
         with open(session_path, encoding="utf-8") as f:
             session = json.load(f)
 
@@ -391,23 +756,41 @@ def main() -> None:
 
         for event in session["events"]:
             audio_path = session_dir / event["wav_filename"]
+            review = event.get("review") or {}
+            markers = review.get("markers") or []
+            review_completed = bool(review.get("completed_at")) and len(markers) > 0
+            if bool(review.get("required")) and not review_completed:
+                print(f"  {event['wav_filename']}: hoppar över review-krävd men ej färdig take")
+                continue
             if not audio_path.exists():
                 print(f"  Saknas: {audio_path}")
                 errors += 1
                 continue
 
             label = str(event["label"])
-            session_id = session_path.stem
             source_file = str(event["wav_filename"])
             group_id = str(event.get("group_id") or f"{session_id}:{source_file}")
             scenario_id = str(event.get("scenario_id", "legacy_unspecified"))
+            recording_scenario = str(event.get("scenario") or "")
+            bounce_context = str(event.get("bounce_context") or "")
+            calibration_status = str(
+                event.get("calibration_status") or session["session_meta"].get("calibration_status") or ""
+            )
             background_condition = str(event.get("background_condition", "quiet"))
             take_index = int(event.get("take_index", 0))
             target_duration_s = int(event.get("target_duration_s", 0))
-            review = event.get("review") or {}
-            markers = review.get("markers") or []
-            review_completed = bool(review.get("completed_at")) and len(markers) > 0
+            model_candidates = event.get("model_candidates") or []
+            detection_config = event.get("detection_config_snapshot") or session["session_meta"].get("detection_config_snapshot") or {}
+            detection_config_id = str(detection_config.get("config_id") or "")
+            detection_sensitivity = str(detection_config.get("sensitivity") or "")
+            detection_mode = str(detection_config.get("detection_mode") or "")
             anchor_rule = str(review.get("anchor_rule") or "attack_start")
+            if review_completed and scenario_id in MUSIC_RACKET_SCENARIOS:
+                class_counts = trainable_marker_class_counts(markers)
+                print(
+                    f"  Sanity music take: {session_id}/{source_file} "
+                    f"background={background_condition} classes={class_counts}"
+                )
 
             try:
                 y, sr = load_audio(str(audio_path))
@@ -417,18 +800,71 @@ def main() -> None:
                 continue
 
             if review_completed:
+                append_candidate_review_rows(
+                    candidates=model_candidates,
+                    markers=markers,
+                    recorder=recorder,
+                    session_id=session_id,
+                    source_file=source_file,
+                    group_id=group_id,
+                    scenario_id=scenario_id,
+                    background_condition=background_condition,
+                    take_index=take_index,
+                    scenario=recording_scenario,
+                    detection_config=detection_config,
+                )
                 accepted_markers = 0
+                review_timestamps = reviewed_marker_timestamps(markers)
+                review_racket_timestamps = reviewed_racket_timestamps(markers)
                 for marker_idx, marker in enumerate(markers):
                     final_label = marker.get("final_label")
-                    if final_label == "ignore":
+                    review_status = str(marker.get("review_status") or "confirmed")
+                    marker_class_label = str(marker.get("class_label") or "")
+                    if review_status in SKIPPED_REVIEW_STATUSES or final_label == "ignore":
+                        continue
+                    if marker_class_label in NON_AUDIO_REVIEW_CLASS_LABELS:
+                        continue
+                    if final_label not in {"racket_contact", "not_racket_contact"}:
                         continue
 
                     timestamp_ms = int(marker.get("timestamp_ms", 0))
+                    spacing = spacing_metadata_for_timestamp(review_timestamps, timestamp_ms)
+                    window_before_s, window_after_s = review_window_for_spacing(spacing)
+                    if negative_marker_overlaps_racket(
+                        marker,
+                        review_racket_timestamps,
+                        before_s=window_before_s,
+                        after_s=window_after_s,
+                    ):
+                        negative_overlap_skipped += 1
+                        continue
                     marker_source = str(marker.get("source", "auto"))
-                    clip = extract_clip_around_ms(y, sr, timestamp_ms)
+                    contact_kind = str(
+                        marker.get("contact_kind")
+                        or ("racket_bounce" if final_label == "racket_contact" else "")
+                    )
+                    not_racket_kind = str(
+                        marker.get("not_racket_kind")
+                        or (not_racket_kind_for(label, scenario_id) if final_label == "not_racket_contact" else "")
+                    )
+                    bounce_side = str(marker.get("bounce_side") or "unknown")
+                    marker_event_type = str(marker.get("event_type") or "")
+                    marker_contact_confidence = marker.get("contact_confidence", "")
+                    marker_surface_label = str(marker.get("surface_label") or "")
+                    marker_surface_confidence = marker.get("surface_confidence", "")
+                    linked_candidate_id = str(marker.get("linked_candidate_id") or "")
+                    clip = extract_clip_around_ms(
+                        y,
+                        sr,
+                        timestamp_ms,
+                        before_s=window_before_s,
+                        after_s=window_after_s,
+                    )
                     clip_id = f"{group_id}:review:{marker_idx:03d}"
 
-                    multi_label = "racket_bounce" if final_label == "racket_contact" else "noise"
+                    multi_label = multiclass_label_for_marker(str(final_label), contact_kind, not_racket_kind)
+                    export_class_label = marker_class_label or multi_label
+                    export_event_type = marker_event_type or event_type_for_class_label(export_class_label)
                     if append_row(
                         multiclass_rows,
                         multi_label,
@@ -445,6 +881,25 @@ def main() -> None:
                         clip_id,
                         "none",
                         anchor_rule=anchor_rule,
+                        source_trust="human_reviewed",
+                        review_status=review_status,
+                        contact_kind=contact_kind,
+                        not_racket_kind=not_racket_kind,
+                        bounce_side=bounce_side,
+                        binary_label=str(final_label),
+                        class_label=export_class_label,
+                        event_type=export_event_type,
+                        scenario=recording_scenario,
+                        bounce_context=bounce_context,
+                        calibration_status=calibration_status,
+                        contact_confidence=marker_contact_confidence,
+                        surface_label=marker_surface_label,
+                        surface_confidence=marker_surface_confidence,
+                        linked_candidate_id=linked_candidate_id,
+                        detection_config_id=detection_config_id,
+                        detection_sensitivity=detection_sensitivity,
+                        detection_mode=detection_mode,
+                        **spacing,
                     ):
                         raw_multiclass += 1
                         fixed_clip = librosa.util.fix_length(clip.copy(), size=TARGET_SR)
@@ -462,6 +917,25 @@ def main() -> None:
                                 "background_condition": background_condition,
                                 "take_index": take_index,
                                 "target_duration_s": target_duration_s,
+                                "source_trust": "human_reviewed_augmented",
+                                "review_status": review_status,
+                                "contact_kind": contact_kind,
+                                "not_racket_kind": not_racket_kind,
+                                "bounce_side": bounce_side,
+                                "binary_label": str(final_label),
+                                "class_label": export_class_label,
+                                "event_type": export_event_type,
+                                "scenario": recording_scenario,
+                                "bounce_context": bounce_context,
+                                "calibration_status": calibration_status,
+                                "contact_confidence": marker_contact_confidence,
+                                "surface_label": marker_surface_label,
+                                "surface_confidence": marker_surface_confidence,
+                                "linked_candidate_id": linked_candidate_id,
+                                "detection_config_id": detection_config_id,
+                                "detection_sensitivity": detection_sensitivity,
+                                "detection_mode": detection_mode,
+                                **spacing,
                             })
 
                     if append_row(
@@ -482,6 +956,25 @@ def main() -> None:
                         review_completed=True,
                         marker_source=marker_source,
                         anchor_rule=anchor_rule,
+                        source_trust="human_reviewed",
+                        review_status=review_status,
+                        contact_kind=contact_kind,
+                        not_racket_kind=not_racket_kind,
+                        bounce_side=bounce_side,
+                        binary_label=str(final_label),
+                        class_label=export_class_label,
+                        event_type=export_event_type,
+                        scenario=recording_scenario,
+                        bounce_context=bounce_context,
+                        calibration_status=calibration_status,
+                        contact_confidence=marker_contact_confidence,
+                        surface_label=marker_surface_label,
+                        surface_confidence=marker_surface_confidence,
+                        linked_candidate_id=linked_candidate_id,
+                        detection_config_id=detection_config_id,
+                        detection_sensitivity=detection_sensitivity,
+                        detection_mode=detection_mode,
+                        **spacing,
                     ):
                         raw_contact += 1
                         accepted_markers += 1
@@ -498,11 +991,34 @@ def main() -> None:
                                 "background_condition": background_condition,
                                 "take_index": take_index,
                                 "target_duration_s": target_duration_s,
-                            })
+                                "source_trust": "human_reviewed_augmented",
+                                "review_status": review_status,
+                                "contact_kind": contact_kind,
+                                "not_racket_kind": not_racket_kind,
+                                "bounce_side": bounce_side,
+                                "binary_label": str(final_label),
+                                "class_label": export_class_label,
+                                "event_type": export_event_type,
+                                    "scenario": recording_scenario,
+                                    "bounce_context": bounce_context,
+                                    "calibration_status": calibration_status,
+                                    "contact_confidence": marker_contact_confidence,
+                                    "surface_label": marker_surface_label,
+                                    "surface_confidence": marker_surface_confidence,
+                                    "linked_candidate_id": linked_candidate_id,
+                                    "detection_config_id": detection_config_id,
+                                    "detection_sensitivity": detection_sensitivity,
+                                    "detection_mode": detection_mode,
+                                    **spacing,
+                                })
                         else:
                             contact_negative_clips.append(fixed_clip)
 
                 print(f"  {audio_path.name}: {accepted_markers} review-markorer")
+                continue
+
+            if label not in VALID_AUDIO_LABELS:
+                print(f"  {audio_path.name}: hoppar över ogranskad label '{label}'")
                 continue
 
             auto_clips, dropped = auto_segment(label, y, sr, session_mode)
@@ -527,6 +1043,19 @@ def main() -> None:
                     target_duration_s,
                     clip_id,
                     "none",
+                    source_trust="legacy_auto",
+                    contact_kind=contact_kind_for(label, scenario_id),
+                    not_racket_kind=not_racket_kind_for(label, scenario_id),
+                    bounce_side="unknown",
+                    binary_label=binary_label_for_audio_label(label),
+                    class_label=label,
+                    event_type=event_type_for_class_label(label),
+                    scenario=recording_scenario,
+                    bounce_context=bounce_context,
+                    calibration_status=calibration_status,
+                    detection_config_id=detection_config_id,
+                    detection_sensitivity=detection_sensitivity,
+                    detection_mode=detection_mode,
                 )
                 if added_multi:
                     raw_multiclass += 1
@@ -545,14 +1074,30 @@ def main() -> None:
                             "background_condition": background_condition,
                             "take_index": take_index,
                             "target_duration_s": target_duration_s,
+                            "source_trust": "legacy_auto_augmented",
+                            "review_status": "",
+                            "contact_kind": contact_kind_for(label, scenario_id),
+                            "not_racket_kind": not_racket_kind_for(label, scenario_id),
+                            "bounce_side": "unknown",
+                            "binary_label": binary_label_for_audio_label(label),
+                            "class_label": label,
+                            "event_type": event_type_for_class_label(label),
+                            "scenario": recording_scenario,
+                            "bounce_context": bounce_context,
+                            "calibration_status": calibration_status,
+                            "detection_config_id": detection_config_id,
+                            "detection_sensitivity": detection_sensitivity,
+                            "detection_mode": detection_mode,
                         })
 
                 should_bootstrap_contact = args.bootstrap_unreviewed and label in {"racket_bounce", "noise"}
-                should_auto_negative = label in {"table_bounce", "floor_bounce"}
+                should_auto_negative = args.bootstrap_unreviewed and label in {"table_bounce", "floor_bounce"}
                 if not should_bootstrap_contact and not should_auto_negative:
                     continue
 
                 contact_label = "racket_contact" if label == "racket_bounce" else "not_racket_contact"
+                contact_kind = contact_kind_for(label, scenario_id) if contact_label == "racket_contact" else ""
+                not_racket_kind = not_racket_kind_for(label, scenario_id) if contact_label == "not_racket_contact" else ""
                 added_contact = append_row(
                     contact_rows,
                     contact_label,
@@ -570,6 +1115,20 @@ def main() -> None:
                     "none",
                     review_completed=False,
                     marker_source="auto",
+                    source_trust="bootstrap",
+                    review_status="",
+                    contact_kind=contact_kind,
+                    not_racket_kind=not_racket_kind,
+                    bounce_side="unknown",
+                    binary_label=contact_label,
+                    class_label=label,
+                    event_type=event_type_for_class_label(label),
+                    scenario=recording_scenario,
+                    bounce_context=bounce_context,
+                    calibration_status=calibration_status,
+                    detection_config_id=detection_config_id,
+                    detection_sensitivity=detection_sensitivity,
+                    detection_mode=detection_mode,
                 )
                 if added_contact:
                     raw_contact += 1
@@ -586,6 +1145,20 @@ def main() -> None:
                             "background_condition": background_condition,
                             "take_index": take_index,
                             "target_duration_s": target_duration_s,
+                            "source_trust": "bootstrap_augmented",
+                            "review_status": "",
+                            "contact_kind": contact_kind,
+                            "not_racket_kind": not_racket_kind,
+                            "bounce_side": "unknown",
+                            "binary_label": contact_label,
+                            "class_label": label,
+                            "event_type": event_type_for_class_label(label),
+                            "scenario": recording_scenario,
+                            "bounce_context": bounce_context,
+                            "calibration_status": calibration_status,
+                            "detection_config_id": detection_config_id,
+                            "detection_sensitivity": detection_sensitivity,
+                            "detection_mode": detection_mode,
                         })
                     else:
                         contact_negative_clips.append(fixed_clip)
@@ -616,6 +1189,25 @@ def main() -> None:
                     example["target_duration_s"],
                     f"{example['group_id']}:snr:{int(snr)}db",
                     f"snr_{int(snr)}db",
+                    source_trust=example.get("source_trust", "legacy_auto_augmented"),
+                    review_status=example.get("review_status", ""),
+                    contact_kind=example.get("contact_kind", ""),
+                    not_racket_kind=example.get("not_racket_kind", ""),
+                    bounce_side=example.get("bounce_side", "unknown"),
+                    binary_label=example.get("binary_label", ""),
+                    class_label=example.get("class_label", example["label"]),
+                    event_type=example.get("event_type", ""),
+                    scenario=example.get("scenario", ""),
+                    bounce_context=example.get("bounce_context", ""),
+                    calibration_status=example.get("calibration_status", ""),
+                    linked_candidate_id=example.get("linked_candidate_id", ""),
+                    detection_config_id=example.get("detection_config_id", ""),
+                    detection_sensitivity=example.get("detection_sensitivity", ""),
+                    detection_mode=example.get("detection_mode", ""),
+                    nearest_prev_event_ms=example.get("nearest_prev_event_ms", ""),
+                    nearest_next_event_ms=example.get("nearest_next_event_ms", ""),
+                    event_density_1s=example.get("event_density_1s", ""),
+                    close_event_bucket=example.get("close_event_bucket", ""),
                 ):
                     multiclass_aug_count += 1
         print(f"  Multiclass SNR-augmenterat: {multiclass_aug_count} extra klipp")
@@ -644,6 +1236,25 @@ def main() -> None:
                     f"snr_{int(snr)}db",
                     review_completed=True,
                     marker_source="augmented",
+                    source_trust=example.get("source_trust", "human_reviewed_augmented"),
+                    review_status=example.get("review_status", ""),
+                    contact_kind=example.get("contact_kind", ""),
+                    not_racket_kind=example.get("not_racket_kind", ""),
+                    bounce_side=example.get("bounce_side", "unknown"),
+                    binary_label=example.get("binary_label", example["label"]),
+                    class_label=example.get("class_label", ""),
+                    event_type=example.get("event_type", ""),
+                    scenario=example.get("scenario", ""),
+                    bounce_context=example.get("bounce_context", ""),
+                    calibration_status=example.get("calibration_status", ""),
+                    linked_candidate_id=example.get("linked_candidate_id", ""),
+                    detection_config_id=example.get("detection_config_id", ""),
+                    detection_sensitivity=example.get("detection_sensitivity", ""),
+                    detection_mode=example.get("detection_mode", ""),
+                    nearest_prev_event_ms=example.get("nearest_prev_event_ms", ""),
+                    nearest_next_event_ms=example.get("nearest_next_event_ms", ""),
+                    event_density_1s=example.get("event_density_1s", ""),
+                    close_event_bucket=example.get("close_event_bucket", ""),
                 ):
                     contact_aug_count += 1
         print(f"  Contact SNR-augmenterat: {contact_aug_count} extra klipp")
@@ -658,16 +1269,41 @@ def main() -> None:
 
     multi_df = pd.DataFrame(multiclass_rows)
     multi_df.to_csv(OUT_FILE, index=False)
+    multi_source_counts = multi_df["source_trust"].value_counts().to_dict() if "source_trust" in multi_df.columns else {}
+    multi_background_counts = multi_df["background_condition"].value_counts().to_dict() if "background_condition" in multi_df.columns else {}
+    multi_close_counts = multi_df["close_event_bucket"].value_counts().to_dict() if "close_event_bucket" in multi_df.columns else {}
     print(f"\nMulticlass dataset sparat: {OUT_FILE}")
     print(f"  {len(multi_df)} rader totalt ({raw_multiclass} råa + {multiclass_aug_count} augmenterade)")
     print(f"  Etikettfördelning: {multi_df['label'].value_counts().to_dict()}")
 
+    print(f"  Source/trust: {multi_source_counts}")
+    print(f"  Background: {multi_background_counts}")
+    print(f"  Close-event buckets: {multi_close_counts}")
+
+    if candidate_review_rows:
+        candidate_df = pd.DataFrame(candidate_review_rows)
+        candidate_df.to_csv(OUT_CANDIDATE_REVIEW_FILE, index=False)
+        print(f"\nCandidate/review-rapport sparad: {OUT_CANDIDATE_REVIEW_FILE}")
+        print(f"  Outcomes: {candidate_df['candidate_outcome'].value_counts().to_dict()}")
+        if "detection_config_id" in candidate_df.columns:
+            print(f"  Detection config: {candidate_df['detection_config_id'].value_counts().to_dict()}")
+    if negative_overlap_skipped:
+        print(f"\nSäkra negativa fönster: hoppade över {negative_overlap_skipped} negativa markers nära racketträffar")
+
     if contact_rows:
         contact_df = pd.DataFrame(contact_rows)
         contact_df.to_csv(OUT_CONTACT_FILE, index=False)
+        contact_source_counts = contact_df["source_trust"].value_counts().to_dict() if "source_trust" in contact_df.columns else {}
+        hard_negative_counts = contact_df["not_racket_kind"].value_counts().to_dict() if "not_racket_kind" in contact_df.columns else {}
+        contact_background_counts = contact_df["background_condition"].value_counts().to_dict() if "background_condition" in contact_df.columns else {}
+        contact_close_counts = contact_df["close_event_bucket"].value_counts().to_dict() if "close_event_bucket" in contact_df.columns else {}
         print(f"\nContact dataset sparat: {OUT_CONTACT_FILE}")
         print(f"  {len(contact_df)} rader totalt ({raw_contact} råa + {contact_aug_count} augmenterade)")
         print(f"  Etikettfördelning: {contact_df['label'].value_counts().to_dict()}")
+        print(f"  Source/trust: {contact_source_counts}")
+        print(f"  Background: {contact_background_counts}")
+        print(f"  Close-event buckets: {contact_close_counts}")
+        print(f"  Hard negatives: {hard_negative_counts}")
         if "scenario_id" in contact_df.columns:
             print(f"  Scenariofördelning: {contact_df['scenario_id'].value_counts().to_dict()}")
     else:

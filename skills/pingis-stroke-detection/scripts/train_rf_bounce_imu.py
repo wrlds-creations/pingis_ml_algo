@@ -25,6 +25,25 @@ from sklearn.preprocessing import LabelEncoder, StandardScaler
 ROOT_DIR = Path(__file__).resolve().parents[3]
 DATASET = ROOT_DIR / "data" / "imu" / "processed" / "bounce_imu_dataset.csv"
 MODEL_DIR = ROOT_DIR / "data" / "models"
+META_COLS = {
+    "label",
+    "session_id",
+    "group_id",
+    "scenario_id",
+    "scenario",
+    "bounce_context",
+    "calibration_status",
+    "background_condition",
+    "take_index",
+    "marker_id",
+    "marker_label",
+    "review_status",
+    "contact_kind",
+    "not_racket_kind",
+    "bounce_side",
+    "marker_take_ts_ms",
+    "source_file",
+}
 
 
 def load_dataset():
@@ -38,20 +57,20 @@ def load_dataset():
         print(f"Only {len(df)} rows found. Need more synced bounce IMU data first.")
         sys.exit(1)
 
+    if df["label"].nunique() < 2:
+        print("Bounce IMU dataset has only one class:")
+        print(df["label"].value_counts().to_string())
+        print("Need reviewed not-bounce IMU windows before training a binary bounce-contact model.")
+        sys.exit(0)
+
     feature_cols = [
-        column for column in df.columns
-        if column not in {
-            "label",
-            "session_id",
-            "group_id",
-            "scenario_id",
-            "background_condition",
-            "take_index",
-            "marker_id",
-            "marker_label",
-            "source_file",
-        }
+        column
+        for column in df.columns
+        if column not in META_COLS and pd.api.types.is_numeric_dtype(df[column])
     ]
+    if not feature_cols:
+        print("No numeric IMU feature columns found.")
+        sys.exit(1)
     X = df[feature_cols].values.astype(float)
     groups = df["group_id"].values
 

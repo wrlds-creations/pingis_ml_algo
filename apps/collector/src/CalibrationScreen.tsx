@@ -352,7 +352,8 @@ export function CalibrationScreen({ setup, mode = 'table_only', onCalibrated, on
   }, [backhandPose, forehandPose, mode, onCalibrated, tableCalibration]);
 
   const tableReady = tableCalibration !== null;
-  const bounceReady = mode === 'table_only' || (!!forehandPose && !!backhandPose);
+  const bounceReady = mode === 'table_only' || tableReady;
+  const bounceSidesCaptured = !!forehandPose && !!backhandPose;
   const progressPct = Math.min((stableCount / STABLE_SAMPLES_NEEDED) * 100, 100);
 
   return (
@@ -371,7 +372,7 @@ export function CalibrationScreen({ setup, mode = 'table_only', onCalibrated, on
       <Text style={styles.title}>Calibration</Text>
       <Text style={styles.subtitle}>
         {mode === 'bounce_sides'
-          ? 'Table calibration + bounce side poses for Studs-test.'
+          ? 'AirHive-baseline för Audio plus IMU. FH/BH-poser är valfria hjälpdata och är inte slag-labels.'
           : 'Table calibration for data collection or internal tooling.'}
       </Text>
 
@@ -432,8 +433,8 @@ export function CalibrationScreen({ setup, mode = 'table_only', onCalibrated, on
           <Text style={styles.stepNum}>STEP 3</Text>
           <Text style={styles.stepTitle}>Bounce side poses</Text>
           <Text style={styles.stepText}>
-            Capture one still wrist pose for the forehand side bounce and one for the backhand side
-            bounce. This is only used by Studs-test to decide which racket side was used.
+            Håll racket stilla i en tydlig forehand-side och backhand-side för racketstuds om du vill
+            spara extra orienteringshjälp. Det här beskriver studs-sida, inte forehand/backhand-slag i spel.
           </Text>
 
           <TouchableOpacity
@@ -461,7 +462,9 @@ export function CalibrationScreen({ setup, mode = 'table_only', onCalibrated, on
       {tableReady && bounceReady && (
         <TouchableOpacity style={styles.startBtn} onPress={start} activeOpacity={0.7}>
           <Text style={styles.startBtnTxt}>
-            {mode === 'bounce_sides' ? 'Start Studs-test' : 'Continue to next screen'}
+            {mode === 'bounce_sides'
+              ? (bounceSidesCaptured ? 'Starta Audio plus IMU' : 'Fortsätt utan posekalibrering')
+              : 'Continue to next screen'}
           </Text>
         </TouchableOpacity>
       )}

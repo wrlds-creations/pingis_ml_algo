@@ -5,6 +5,7 @@ interface AudioStreamInterface {
   startStreaming(threshold: number): Promise<string>;
   stopStreaming(): Promise<string>;
   setThreshold(threshold: number): Promise<string>;
+  setRetriggerMs(ms: number): Promise<string>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }

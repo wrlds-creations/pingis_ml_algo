@@ -15,11 +15,12 @@ type Screen =
   | 'collection'
   | 'audio_collection'
   | 'bounce_audio_imu_collection'
+  | 'free_recording'
   | 'live_classification'
   | 'bounce_free'
   | 'bounce_alternating';
 
-type CalibrationTarget = 'collection' | 'bounce_audio_imu_collection' | 'bounce_free' | 'bounce_alternating';
+type CalibrationTarget = 'collection' | 'bounce_audio_imu_collection' | 'free_recording' | 'bounce_free' | 'bounce_alternating';
 
 interface AppState {
   screen: Screen;
@@ -30,7 +31,10 @@ interface AppState {
 }
 
 function calibrationModeForTarget(target: CalibrationTarget): CalibrationMode {
-  return target === 'bounce_free' || target === 'bounce_alternating'
+  return target === 'bounce_audio_imu_collection' ||
+    target === 'free_recording' ||
+    target === 'bounce_free' ||
+    target === 'bounce_alternating'
     ? 'bounce_sides'
     : 'table_only';
 }
@@ -42,7 +46,6 @@ export default function App() {
     return (
       <SafeAreaProvider>
         <SetupScreen
-          onCollectionMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'collection' })}
           onAudioMode={setup => setState({ screen: 'audio_collection', setup })}
           onBounceAudioImuMode={setup =>
             setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_audio_imu_collection' })
@@ -78,6 +81,20 @@ export default function App() {
           calibration={state.calibration}
           device={state.bleDevice}
           mode="audio_imu"
+          onDone={() => setState({ screen: 'setup' })}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'free_recording' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <AudioCollectionScreen
+          setup={state.setup}
+          calibration={state.calibration}
+          device={state.bleDevice}
+          mode="free_recording"
           onDone={() => setState({ screen: 'setup' })}
         />
       </SafeAreaProvider>
@@ -156,7 +173,6 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SetupScreen
-        onCollectionMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'collection' })}
         onAudioMode={setup => setState({ screen: 'audio_collection', setup })}
         onBounceAudioImuMode={setup =>
           setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_audio_imu_collection' })

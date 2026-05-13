@@ -1,26 +1,58 @@
 import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
+import { getDefaultAudioDetectionConfigSnapshot } from './audioDetectionConfig';
+import { detectAudioContact } from './audioContactEngine';
 import type {
+  AudioDetectionEvent,
+  AudioDetectionConfigSnapshot,
+  AudioDetectionMode,
+  AudioContactKind,
+  AudioModelCandidate,
+  AudioNotRacketKind,
+  AudioReviewBounceSide,
+  AudioReviewClassLabel,
+  AudioReviewEventType,
   AudioReviewLabel,
   AudioReviewMarker,
   AudioScenarioId,
 } from './types';
 
 export const TARGET_AUDIO_SR = 22050;
-export const REVIEW_PRE_MS = 300;
-export const REVIEW_POST_MS = 700;
+export const REVIEW_PRE_MS = 100;
+export const REVIEW_POST_MS = 200;
 export const REVIEW_MARKER_ZOOM_PRE_MS = 80;
 export const REVIEW_MARKER_ZOOM_POST_MS = 80;
 
 const REVIEW_REQUIRED_SCENARIOS = new Set<AudioScenarioId>([
+  'imported_audio',
+  'racket_bounce_fh',
+  'racket_bounce_bh',
+  'racket_bounce_mixed',
+  'racket_motion_no_bounce',
+  'table_bounce',
+  'table_noisy',
+  'floor_bounce',
+  'floor_noisy',
+  'catch_after_sound',
+  'speech_music_noise',
+  'free_recording',
   'racket_quiet',
+  'racket_speech',
   'racket_counting',
+  'racket_music',
   'racket_music_low',
   'racket_music_mid',
+  'racket_other_bounces',
+  'racket_fast',
+  'playing_dense_audio',
+  'playing_dense_imu',
+  'other_bounce_noise',
   'speech_only',
   'desk_keyboard_only',
   'music_low_only',
   'music_mid_only',
+  'table_quiet',
+  'floor_quiet',
 ]);
 
 const FRAME_MS = 12;
@@ -31,6 +63,11 @@ const LOCAL_HOP_MS = 1;
 const AUTO_REFINE_SEARCH_PRE_MS = 120;
 const AUTO_REFINE_SEARCH_POST_MS = 40;
 const MANUAL_SNAP_RADIUS_MS = 140;
+const REVIEW_CONTACT_CONFIDENCE = 0.65;
+const PLAYING_REVIEW_CONTACT_FLOOR = 0.45;
+const REVIEW_SURFACE_CONFIDENCE = 0.55;
+const REVIEW_SURFACE_VETO_CONFIDENCE = 0.75;
+const REVIEW_MARKER_DEDUP_MS = 450;
 
 export interface DecodedWavFile {
   sampleRate: number;
@@ -46,12 +83,127 @@ export interface MarkerZoomWaveformWindow {
   peak_ms: number;
 }
 
+export interface AudioSyncPoint {
+  timestamp_ms: number;
+  score: number;
+  confidence: number;
+  window_start_ms: number;
+  window_end_ms: number;
+}
+
+export interface SuggestedReviewData {
+  markers: AudioReviewMarker[];
+  model_candidates: AudioModelCandidate[];
+  detection_config_snapshot: AudioDetectionConfigSnapshot;
+}
+
 export function requiresAudioReview(scenarioId: AudioScenarioId): boolean {
   return REVIEW_REQUIRED_SCENARIOS.has(scenarioId);
 }
 
 export function suggestedReviewLabelForScenario(scenarioId: AudioScenarioId): AudioReviewLabel {
-  return scenarioId.startsWith('racket_') ? 'racket_contact' : 'not_racket_contact';
+  if (scenarioId === 'racket_motion_no_bounce') return 'not_racket_contact';
+  return scenarioId.startsWith('racket_') ||
+    scenarioId === 'free_recording' ||
+    scenarioId === 'playing_dense_audio' ||
+    scenarioId === 'playing_dense_imu' ||
+    scenarioId === 'imported_audio'
+    ? 'racket_contact'
+    : 'not_racket_contact';
+}
+
+function contactKindForScenario(scenarioId: AudioScenarioId): AudioContactKind | undefined {
+  if (scenarioId === 'racket_motion_no_bounce') return undefined;
+  return scenarioId.startsWith('racket_') ||
+    scenarioId === 'free_recording' ||
+    scenarioId === 'playing_dense_audio' ||
+    scenarioId === 'playing_dense_imu' ||
+    scenarioId === 'imported_audio'
+    ? 'racket_bounce'
+    : undefined;
+}
+
+function notRacketKindForScenario(scenarioId: AudioScenarioId): AudioNotRacketKind | undefined {
+  if (scenarioId === 'table_bounce' || scenarioId === 'table_noisy' || scenarioId === 'table_quiet') return 'table_bounce';
+  if (scenarioId === 'floor_bounce' || scenarioId === 'floor_noisy' || scenarioId === 'floor_quiet') return 'floor_bounce';
+  if (scenarioId === 'catch_after_sound') return 'catch_after_sound';
+  if (
+    scenarioId === 'speech_music_noise' ||
+    scenarioId === 'speech_only' ||
+    scenarioId === 'music_low_only' ||
+    scenarioId === 'music_mid_only'
+  ) {
+    return 'voice_music_noise';
+  }
+  if (scenarioId === 'desk_keyboard_only' || scenarioId === 'other_bounce_noise') return 'other_impact';
+  return undefined;
+}
+
+function bounceSideForScenario(scenarioId: AudioScenarioId): AudioReviewBounceSide {
+  if (scenarioId === 'racket_bounce_fh') return 'forehand';
+  if (scenarioId === 'racket_bounce_bh') return 'backhand';
+  return 'unknown';
+}
+
+function eventTypeForNotRacketKind(kind?: AudioNotRacketKind): AudioReviewEventType {
+  return kind === 'table_bounce' || kind === 'floor_bounce' ? 'bounce' : 'noise';
+}
+
+function classLabelForRacketSide(side: AudioReviewBounceSide): AudioReviewClassLabel {
+  if (side === 'forehand') return 'forehand';
+  if (side === 'backhand') return 'backhand';
+  return 'racket_bounce';
+}
+
+function metadataForScenario(
+  scenarioId: AudioScenarioId,
+  finalLabel: AudioReviewLabel,
+  decision?: AudioDetectionEvent,
+) {
+  if (finalLabel === 'racket_contact') {
+    const bounceSide = bounceSideForScenario(scenarioId);
+    return {
+      contact_kind: contactKindForScenario(scenarioId),
+      not_racket_kind: undefined,
+      bounce_side: bounceSide,
+      event_type: 'racket_hit' as AudioReviewEventType,
+      class_label: classLabelForRacketSide(bounceSide),
+    };
+  }
+  if (finalLabel === 'not_racket_contact') {
+    const detectedKind = (decision?.surface_label === 'table_bounce' || decision?.surface_label === 'floor_bounce')
+      ? decision.surface_label
+      : undefined;
+    const notRacketKind = notRacketKindForScenario(scenarioId) ?? detectedKind;
+    return {
+      contact_kind: undefined,
+      not_racket_kind: notRacketKind,
+      bounce_side: undefined,
+      event_type: eventTypeForNotRacketKind(notRacketKind),
+      class_label: notRacketKind ?? 'other_impact',
+    };
+  }
+  return {
+    contact_kind: undefined,
+    not_racket_kind: undefined,
+    bounce_side: undefined,
+    event_type: 'ignore' as AudioReviewEventType,
+    class_label: 'ignore' as AudioReviewClassLabel,
+  };
+}
+
+export function normalizeReviewMarkerForLabel(
+  marker: AudioReviewMarker,
+  scenarioId: AudioScenarioId,
+  finalLabel: AudioReviewLabel,
+  reviewStatus = marker.review_status ?? (marker.source === 'manual' ? 'edited' : 'pending'),
+): AudioReviewMarker {
+  return {
+    ...marker,
+    final_label: finalLabel,
+    review_status: reviewStatus,
+    ...metadataForScenario(scenarioId, finalLabel),
+  };
 }
 
 export function buildSuggestedReviewMarkers(
@@ -59,14 +211,219 @@ export function buildSuggestedReviewMarkers(
   sampleRate: number,
   scenarioId: AudioScenarioId,
 ): AudioReviewMarker[] {
-  const suggestedLabel = suggestedReviewLabelForScenario(scenarioId);
-  return detectReviewCandidates(samples, sampleRate).map((candidate, index) => ({
-    id: `auto_${index}_${candidate.refined_timestamp_ms}`,
-    timestamp_ms: candidate.refined_timestamp_ms,
-    source: 'auto',
-    suggested_label: suggestedLabel,
-    final_label: suggestedLabel,
-  }));
+  return buildSuggestedReviewData(samples, sampleRate, scenarioId).markers;
+}
+
+export function buildSuggestedReviewData(
+  samples: Float32Array,
+  sampleRate: number,
+  scenarioId: AudioScenarioId,
+  detectionConfig: AudioDetectionConfigSnapshot = getDefaultAudioDetectionConfigSnapshot(),
+): SuggestedReviewData {
+  if (scenarioId === 'racket_motion_no_bounce') {
+    return {
+      markers: [],
+      model_candidates: [],
+      detection_config_snapshot: detectionConfig,
+    };
+  }
+
+  const markers: AudioReviewMarker[] = [];
+  const modelCandidates: AudioModelCandidate[] = [];
+  let lastAcceptedMs = -Infinity;
+  const contactConfidenceThreshold = scenarioId === 'free_recording' || scenarioId === 'imported_audio'
+    ? Math.min(detectionConfig.contact_confidence_min, PLAYING_REVIEW_CONTACT_FLOOR)
+    : detectionConfig.contact_confidence_min;
+
+  for (const candidate of detectReviewCandidates(samples, sampleRate)) {
+    if (candidate.refined_timestamp_ms - lastAcceptedMs < REVIEW_MARKER_DEDUP_MS) continue;
+
+    const decision = detectAudioContact({
+      detectedAtMs: candidate.refined_timestamp_ms,
+      pcm: slicePreviewWindow(samples, sampleRate, candidate.refined_timestamp_ms),
+      confidenceThreshold: contactConfidenceThreshold,
+      dedupMs: detectionConfig.merge_window_ms,
+      lastQualifiedTsMs: Number.isFinite(lastAcceptedMs) ? lastAcceptedMs : undefined,
+      config: detectionConfig,
+    });
+    const suggestedLabel = reviewLabelForDecision(
+      scenarioId,
+      decision,
+      contactConfidenceThreshold,
+      detectionConfig.surface_veto_confidence,
+      detectionConfig.detection_mode,
+    );
+    const candidateId = `candidate_${modelCandidates.length}_${candidate.refined_timestamp_ms}`;
+    const candidateMetadata = suggestedLabel
+      ? metadataForScenario(scenarioId, suggestedLabel, decision)
+      : {};
+    modelCandidates.push({
+      id: candidateId,
+      timestamp_ms: candidate.refined_timestamp_ms,
+      review_relevant: !!suggestedLabel,
+      suggested_label: suggestedLabel ?? undefined,
+      contact_confidence: decision.confidence,
+      surface_label: decision.surface_label,
+      surface_confidence: decision.surface_confidence,
+      detection_mode: detectionConfig.detection_mode,
+      detection_config_id: detectionConfig.config_id,
+      ignored_reason: suggestedLabel ? undefined : decision.ignored_reason ?? 'not_preset_relevant',
+      ...candidateMetadata,
+    });
+    if (!suggestedLabel) continue;
+
+    markers.push({
+      id: `auto_${markers.length}_${candidate.refined_timestamp_ms}`,
+      timestamp_ms: candidate.refined_timestamp_ms,
+      source: 'auto',
+      linked_candidate_id: candidateId,
+      suggested_label: suggestedLabel,
+      final_label: suggestedLabel,
+      review_status: 'pending',
+      contact_confidence: decision.confidence,
+      surface_label: decision.surface_label,
+      surface_confidence: decision.surface_confidence,
+      ...metadataForScenario(scenarioId, suggestedLabel, decision),
+    });
+    lastAcceptedMs = candidate.refined_timestamp_ms;
+  }
+
+  return {
+    markers,
+    model_candidates: modelCandidates,
+    detection_config_snapshot: detectionConfig,
+  };
+}
+
+export function detectAudioSyncPoint(
+  samples: Float32Array,
+  sampleRate: number,
+  searchStartMs = 250,
+  searchEndMs = 3000,
+): AudioSyncPoint | null {
+  if (samples.length === 0 || sampleRate <= 0) return null;
+
+  const totalDurationMs = (samples.length / sampleRate) * 1000;
+  const startMs = Math.max(0, Math.min(searchStartMs, totalDurationMs));
+  const endMs = Math.max(startMs, Math.min(searchEndMs, totalDurationMs));
+  const envelope = buildLocalEnvelope(samples, sampleRate, startMs, endMs);
+  if (envelope.values.length < 3) return null;
+
+  const sorted = [...envelope.values].sort((a, b) => a - b);
+  const median = Math.max(0.0001, percentile(sorted, 0.5));
+  const p85 = percentile(sorted, 0.85);
+  const p97 = percentile(sorted, 0.97);
+  const minimumPeak = Math.max(MIN_ENVELOPE_THRESHOLD * 1.2, median * 2.6, p85 * 1.2, p97 * 0.55);
+  const candidatePeaks = detectLocalEnvelopePeaks(envelope.values);
+  const peakIndices = candidatePeaks.length > 0
+    ? candidatePeaks
+    : envelope.values.map((_, index) => index);
+
+  let bestPeak = peakIndices[0];
+  for (const index of peakIndices) {
+    if (envelope.values[index] > envelope.values[bestPeak]) {
+      bestPeak = index;
+    }
+  }
+
+  const peakValue = envelope.values[bestPeak];
+  if (peakValue < minimumPeak) return null;
+
+  const prominence = peakValue / median;
+  const approxTimestampMs = startMs + bestPeak * envelope.hop_ms;
+  const timestampMs = refineAttackTimestamp(samples, sampleRate, approxTimestampMs);
+  const confidence = Math.max(
+    0,
+    Math.min(1, ((prominence - 2.2) / 7) + ((peakValue - minimumPeak) / Math.max(minimumPeak, 0.0001)) * 0.25),
+  );
+
+  return {
+    timestamp_ms: Math.round(timestampMs),
+    score: Number(peakValue.toFixed(5)),
+    confidence: Number(confidence.toFixed(3)),
+    window_start_ms: Math.round(startMs),
+    window_end_ms: Math.round(endMs),
+  };
+}
+
+function reviewLabelForDecision(
+  scenarioId: AudioScenarioId,
+  decision: AudioDetectionEvent,
+  contactConfidenceThreshold = REVIEW_CONTACT_CONFIDENCE,
+  surfaceVetoConfidence = REVIEW_SURFACE_VETO_CONFIDENCE,
+  detectionMode: AudioDetectionMode = 'hybrid',
+): AudioReviewLabel | null {
+  const surfaceLabel = decision.surface_label;
+  const surfaceConfidence = decision.surface_confidence ?? 0;
+  const allowSurfaceVeto = detectionMode !== 'binary_only';
+
+  if (scenarioId.startsWith('racket_')) {
+    if (scenarioId === 'racket_motion_no_bounce') return null;
+    const surfaceVeto = (
+      allowSurfaceVeto &&
+      (surfaceLabel === 'table_bounce' || surfaceLabel === 'floor_bounce' || surfaceLabel === 'noise') &&
+      surfaceConfidence >= surfaceVetoConfidence
+    );
+    if (
+      decision.label === 'racket_contact' &&
+      decision.confidence >= contactConfidenceThreshold &&
+      !surfaceVeto
+    ) {
+      return 'racket_contact';
+    }
+    return null;
+  }
+
+  if (
+    scenarioId === 'free_recording' ||
+    scenarioId === 'imported_audio' ||
+    scenarioId === 'playing_dense_audio' ||
+    scenarioId === 'playing_dense_imu'
+  ) {
+    const surfaceVeto = (
+      allowSurfaceVeto &&
+      (surfaceLabel === 'table_bounce' || surfaceLabel === 'floor_bounce' || surfaceLabel === 'noise') &&
+      surfaceConfidence >= REVIEW_SURFACE_CONFIDENCE
+    );
+    if (surfaceVeto) return 'not_racket_contact';
+    return decision.label === 'racket_contact' && decision.confidence >= contactConfidenceThreshold
+      ? 'racket_contact'
+      : null;
+  }
+
+  if (scenarioId === 'table_bounce' || scenarioId === 'table_noisy' || scenarioId === 'table_quiet') {
+    return surfaceLabel === 'table_bounce' && surfaceConfidence >= REVIEW_SURFACE_CONFIDENCE
+      ? 'not_racket_contact'
+      : null;
+  }
+
+  if (scenarioId === 'floor_bounce' || scenarioId === 'floor_noisy' || scenarioId === 'floor_quiet') {
+    return surfaceLabel === 'floor_bounce' && surfaceConfidence >= REVIEW_SURFACE_CONFIDENCE
+      ? 'not_racket_contact'
+      : null;
+  }
+
+  if (scenarioId === 'catch_after_sound' || scenarioId === 'desk_keyboard_only' || scenarioId === 'other_bounce_noise') {
+    return decision.label === 'not_racket_contact' || decision.confidence < REVIEW_CONTACT_CONFIDENCE
+      ? 'not_racket_contact'
+      : null;
+  }
+
+  if (
+    scenarioId === 'speech_music_noise' ||
+    scenarioId === 'speech_only' ||
+    scenarioId === 'music_low_only' ||
+    scenarioId === 'music_mid_only'
+  ) {
+    return (
+      decision.label === 'not_racket_contact' &&
+      (surfaceLabel === 'noise' || surfaceConfidence < REVIEW_SURFACE_CONFIDENCE)
+    )
+      ? 'not_racket_contact'
+      : null;
+  }
+
+  return null;
 }
 
 export async function decodeWavFile(filePath: string): Promise<DecodedWavFile> {
@@ -235,6 +592,8 @@ export function createManualMarker(
     source: 'manual',
     suggested_label: finalLabel,
     final_label: finalLabel,
+    review_status: 'edited',
+    ...metadataForScenario(scenarioId, finalLabel),
   };
 }
 
@@ -337,9 +696,19 @@ function slicePreviewWindow(
   sampleRate: number,
   timestampMs: number,
 ): Float32Array {
+  return sliceWindow(samples, sampleRate, timestampMs, REVIEW_PRE_MS, REVIEW_POST_MS);
+}
+
+function sliceWindow(
+  samples: Float32Array,
+  sampleRate: number,
+  timestampMs: number,
+  preMs: number,
+  postMs: number,
+): Float32Array {
   const centerSample = Math.round((timestampMs / 1000) * sampleRate);
-  const preSamples = Math.round((REVIEW_PRE_MS / 1000) * sampleRate);
-  const totalSamples = Math.round(((REVIEW_PRE_MS + REVIEW_POST_MS) / 1000) * sampleRate);
+  const preSamples = Math.round((preMs / 1000) * sampleRate);
+  const totalSamples = Math.round(((preMs + postMs) / 1000) * sampleRate);
   const start = Math.max(0, centerSample - preSamples);
   const end = Math.min(samples.length, start + totalSamples);
   const slice = samples.slice(start, end);

@@ -16,6 +16,9 @@ export interface ImuSample {
   mag_x: number;
   mag_y: number;
   mag_z: number;
+  received_at_ms?: number;
+  take_ts_ms?: number;
+  sensor_ts?: number;
   ts_ms: number;
 }
 
@@ -73,17 +76,71 @@ export interface SessionFile {
 
 // ---- Audio bounce detection ----
 
-export type AudioLabel = 'racket_bounce' | 'table_bounce' | 'floor_bounce' | 'noise';
-export type AudioBackgroundCondition = 'quiet' | 'speech' | 'music_low' | 'music_mid' | 'desk';
+export type AudioLabel = 'racket_bounce' | 'table_bounce' | 'floor_bounce' | 'noise' | 'unlabeled';
+export type AudioBackgroundCondition = 'quiet' | 'speech' | 'music_low' | 'music_mid' | 'music_high' | 'desk' | 'mixed' | 'impact';
 export type AudioContactLabel = 'racket_contact' | 'not_racket_contact';
 export type AudioReviewLabel = AudioContactLabel | 'ignore';
 export type AudioReviewSource = 'auto' | 'manual';
 export type AudioReviewAnchorRule = 'attack_start';
+export type AudioDetectionSensitivity = 'strict' | 'normal' | 'sensitive';
+export type AudioDetectionMode = 'hybrid' | 'four_class_only' | 'binary_only';
+export type AudioDetectionIgnoredReason =
+  | 'not_racket_contact'
+  | 'low_confidence'
+  | 'dedup'
+  | 'surface_veto'
+  | 'group_duplicate'
+  | 'not_preset_relevant';
+export type AudioContactKind = 'racket_bounce';
+export type AudioReviewEventType = 'racket_hit' | 'bounce' | 'noise' | 'ignore';
+export type AudioReviewClassLabel =
+  | 'racket_bounce'
+  | 'forehand'
+  | 'backhand'
+  | 'forehand_hit'
+  | 'backhand_hit'
+  | 'no_bounce_motion'
+  | 'table_bounce'
+  | 'floor_bounce'
+  | 'catch_after_sound'
+  | 'voice_music_noise'
+  | 'other_impact'
+  | 'ignore';
+export type AudioNotRacketKind =
+  | 'table_bounce'
+  | 'floor_bounce'
+  | 'catch_after_sound'
+  | 'voice_music_noise'
+  | 'other_impact';
+export type AudioReviewStatus = 'pending' | 'confirmed' | 'edited' | 'ignored' | 'deleted' | 'filtered';
+export type AudioReviewBounceSide = 'forehand' | 'backhand' | 'unknown';
+export type AudioRecordingScenario = 'audio_sound' | 'racket_bouncing' | 'playing';
+export type AudioBounceContext = 'forehand_side' | 'backhand_side' | 'mixed';
+export type AudioCalibrationStatus = 'captured' | 'partial' | 'skipped';
 export type AudioScenarioId =
+  | 'imported_audio'
+  | 'free_recording'
+  | 'racket_bounce_fh'
+  | 'racket_bounce_bh'
+  | 'racket_bounce_mixed'
+  | 'racket_motion_no_bounce'
+  | 'table_bounce'
+  | 'table_noisy'
+  | 'floor_bounce'
+  | 'floor_noisy'
+  | 'catch_after_sound'
+  | 'speech_music_noise'
   | 'racket_quiet'
-  | 'racket_counting'
-  | 'racket_music_low'
-  | 'racket_music_mid'
+    | 'racket_speech'
+    | 'racket_counting'
+    | 'racket_music'
+    | 'racket_music_low'
+    | 'racket_music_mid'
+  | 'racket_other_bounces'
+  | 'racket_fast'
+  | 'playing_dense_audio'
+  | 'playing_dense_imu'
+  | 'other_bounce_noise'
   | 'speech_only'
   | 'desk_keyboard_only'
   | 'music_low_only'
@@ -95,8 +152,52 @@ export interface AudioReviewMarker {
   id: string;
   timestamp_ms: number;
   source: AudioReviewSource;
+  linked_candidate_id?: string;
   suggested_label: AudioReviewLabel;
   final_label: AudioReviewLabel;
+  event_type?: AudioReviewEventType;
+  class_label?: AudioReviewClassLabel;
+  contact_kind?: AudioContactKind;
+  not_racket_kind?: AudioNotRacketKind;
+  bounce_side?: AudioReviewBounceSide;
+  review_status?: AudioReviewStatus;
+  contact_confidence?: number;
+  surface_label?: AudioLabel;
+  surface_confidence?: number;
+}
+
+export interface AudioDetectionConfigSnapshot {
+  config_id: string;
+  sensitivity: AudioDetectionSensitivity;
+  detection_mode: AudioDetectionMode;
+  contact_confidence_min: number;
+  surface_veto_confidence: number;
+  merge_window_ms: number;
+  onset_threshold: number;
+  model_versions: {
+    bundle_id: string;
+    live_config_id: string;
+    audio_contact_model: string;
+    audio_model: string;
+  };
+}
+
+export interface AudioModelCandidate {
+  id: string;
+  timestamp_ms: number;
+  review_relevant: boolean;
+  suggested_label?: AudioReviewLabel;
+  event_type?: AudioReviewEventType;
+  class_label?: AudioReviewClassLabel;
+  contact_kind?: AudioContactKind;
+  not_racket_kind?: AudioNotRacketKind;
+  bounce_side?: AudioReviewBounceSide;
+  contact_confidence?: number;
+  surface_label?: AudioLabel;
+  surface_confidence?: number;
+  detection_mode?: AudioDetectionMode;
+  detection_config_id?: string;
+  ignored_reason?: AudioDetectionIgnoredReason;
 }
 
 export interface AudioTakeReview {
@@ -109,8 +210,15 @@ export interface AudioTakeReview {
 export interface AudioImuRecording {
   started_at_ms: number;
   ended_at_ms: number;
+  target_hz?: number;
   sample_hz_estimate: number;
   sample_count: number;
+  sample_interval_min_ms?: number;
+  sample_interval_avg_ms?: number;
+  sample_interval_max_ms?: number;
+  quality_flag?: 'target_150_met' | 'below_target' | 'unstable' | 'partial';
+  disconnected?: boolean;
+  partial?: boolean;
   samples: ImuSample[];
 }
 
@@ -120,17 +228,32 @@ export interface AudioVideoRecording {
   ended_at_ms: number;
   duration_ms: number;
   audio_origin_in_video_ms: number;
+  video_sync_offset_ms?: number;
 }
 
 export interface AudioEvent {
   label: AudioLabel;
   recorded_at: string;
+  created_at?: string;
   wav_filename: string;
   duration_ms: number;
   scenario_id: AudioScenarioId;
   background_condition: AudioBackgroundCondition;
   take_index: number;
   target_duration_s: number;
+  recording_mode?: 'guided_audio_only' | 'guided_audio_imu' | 'audio_imu' | 'free_recording' | 'imported_audio';
+  collection_type?: 'audio_only' | 'audio_only_import' | 'audio_video_only' | 'audio_video_imu';
+  scenario?: AudioRecordingScenario;
+  bounce_context?: AudioBounceContext;
+  calibration_status?: AudioCalibrationStatus;
+  has_audio?: boolean;
+  has_video?: boolean;
+  has_imu?: boolean;
+  imported_source_filename?: string;
+  imported_source_uri?: string;
+  imported_at?: string;
+  detection_config_snapshot?: AudioDetectionConfigSnapshot;
+  model_candidates?: AudioModelCandidate[];
   review?: AudioTakeReview;
   imu_recording?: AudioImuRecording;
   video_recording?: AudioVideoRecording;
@@ -163,7 +286,12 @@ export interface AudioSessionFile {
     session_date: string;
     app_version: string;
     clip_duration_ms: number;
-    collection_mode: 'guided_scenarios' | 'guided_scenarios_audio_imu';
+    collection_mode: 'guided_scenarios' | 'guided_scenarios_audio_imu' | 'free_recording';
+    recording_mode?: 'guided_audio_only' | 'guided_audio_imu' | 'audio_imu' | 'free_recording' | 'imported_audio';
+    collection_type?: 'audio_only' | 'audio_only_import' | 'audio_video_only' | 'audio_video_imu';
+    scenarios?: AudioRecordingScenario[];
+    calibration_status?: AudioCalibrationStatus;
+    detection_config_snapshot?: AudioDetectionConfigSnapshot;
     target_duration_s: number;
     planned_takes: number;
     calibration_id?: string;
@@ -184,6 +312,8 @@ export type StrokeCombinedLabel = 'fh_hit' | 'bh_hit' | 'fh_miss' | 'bh_miss' | 
 
 export interface BounceSettings {
   audioThreshold: number;
+  audioRetriggerMs: number;
+  audioGroupWindowMs: number;
   audioConfidence: number;
   audioDedupMs: number;
   motionWindowMs: number;
@@ -224,8 +354,10 @@ export interface AudioDetectionEvent {
   surface_label?: AudioLabel;
   surface_confidence?: number;
   surface_probabilities?: Record<string, number>;
+  group_id?: number;
+  group_status?: 'best_candidate' | 'ignored_duplicate' | 'standalone';
   qualified: boolean;
-  ignored_reason?: 'not_racket_contact' | 'low_confidence' | 'dedup' | 'surface_veto';
+  ignored_reason?: AudioDetectionIgnoredReason;
 }
 
 export interface BounceSideEvent {
@@ -251,10 +383,12 @@ export interface BounceContactEvent {
   orientation: Vector3;
   forehand_score: number;
   backhand_score: number;
+  group_id?: number;
+  group_status?: 'best_candidate' | 'ignored_duplicate' | 'standalone';
   counted: boolean;
   total_after: number;
   alternation_after: number;
-  ignored_reason?: 'not_racket_contact' | 'low_confidence' | 'dedup' | 'surface_veto';
+  ignored_reason?: AudioDetectionIgnoredReason;
 }
 
 export interface StrokeInferenceEvent {
