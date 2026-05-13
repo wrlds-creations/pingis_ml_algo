@@ -19,9 +19,11 @@ import {
   AUDIO_CAPTURE_STOPPED_EVENT,
   AudioCapture,
   AudioCaptureEmitter,
+  type ImportedAudioFile,
   type AudioCaptureStoppedEvent,
 } from './NativeAudioCapture';
 import { AudioTakeReviewScreen } from './AudioTakeReviewScreen';
+import { getDefaultAudioDetectionConfigSnapshot } from './audioDetectionConfig';
 import { requiresAudioReview } from './audioReview';
 import {
   ACCEL_UUID,
@@ -41,7 +43,9 @@ import type {
   AudioImuRecording,
   AudioVideoRecording,
   AudioLabel,
+  AudioModelCandidate,
   AudioRecordingScenario,
+  AudioDetectionConfigSnapshot,
   AudioReviewMarker,
   AudioScenarioId,
   AudioSessionFile,
@@ -68,6 +72,13 @@ const PROGRESS_RING_RADIUS = 25;
 type CameraFacing = 'front' | 'back';
 type RecordingPhase = 'ready' | 'countdown' | 'recording' | 'finalizing' | 'done';
 type AudioCollectionMode = 'audio_only' | 'audio_imu' | 'free_recording';
+type MusicLevel = 'music_low' | 'music_mid' | 'music_high';
+
+const MUSIC_LEVEL_OPTIONS: Array<{ id: MusicLevel; title: string }> = [
+  { id: 'music_low', title: 'Låg' },
+  { id: 'music_mid', title: 'Medel' },
+  { id: 'music_high', title: 'Hög' },
+];
 
 interface AudioScenarioDefinition {
   id: AudioScenarioId;
@@ -92,8 +103,8 @@ interface PendingReviewItem {
 const AUDIO_ONLY_SCENARIOS: AudioScenarioDefinition[] = [
   {
     id: 'racket_quiet',
-    title: 'Racketstuds',
-    prompt: 'Spela bara in ljudet av bollstuds på racket. Ingen forehand/backhand-label sparas i ljud-only.',
+    title: 'Racket lugnt',
+    prompt: 'Studsa bollen på racket i lugn miljö. Sikta på tydliga racketljud utan extra bakgrund.',
     label: 'racket_bounce',
     background_condition: 'quiet',
     target_takes: 3,
@@ -102,8 +113,63 @@ const AUDIO_ONLY_SCENARIOS: AudioScenarioDefinition[] = [
     scenario: 'audio_sound',
   },
   {
+    id: 'racket_speech',
+    title: 'Racket + prat',
+    prompt: 'Studsa bollen på racket medan någon pratar eller räknar i bakgrunden.',
+    label: 'racket_bounce',
+    background_condition: 'speech',
+    target_takes: 3,
+    color: '#52d884',
+    bg: '#123720',
+    scenario: 'audio_sound',
+  },
+  {
+    id: 'racket_music',
+    title: 'Racket + musik',
+    prompt: 'Studsa bollen på racket med musik i bakgrunden. Välj ljudnivå före start.',
+    label: 'racket_bounce',
+    background_condition: 'music_mid',
+    target_takes: 3,
+    color: '#7ee39f',
+    bg: '#173f26',
+    scenario: 'audio_sound',
+  },
+  {
+    id: 'racket_other_bounces',
+    title: 'Racket + andra studs',
+    prompt: 'Studsa bollen på racket medan andra pingis-, bords- eller golvstudsar hörs i bakgrunden.',
+    label: 'racket_bounce',
+    background_condition: 'mixed',
+    target_takes: 3,
+    color: '#9be66d',
+    bg: '#1c3314',
+    scenario: 'audio_sound',
+  },
+  {
+    id: 'racket_fast',
+    title: 'Racket snabbt',
+    prompt: 'Studsa i normalt/snabbt tempo, ungefär 40 racketträffar på 25 sekunder. Granska varje tydlig racketträff.',
+    label: 'racket_bounce',
+    background_condition: 'mixed',
+    target_takes: 3,
+    color: '#c0f06d',
+    bg: '#243814',
+    scenario: 'audio_sound',
+  },
+  {
+    id: 'playing_dense_audio',
+    title: 'Spel: racket + bord',
+    prompt: 'Spela en tät sekvens där bordsstuds och racketträff kommer nära varandra. Märk både racket och bord i Review.',
+    label: 'unlabeled',
+    background_condition: 'mixed',
+    target_takes: 3,
+    color: '#35c7ff',
+    bg: '#0d2633',
+    scenario: 'audio_sound',
+  },
+  {
     id: 'table_bounce',
-    title: 'Bordsstuds',
+    title: 'Bordsstuds lugnt',
     prompt: 'Studsa bollen på ett pingisbord eller pingisbordsliknande spelyta. Inte annan bordsyta.',
     label: 'table_bounce',
     background_condition: 'quiet',
@@ -113,8 +179,19 @@ const AUDIO_ONLY_SCENARIOS: AudioScenarioDefinition[] = [
     scenario: 'audio_sound',
   },
   {
+    id: 'table_noisy',
+    title: 'Bordsstuds stökigt',
+    prompt: 'Studsa bollen på pingisbord medan prat, musik eller andra studs hörs i bakgrunden.',
+    label: 'table_bounce',
+    background_condition: 'mixed',
+    target_takes: 3,
+    color: '#72b6ff',
+    bg: '#102842',
+    scenario: 'audio_sound',
+  },
+  {
     id: 'floor_bounce',
-    title: 'Golvstuds',
+    title: 'Golvstuds lugnt',
     prompt: 'Studsa bollen på golvet. Granska varje tydlig golvkontakt som inte racket.',
     label: 'floor_bounce',
     background_condition: 'quiet',
@@ -124,23 +201,23 @@ const AUDIO_ONLY_SCENARIOS: AudioScenarioDefinition[] = [
     scenario: 'audio_sound',
   },
   {
-    id: 'catch_after_sound',
-    title: 'Fång/efterljud',
-    prompt: 'Gör en tydlig fångst eller stopp efter bollkontakt så fångljud och efterljud kommer med.',
-    label: 'noise',
-    background_condition: 'impact',
-    target_takes: 2,
-    color: '#ff7f66',
-    bg: '#33130f',
+    id: 'floor_noisy',
+    title: 'Golvstuds stökigt',
+    prompt: 'Studsa bollen på golvet medan prat, musik eller andra studs hörs i bakgrunden.',
+    label: 'floor_bounce',
+    background_condition: 'mixed',
+    target_takes: 3,
+    color: '#f2a33c',
+    bg: '#332000',
     scenario: 'audio_sound',
   },
   {
-    id: 'speech_music_noise',
-    title: 'Brus',
-    prompt: 'Ingen boll. Prata, räkna eller spela musik i bakgrunden.',
+    id: 'other_bounce_noise',
+    title: 'Brus/negativt',
+    prompt: 'Spela in prat, musik, fångljud, klapp, steg eller andra studs utan din racketkontakt.',
     label: 'noise',
-    background_condition: 'mixed',
-    target_takes: 2,
+    background_condition: 'impact',
+    target_takes: 3,
     color: '#ffc09f',
     bg: '#3a241e',
     scenario: 'audio_sound',
@@ -173,21 +250,20 @@ const AUDIO_IMU_SCENARIOS: AudioScenarioDefinition[] = [
     bounce_context: 'backhand_side',
   },
   {
-    id: 'racket_bounce_mixed',
-    title: 'Mixed studs',
-    prompt: 'Studsa på racket och växla sida fritt. Sparas som mixed racketstuds, inte spel-slag.',
-    label: 'racket_bounce',
-    background_condition: 'quiet',
+    id: 'racket_motion_no_bounce',
+    title: 'Racketrörelse utan studs',
+    prompt: 'Rör racketarm och handled naturligt utan boll på racket. Variera grepp, handledsvridning, lyft/sänk, fram/bak och tempo.',
+    label: 'unlabeled',
+    background_condition: 'mixed',
     target_takes: 3,
-    color: '#9be66d',
-    bg: '#1c3314',
+    color: '#ffb04f',
+    bg: '#33200b',
     scenario: 'racket_bouncing',
-    bounce_context: 'mixed',
   },
   {
-    id: 'free_recording',
-    title: 'Playing',
-    prompt: 'Spela fritt i valfri längd. Lägg till och klassificera händelser i Review efteråt.',
+    id: 'playing_dense_imu',
+    title: 'Playing: racket + bord',
+    prompt: 'Spela fritt med täta bordsstudsar och racketträffar. Samlar ljud, video och optional IMU; märk händelser i Review.',
     label: 'unlabeled',
     background_condition: 'mixed',
     target_takes: 1,
@@ -220,10 +296,17 @@ interface ScenarioGroupDefinition {
 }
 
 const AUDIO_ONLY_GROUPS: ScenarioGroupDefinition[] = [
-  { id: 'racket', title: 'Racket', icon: 'R', color: '#2ee678', scenarioIds: ['racket_quiet'] },
-  { id: 'table', title: 'Bord', icon: 'B', color: '#4a9eff', scenarioIds: ['table_bounce'] },
-  { id: 'floor', title: 'Golv', icon: 'G', color: '#ffc02f', scenarioIds: ['floor_bounce'] },
-  { id: 'noise', title: 'Brus', icon: 'N', color: '#ff5a4f', scenarioIds: ['catch_after_sound', 'speech_music_noise'] },
+  {
+    id: 'racket',
+    title: 'Racket',
+    icon: 'R',
+    color: '#2ee678',
+    scenarioIds: ['racket_quiet', 'racket_speech', 'racket_music', 'racket_other_bounces', 'racket_fast'],
+  },
+  { id: 'playing', title: 'Spel', icon: 'S', color: '#35c7ff', scenarioIds: ['playing_dense_audio'] },
+  { id: 'table', title: 'Bord', icon: 'B', color: '#4a9eff', scenarioIds: ['table_bounce', 'table_noisy'] },
+  { id: 'floor', title: 'Golv', icon: 'G', color: '#ffc02f', scenarioIds: ['floor_bounce', 'floor_noisy'] },
+  { id: 'noise', title: 'Brus', icon: 'N', color: '#ff5a4f', scenarioIds: ['other_bounce_noise'] },
 ];
 
 const AUDIO_IMU_GROUPS: ScenarioGroupDefinition[] = [
@@ -232,9 +315,9 @@ const AUDIO_IMU_GROUPS: ScenarioGroupDefinition[] = [
     title: 'Racketstuds',
     icon: 'R',
     color: '#2ee678',
-    scenarioIds: ['racket_bounce_fh', 'racket_bounce_bh', 'racket_bounce_mixed'],
+    scenarioIds: ['racket_bounce_fh', 'racket_bounce_bh', 'racket_motion_no_bounce'],
   },
-  { id: 'playing', title: 'Playing', icon: 'P', color: '#b06cff', scenarioIds: ['free_recording'] },
+  { id: 'playing', title: 'Playing', icon: 'P', color: '#b06cff', scenarioIds: ['playing_dense_imu'] },
 ];
 
 const FREE_RECORDING_GROUPS: ScenarioGroupDefinition[] = [
@@ -262,6 +345,10 @@ function initialScenarioIdForMode(mode: AudioCollectionMode): AudioScenarioId {
 function formatDuration(ms: number): string {
   const s = Math.max(0, Math.ceil(ms / 1000));
   return `${s}s`;
+}
+
+function musicLevelTitle(level: MusicLevel): string {
+  return MUSIC_LEVEL_OPTIONS.find(option => option.id === level)?.title ?? 'Medel';
 }
 
 function jsonPathFromSessionDir(sessionDir: string) {
@@ -427,6 +514,7 @@ function buildSessionFile(
       collection_type: collectionType,
       scenarios: Array.from(new Set(scenarios.map(scenario => scenario.scenario))),
       calibration_status: calibrationStatusFor(calibration, collectionType === 'audio_video_imu'),
+      detection_config_snapshot: getDefaultAudioDetectionConfigSnapshot(),
       target_duration_s: mode === 'free_recording' || scenarios.some(scenario => scenario.scenario === 'playing')
         ? 0
         : TARGET_DURATION_S,
@@ -514,10 +602,12 @@ export function AudioCollectionScreen({
     : null;
   const videoOutput = useVideoOutput({ enableAudio: false });
   const [selectedScenarioId, setSelectedScenarioId] = useState<AudioScenarioId>(initialScenarioIdForMode(mode));
+  const [selectedMusicLevel, setSelectedMusicLevel] = useState<MusicLevel>('music_mid');
   const [recordingPhase, setRecordingPhase] = useState<RecordingPhase>('ready');
   const [countdownValue, setCountdownValue] = useState(COUNTDOWN_S);
   const [isRecording, setIsRecording] = useState(false);
   const [isStartingRecording, setIsStartingRecording] = useState(false);
+  const [isImportingAudio, setIsImportingAudio] = useState(false);
   const [isSensorConnected, setIsSensorConnected] = useState(true);
   const [sampleHz, setSampleHz] = useState(0);
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -579,7 +669,11 @@ export function AudioCollectionScreen({
     [events, scenarioSummaries],
   );
   const selectedScenario = scenarioDefinitions.find(item => item.id === selectedScenarioId) ?? scenarioDefinitions[0];
+  const selectedBackgroundCondition: AudioBackgroundCondition = selectedScenario?.id === 'racket_music'
+    ? selectedMusicLevel
+    : selectedScenario?.background_condition ?? 'quiet';
   const isFreeRecording = mode === 'free_recording' || selectedScenario?.scenario === 'playing';
+  const isBusyWithTake = isRecording || isStartingRecording || isImportingAudio || recordingPhase === 'countdown' || recordingPhase === 'finalizing';
   const selectedSummary =
     scenarioSummaries.find(item => item.scenario_id === selectedScenarioId) ?? scenarioSummaries[0];
   const canRecord =
@@ -587,6 +681,7 @@ export function AudioCollectionScreen({
     hasCameraPermission &&
     !isRecording &&
     !isStartingRecording &&
+    !isImportingAudio &&
     !!cameraDevice &&
     cameraReady &&
     (!recordsImu || isSensorConnected) &&
@@ -903,7 +998,7 @@ export function AudioCollectionScreen({
       wav_filename: activeTake.filename,
       duration_ms: durationMs,
       scenario_id: scenario.id,
-      background_condition: scenario.background_condition,
+      background_condition: scenario.id === 'racket_music' ? selectedMusicLevel : scenario.background_condition,
       take_index: activeTake.take_index,
       target_duration_s: isFreeRecording ? 0 : TARGET_DURATION_S,
       recording_mode: isFreeRecording
@@ -918,6 +1013,7 @@ export function AudioCollectionScreen({
       has_audio: true,
       has_video: !!videoRecording,
       has_imu: !!imuRecording,
+      detection_config_snapshot: getDefaultAudioDetectionConfigSnapshot(),
       review: {
         required: requiresReview,
         anchor_rule: 'attack_start',
@@ -974,6 +1070,7 @@ export function AudioCollectionScreen({
     recordsImu,
     refreshPendingReviews,
     scenarioDefinitions,
+    selectedMusicLevel,
   ]);
 
   const stopRecording = useCallback(async (autoStopped: boolean) => {
@@ -1183,6 +1280,7 @@ export function AudioCollectionScreen({
     prepareNewSession,
     recordsImu,
     selectedScenario,
+    selectedMusicLevel,
     selectedSummary,
     stopRecording,
     videoOutput,
@@ -1228,7 +1326,7 @@ export function AudioCollectionScreen({
   }, [isRecording, isStartingRecording, recordingPhase, refreshPendingReviews, removeCurrentEventByIndex]);
 
   const resetSession = useCallback(async () => {
-    if (isRecording || isStartingRecording || recordingPhase === 'countdown' || recordingPhase === 'finalizing') return;
+    if (isRecording || isStartingRecording || isImportingAudio || recordingPhase === 'countdown' || recordingPhase === 'finalizing') return;
     clearTimers();
     await prepareNewSession();
     eventsRef.current = [];
@@ -1237,7 +1335,82 @@ export function AudioCollectionScreen({
     setSelectedScenarioId(initialScenarioIdForMode(mode));
     setRecordingPhase('ready');
     setFeedback('Ny session skapad.');
-  }, [clearTimers, isRecording, isStartingRecording, mode, prepareNewSession, recordingPhase]);
+  }, [clearTimers, isImportingAudio, isRecording, isStartingRecording, mode, prepareNewSession, recordingPhase]);
+
+  const importAudioFileForReview = useCallback(async () => {
+    if (mode !== 'audio_only' || isBusyWithTake) return;
+    if (!sessionDirRef.current || !sessionJsonPathRef.current) {
+      await prepareNewSession();
+    }
+    const sessionDir = sessionDirRef.current;
+    const sessionJsonPath = sessionJsonPathRef.current;
+    if (!sessionDir || !sessionJsonPath) {
+      Alert.alert('Importfel', 'Kunde inte skapa sessionsmapp för ljudimport.');
+      return;
+    }
+
+    setIsImportingAudio(true);
+    setFeedback('Välj en ljudfil från iPhone eller Android...');
+
+    try {
+      const takeIndex = eventsRef.current.filter(event => event.scenario_id === 'imported_audio').length + 1;
+      const filename = `imported_audio_${String(takeIndex).padStart(3, '0')}.wav`;
+      const filePath = `${sessionDir}/${filename}`;
+      const imported = await AudioCapture.importAudioFile(filePath) as ImportedAudioFile;
+      const nowIso = new Date().toISOString();
+      const durationMs = Math.max(0, Math.round(Number(imported.durationMs ?? 0)));
+      const event: AudioEvent = {
+        label: 'unlabeled',
+        recorded_at: nowIso,
+        created_at: nowIso,
+        imported_at: nowIso,
+        wav_filename: filename,
+        duration_ms: durationMs,
+        scenario_id: 'imported_audio',
+        background_condition: 'mixed',
+        take_index: takeIndex,
+        target_duration_s: 0,
+        recording_mode: 'imported_audio',
+        collection_type: 'audio_only_import',
+        scenario: 'audio_sound',
+        has_audio: true,
+        has_video: false,
+        has_imu: false,
+        imported_source_filename: imported.displayName,
+        imported_source_uri: imported.sourceUri,
+        detection_config_snapshot: getDefaultAudioDetectionConfigSnapshot(),
+        review: {
+          required: true,
+          anchor_rule: 'attack_start',
+          markers: [],
+        },
+      };
+
+      await RNFS.scanFile(filePath).catch(() => {});
+      const nextEvents = [...eventsRef.current, event];
+      eventsRef.current = nextEvents;
+      setEvents(nextEvents);
+      await persistCurrentSession(nextEvents);
+      setReviewTarget({
+        sessionJsonPath,
+        sessionDir,
+        eventIndex: nextEvents.length - 1,
+        event,
+      });
+      setFeedback(`Importerade ljudfil: ${imported.displayName ?? filename}`);
+    } catch (error: any) {
+      const message = String(error?.message ?? error ?? '');
+      if (String(error?.code ?? '').includes('IMPORT_CANCELLED') || message.includes('cancel')) {
+        setFeedback('Ljudimport avbruten.');
+      } else {
+        Alert.alert('Importfel', `Kunde inte importera ljudfilen: ${message || 'okänt fel'}`);
+        setFeedback('Importen misslyckades.');
+      }
+    } finally {
+      setIsImportingAudio(false);
+      await refreshPendingReviews();
+    }
+  }, [isBusyWithTake, mode, persistCurrentSession, prepareNewSession, refreshPendingReviews]);
 
   const openPendingReview = useCallback(async (item: PendingReviewItem) => {
     const session = await readSessionFile(item.sessionJsonPath);
@@ -1278,7 +1451,12 @@ export function AudioCollectionScreen({
     setReviewQueueVisible(true);
   }, [openPendingReview, pendingReviews]);
 
-  const saveReview = useCallback(async (markers: AudioReviewMarker[], videoSyncOffsetMs?: number) => {
+  const saveReview = useCallback(async (
+    markers: AudioReviewMarker[],
+    videoSyncOffsetMs?: number,
+    modelCandidates?: AudioModelCandidate[],
+    detectionConfigSnapshot?: AudioDetectionConfigSnapshot,
+  ) => {
     const target = reviewTarget;
     if (!target) return;
 
@@ -1298,6 +1476,8 @@ export function AudioCollectionScreen({
     nextEvents[target.eventIndex] = {
       ...eventToSave,
       video_recording: nextVideoRecording,
+      detection_config_snapshot: detectionConfigSnapshot ?? eventToSave.detection_config_snapshot,
+      model_candidates: modelCandidates ?? eventToSave.model_candidates,
       review: {
         required: true,
         anchor_rule: 'attack_start',
@@ -1369,7 +1549,6 @@ export function AudioCollectionScreen({
     );
   }
 
-  const isBusyWithTake = isRecording || isStartingRecording || recordingPhase === 'countdown' || recordingPhase === 'finalizing';
   const startDisabled = !canRecord || recordingPhase === 'countdown' || recordingPhase === 'finalizing';
   const statusLabel = recordingPhase === 'countdown'
     ? 'Startar'
@@ -1451,8 +1630,8 @@ export function AudioCollectionScreen({
       return;
     }
 
-    if (isStartingRecording || recordingPhase === 'finalizing') {
-      Alert.alert('Vänta lite', 'Tagningen startar eller sparas just nu.');
+    if (isStartingRecording || isImportingAudio || recordingPhase === 'finalizing') {
+      Alert.alert('Vänta lite', 'Tagningen startar, importeras eller sparas just nu.');
       return;
     }
 
@@ -1580,19 +1759,42 @@ export function AudioCollectionScreen({
             <Text style={styles.activeScenarioPrompt}>{selectedScenario.prompt}</Text>
             <View style={styles.tagRow}>
               <Text style={styles.tagPill}>{selectedScenario.label}</Text>
-              <Text style={styles.tagPill}>{selectedScenario.background_condition}</Text>
+              <Text style={styles.tagPill}>
+                {selectedScenario.id === 'racket_music'
+                  ? `musik ${musicLevelTitle(selectedMusicLevel).toLowerCase()}`
+                  : selectedBackgroundCondition}
+              </Text>
               <Text style={styles.tagPill}>{recordsImu ? 'audio + IMU' : 'video + ljud'}</Text>
               <Text style={styles.tagPill}>{selectedScenario.scenario}</Text>
               <Text style={styles.tagPill}>granska efter tagning</Text>
             </View>
+            {selectedScenario.id === 'racket_music' && (
+              <View style={styles.musicLevelRow}>
+                {MUSIC_LEVEL_OPTIONS.map(option => {
+                  const active = selectedMusicLevel === option.id;
+                  return (
+                    <TouchableOpacity
+                      key={`music-level-${option.id}`}
+                      style={[styles.musicLevelBtn, active && styles.musicLevelBtnActive]}
+                      disabled={isBusyWithTake}
+                      onPress={() => setSelectedMusicLevel(option.id)}
+                    >
+                      <Text style={[styles.musicLevelTxt, active && styles.musicLevelTxtActive]}>{option.title}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
             {mode === 'audio_imu' && selectedScenario.scenario === 'racket_bouncing' && (
               <Text style={styles.scenarioModeHint}>
-                Racketstuds är kontrollerad studs på racket. Forehand/backhand här betyder studs-sida, inte spel-slag.
+                {selectedScenario.id === 'racket_motion_no_bounce'
+                  ? 'Negativ IMU-data: naturlig racketarmsrörelse utan bollkontakt. Märk som Inte studs i Review.'
+                  : 'Racketstuds är kontrollerad studs på racket. Forehand/backhand här betyder studs-sida, inte spel-slag.'}
               </Text>
             )}
             {mode === 'audio_imu' && selectedScenario.scenario === 'playing' && (
               <Text style={styles.scenarioModeHint}>
-                Playing kräver ingen förvald label. Markera racketträffar, bordsstudsar, golvstudsar och brus i Review.
+                Playing kräver ingen förvald label. Markera forehand, backhand och bordsstudsar i Review.
               </Text>
             )}
           </View>
@@ -1720,6 +1922,24 @@ export function AudioCollectionScreen({
                   : 'SCENARIO KLART'}
           </Text>
           <Text style={[styles.dashboardStartSub, startDisabled && styles.dashboardStartSubDisabled]}>{instruction}</Text>
+        </TouchableOpacity>
+      )}
+
+      {mode === 'audio_only' && (
+        <TouchableOpacity
+          style={[styles.importAudioBtn, isBusyWithTake && styles.disabledBtn]}
+          onPress={() => importAudioFileForReview().catch(error => {
+            Alert.alert('Importfel', String(error));
+          })}
+          disabled={isBusyWithTake}
+          activeOpacity={0.82}
+        >
+          <Text style={styles.importAudioTitle}>
+            {isImportingAudio ? 'IMPORTERAR LJUD...' : 'IMPORTERA LJUD'}
+          </Text>
+          <Text style={styles.importAudioSub}>
+            Välj en iPhone-inspelning. Appen konverterar till WAV och öppnar audio-review utan video.
+          </Text>
         </TouchableOpacity>
       )}
 
@@ -1967,6 +2187,21 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '700',
   },
+  musicLevelRow: { flexDirection: 'row', gap: 6, marginTop: 8 },
+  musicLevelBtn: {
+    minHeight: 30,
+    minWidth: 56,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#27313a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10161b',
+    paddingHorizontal: 10,
+  },
+  musicLevelBtnActive: { borderColor: '#2ecc71', backgroundColor: '#12351f' },
+  musicLevelTxt: { color: '#aeb4be', fontSize: 11, fontWeight: '900' },
+  musicLevelTxtActive: { color: '#2ee678' },
   remainingBlock: { minWidth: 68, alignItems: 'center' },
   remainingMain: { color: '#2ee678', fontSize: 23, fontWeight: '900' },
   changeScenarioTxt: { color: '#7ee39e', fontSize: 12, fontWeight: '900', marginTop: 4 },
@@ -2036,6 +2271,19 @@ const styles = StyleSheet.create({
   dashboardStartSub: { color: '#173322', fontSize: 12, marginTop: 6, textAlign: 'center', fontWeight: '700' },
   dashboardStartSubDisabled: { color: '#777f88' },
   dashboardStopSub: { color: '#f1b5b5' },
+  importAudioBtn: {
+    minHeight: 58,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#4a9eff',
+    backgroundColor: '#0f1d2b',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  importAudioTitle: { color: '#dcecff', fontSize: 14, fontWeight: '900' },
+  importAudioSub: { color: '#aebed0', fontSize: 11, marginTop: 4, textAlign: 'center', fontWeight: '700' },
   actionCardsRow: { flexDirection: 'row', gap: 9 },
   actionCard: {
     flex: 1,

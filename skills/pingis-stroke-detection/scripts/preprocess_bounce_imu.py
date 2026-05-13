@@ -4,9 +4,10 @@ preprocess_bounce_imu.py
 Build a binary IMU dataset for bounce-contact motion from synchronized
 audio + IMU collection sessions.
 
-Ground truth comes from reviewed audio markers:
-- racket_contact -> bounce_contact_motion
-- not_racket_contact -> not_bounce_contact
+Ground truth comes from reviewed racket-bounce markers and reviewed
+whole-take no-bounce motion sessions:
+- racket_contact markers -> bounce_contact_motion
+- racket_motion_no_bounce takes -> not_bounce_contact windows
 - ignore -> skipped
 
 Only reviewed takes with saved IMU recordings are included.
@@ -31,6 +32,10 @@ OUT_FILE = OUT_DIR / "bounce_imu_dataset.csv"
 WINDOW_PRE_MS = 180
 WINDOW_POST_MS = 220
 MIN_WINDOW_SAMPLES = 8
+NO_BOUNCE_SCENARIO_ID = "racket_motion_no_bounce"
+NEGATIVE_TAKE_SKIP_START_MS = 3500
+NEGATIVE_TAKE_SKIP_END_MS = 500
+NEGATIVE_WINDOW_STRIDE_MS = 500
 
 CHANNELS = [
     "accel_x",
@@ -99,6 +104,28 @@ def extract_window(samples: list[dict], center_take_ts_ms: int, take_start_ms: i
     return window
 
 
+def take_duration_ms(samples: list[dict], take_start_ms: int) -> int:
+    if not samples:
+        return 0
+    return max(sample_take_ts_ms(sample, take_start_ms) for sample in samples)
+
+
+def no_bounce_negative_centers(samples: list[dict], take_start_ms: int) -> list[int]:
+    duration_ms = take_duration_ms(samples, take_start_ms)
+    if duration_ms <= 0:
+        return []
+
+    start_ms = max(WINDOW_PRE_MS, NEGATIVE_TAKE_SKIP_START_MS)
+    end_ms = duration_ms - max(WINDOW_POST_MS, NEGATIVE_TAKE_SKIP_END_MS)
+    if end_ms < start_ms:
+        start_ms = WINDOW_PRE_MS
+        end_ms = duration_ms - WINDOW_POST_MS
+    if end_ms < start_ms:
+        return []
+
+    return list(range(int(start_ms), int(end_ms) + 1, NEGATIVE_WINDOW_STRIDE_MS))
+
+
 def add_axis_features(features: dict, values: np.ndarray, prefix: str) -> None:
     features[f"{prefix}_mean"] = float(np.mean(values))
     features[f"{prefix}_std"] = float(np.std(values))
@@ -136,12 +163,65 @@ def extract_features(window: list[dict]) -> dict:
     return features
 
 
-def marker_to_label(final_label: str) -> str | None:
+def marker_to_label(marker: dict) -> str | None:
+    final_label = str(marker.get("final_label", "ignore"))
+    class_label = str(marker.get("class_label", ""))
     if final_label == "racket_contact":
         return "bounce_contact_motion"
-    if final_label == "not_racket_contact":
+    if final_label == "not_racket_contact" and class_label == "no_bounce_motion":
         return "not_bounce_contact"
     return None
+
+
+def append_imu_row(
+    rows: list[dict],
+    window: list[dict],
+    target_label: str,
+    session_id: str,
+    take_group: str,
+    session_meta: dict,
+    event: dict,
+    event_scenario: str,
+    marker_id: str,
+    marker_label: str,
+    review_status: str,
+    center_take_ts_ms: int,
+    imu_sample_count: int,
+    imu_hz_estimate: float,
+    imu_partial: bool,
+    imu_disconnected: bool,
+    class_label: str = "",
+    contact_kind: str = "",
+    not_racket_kind: str = "",
+    bounce_side: str = "unknown",
+) -> None:
+    row = extract_features(window)
+    row["label"] = target_label
+    row["session_id"] = session_id
+    row["group_id"] = take_group
+    row["scenario_id"] = event["scenario_id"]
+    row["scenario"] = event_scenario
+    row["bounce_context"] = event.get("bounce_context", "")
+    row["calibration_status"] = event.get(
+        "calibration_status",
+        session_meta.get("calibration_status", ""),
+    )
+    row["background_condition"] = event["background_condition"]
+    row["take_index"] = int(event["take_index"])
+    row["marker_id"] = marker_id
+    row["marker_label"] = marker_label
+    row["review_status"] = review_status
+    row["class_label"] = class_label
+    row["contact_kind"] = contact_kind
+    row["not_racket_kind"] = not_racket_kind
+    row["bounce_side"] = bounce_side
+    row["marker_take_ts_ms"] = center_take_ts_ms
+    row["imu_sample_count"] = imu_sample_count
+    row["imu_hz_estimate"] = imu_hz_estimate
+    row["imu_partial"] = imu_partial
+    row["imu_disconnected"] = imu_disconnected
+    row["source_file"] = event["wav_filename"]
+    rows.append(row)
 
 
 def main() -> None:
@@ -192,11 +272,37 @@ def main() -> None:
             imu_sample_count = int(imu_recording.get("sample_count") or len(raw_samples))
             imu_hz_estimate = float(imu_recording.get("sample_hz_estimate") or 0.0)
 
+            if event.get("scenario_id") == NO_BOUNCE_SCENARIO_ID:
+                for center_take_ts_ms in no_bounce_negative_centers(normalized_samples, take_start_ms):
+                    window = extract_window(normalized_samples, center_take_ts_ms, take_start_ms)
+                    if len(window) < MIN_WINDOW_SAMPLES:
+                        continue
+                    append_imu_row(
+                        rows,
+                        window,
+                        "not_bounce_contact",
+                        session_id,
+                        take_group,
+                        session_meta,
+                        event,
+                        event_scenario,
+                        f"whole_take_negative_{center_take_ts_ms}",
+                        "not_racket_contact",
+                        "confirmed_take",
+                        center_take_ts_ms,
+                        imu_sample_count,
+                        imu_hz_estimate,
+                        imu_partial,
+                        imu_disconnected,
+                        class_label="no_bounce_motion",
+                    )
+                continue
+
             for marker in review.get("markers", []):
                 review_status = str(marker.get("review_status") or "confirmed")
                 if review_status in {"pending", "deleted", "filtered"}:
                     continue
-                target_label = marker_to_label(marker.get("final_label", "ignore"))
+                target_label = marker_to_label(marker)
                 if target_label is None:
                     continue
 
@@ -205,32 +311,28 @@ def main() -> None:
                 if len(window) < MIN_WINDOW_SAMPLES:
                     continue
 
-                row = extract_features(window)
-                row["label"] = target_label
-                row["session_id"] = session_id
-                row["group_id"] = take_group
-                row["scenario_id"] = event["scenario_id"]
-                row["scenario"] = event_scenario
-                row["bounce_context"] = event.get("bounce_context", "")
-                row["calibration_status"] = event.get(
-                    "calibration_status",
-                    session_meta.get("calibration_status", ""),
+                append_imu_row(
+                    rows,
+                    window,
+                    target_label,
+                    session_id,
+                    take_group,
+                    session_meta,
+                    event,
+                    event_scenario,
+                    marker["id"],
+                    marker["final_label"],
+                    review_status,
+                    center_take_ts_ms,
+                    imu_sample_count,
+                    imu_hz_estimate,
+                    imu_partial,
+                    imu_disconnected,
+                    class_label=marker.get("class_label", ""),
+                    contact_kind=marker.get("contact_kind", ""),
+                    not_racket_kind=marker.get("not_racket_kind", ""),
+                    bounce_side=marker.get("bounce_side", "unknown"),
                 )
-                row["background_condition"] = event["background_condition"]
-                row["take_index"] = int(event["take_index"])
-                row["marker_id"] = marker["id"]
-                row["marker_label"] = marker["final_label"]
-                row["review_status"] = review_status
-                row["contact_kind"] = marker.get("contact_kind", "")
-                row["not_racket_kind"] = marker.get("not_racket_kind", "")
-                row["bounce_side"] = marker.get("bounce_side", "unknown")
-                row["marker_take_ts_ms"] = center_take_ts_ms
-                row["imu_sample_count"] = imu_sample_count
-                row["imu_hz_estimate"] = imu_hz_estimate
-                row["imu_partial"] = imu_partial
-                row["imu_disconnected"] = imu_disconnected
-                row["source_file"] = event["wav_filename"]
-                rows.append(row)
 
     if not rows:
         print("No reviewed audio+IMU rows found yet. Record and review synced takes first.")

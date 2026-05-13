@@ -19,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   REVIEW_PRE_MS,
   buildMarkerZoomWaveformWindow,
-  buildSuggestedReviewMarkers,
+  buildSuggestedReviewData,
   buildWaveformBins,
   createManualMarker,
   decodeWavFile,
@@ -29,10 +29,19 @@ import {
   writeTakePlaybackClip,
   type AudioSyncPoint,
 } from './audioReview';
+import {
+  detectionConfigTitle,
+  getAudioDetectionConfig,
+  getDefaultAudioDetectionConfigSnapshot,
+} from './audioDetectionConfig';
 import { ReviewOrientation } from './ReviewOrientation';
 import type {
   AudioContactKind,
   AudioEvent,
+  AudioDetectionConfigSnapshot,
+  AudioDetectionMode,
+  AudioDetectionSensitivity,
+  AudioModelCandidate,
   AudioNotRacketKind,
   AudioReviewBounceSide,
   AudioReviewClassLabel,
@@ -46,7 +55,12 @@ interface Props {
   event: AudioEvent;
   filePath: string;
   videoFilePath?: string;
-  onSave: (markers: AudioReviewMarker[], videoSyncOffsetMs?: number) => Promise<void> | void;
+  onSave: (
+    markers: AudioReviewMarker[],
+    videoSyncOffsetMs?: number,
+    modelCandidates?: AudioModelCandidate[],
+    detectionConfigSnapshot?: AudioDetectionConfigSnapshot,
+  ) => Promise<void> | void;
   onDiscard: () => Promise<void> | void;
   onBack: () => void;
 }
@@ -81,6 +95,11 @@ const PLAYING_CONFIDENCE_FILTERS: Array<{ id: PlayingConfidenceFilterId; title: 
   { id: 'medium', title: 'Medium', minConfidence: 0.65 },
   { id: 'safe', title: 'Säkra', minConfidence: 0.82 },
 ];
+const REVIEW_SENSITIVITY_OPTIONS: AudioDetectionSensitivity[] = ['strict', 'normal', 'sensitive'];
+const REVIEW_DETECTION_MODE_OPTIONS: AudioDetectionMode[] = ['hybrid', 'binary_only', 'four_class_only'];
+const PRESERVED_MARKER_DUPLICATE_GAP_MS = 120;
+const WAVEFORM_MIN_BIN_COUNT = 160;
+const WAVEFORM_MAX_BAR_HEIGHT = 92;
 const IMU_SERIES_COLORS = {
   x: '#2ecc71',
   y: '#ff4d4d',
@@ -119,6 +138,56 @@ function labelColor(label: AudioReviewLabel) {
     case 'ignore':
       return '#888';
   }
+}
+
+function classColor(classLabel?: string, fallbackLabel?: AudioReviewLabel) {
+  if (fallbackLabel === 'ignore' || classLabel === 'ignore') return '#888';
+  if (
+    fallbackLabel === 'racket_contact' ||
+    classLabel === 'racket_bounce' ||
+    classLabel === 'forehand' ||
+    classLabel === 'backhand' ||
+    classLabel === 'forehand_hit' ||
+    classLabel === 'backhand_hit'
+  ) {
+    return '#2ecc71';
+  }
+  if (classLabel === 'table_bounce') return '#4a9eff';
+  if (classLabel === 'floor_bounce') return '#ffc02f';
+  if (classLabel === 'noise' || classLabel === 'voice_music_noise') return '#ff5a4f';
+  if (classLabel === 'catch_after_sound' || classLabel === 'other_impact') return '#b06cff';
+  if (classLabel === 'no_bounce_motion') return '#ffb04f';
+  return fallbackLabel ? labelColor(fallbackLabel) : '#f5c76d';
+}
+
+function markerColor(marker: AudioReviewMarker) {
+  return classColor(
+    marker.class_label ?? marker.not_racket_kind ?? marker.contact_kind ?? marker.surface_label,
+    marker.final_label,
+  );
+}
+
+function candidateColor(candidate: AudioModelCandidate) {
+  return classColor(
+    candidate.class_label ?? candidate.not_racket_kind ?? candidate.contact_kind ?? candidate.surface_label,
+    candidate.suggested_label,
+  );
+}
+
+function shouldShowCandidatePin(
+  candidate: AudioModelCandidate,
+  detectionConfig: AudioDetectionConfigSnapshot,
+) {
+  if (candidate.review_relevant) return true;
+  const surfaceConfidence = candidate.surface_confidence ?? 0;
+  if (
+    (candidate.surface_label === 'table_bounce' || candidate.surface_label === 'floor_bounce') &&
+    surfaceConfidence >= detectionConfig.surface_veto_confidence
+  ) {
+    return true;
+  }
+  if (candidate.surface_label === 'noise' && surfaceConfidence >= 0.65) return true;
+  return false;
 }
 
 interface ReviewLabelChoice {
@@ -190,10 +259,10 @@ const BASE_REVIEW_LABEL_CHOICES: ReviewLabelChoice[] = [
   },
 ];
 
-const IMU_REVIEW_LABEL_CHOICES: ReviewLabelChoice[] = [
+const RACKET_BOUNCING_REVIEW_LABEL_CHOICES: ReviewLabelChoice[] = [
   {
-    id: 'forehand',
-    title: 'Racketträff forehand',
+    id: 'racket_bounce_forehand_side',
+    title: 'Racketträff FH-sida',
     final_label: 'racket_contact',
     event_type: 'racket_hit',
     class_label: 'forehand',
@@ -202,14 +271,30 @@ const IMU_REVIEW_LABEL_CHOICES: ReviewLabelChoice[] = [
     color: '#2ecc71',
   },
   {
-    id: 'backhand',
-    title: 'Racketträff backhand',
+    id: 'racket_bounce_backhand_side',
+    title: 'Racketträff BH-sida',
     final_label: 'racket_contact',
     event_type: 'racket_hit',
     class_label: 'backhand',
     contact_kind: 'racket_bounce',
     bounce_side: 'backhand',
     color: '#5fd18b',
+  },
+  {
+    id: 'no_bounce_motion',
+    title: 'Inte studs',
+    final_label: 'not_racket_contact',
+    event_type: 'noise',
+    class_label: 'no_bounce_motion',
+    color: '#ffb04f',
+  },
+  {
+    id: 'racket_bouncing_ignore',
+    title: 'Ignorera',
+    final_label: 'ignore',
+    event_type: 'ignore',
+    class_label: 'ignore',
+    color: '#888',
   },
 ];
 
@@ -262,8 +347,9 @@ function markerDetailText(marker: AudioReviewMarker | null): string {
   const classLabel = marker.class_label ?? marker.contact_kind ?? marker.not_racket_kind;
   if (classLabel === 'forehand_hit') return 'Racketträff forehand';
   if (classLabel === 'backhand_hit') return 'Racketträff backhand';
-  if (classLabel === 'forehand') return 'Racketträff forehand';
-  if (classLabel === 'backhand') return 'Racketträff backhand';
+  if (classLabel === 'forehand') return 'Racketträff FH-sida';
+  if (classLabel === 'backhand') return 'Racketträff BH-sida';
+  if (classLabel === 'no_bounce_motion') return 'Inte studs';
   if (classLabel === 'racket_bounce') return 'Racketträff';
   if (classLabel === 'table_bounce') return 'Bordsstuds';
   if (classLabel === 'floor_bounce') return 'Golvstuds';
@@ -297,6 +383,29 @@ function markerPassesPlayingFilter(marker: AudioReviewMarker, minConfidence: num
   return markerConfidence(marker) >= minConfidence;
 }
 
+function shouldPreserveMarkerWhenConfigChanges(marker: AudioReviewMarker): boolean {
+  const status = marker.review_status ?? (marker.source === 'manual' ? 'edited' : 'pending');
+  return (
+    marker.source === 'manual' ||
+    status === 'confirmed' ||
+    status === 'edited' ||
+    status === 'ignored' ||
+    status === 'deleted'
+  );
+}
+
+function sensitivityTitle(sensitivity: AudioDetectionSensitivity): string {
+  if (sensitivity === 'strict') return 'Strikt';
+  if (sensitivity === 'sensitive') return 'Känslig';
+  return 'Normal';
+}
+
+function detectionModeTitle(mode: AudioDetectionMode): string {
+  if (mode === 'four_class_only') return '4-klass';
+  if (mode === 'binary_only') return 'Binär';
+  return 'Hybrid';
+}
+
 function shouldDropPlayingAutoMarkerOnSave(
   marker: AudioReviewMarker,
   minConfidence: number,
@@ -305,6 +414,30 @@ function shouldDropPlayingAutoMarkerOnSave(
   const status = marker.review_status ?? 'pending';
   if (status === 'filtered') return true;
   return status === 'pending' && !markerPassesPlayingFilter(marker, minConfidence);
+}
+
+function modelCandidatesFromMarkers(
+  markers: AudioReviewMarker[],
+  detectionConfig: AudioDetectionConfigSnapshot,
+): AudioModelCandidate[] {
+  return markers
+    .filter(marker => marker.source === 'auto')
+    .map((marker, index) => ({
+      id: marker.linked_candidate_id ?? `candidate_from_marker_${index}_${Math.round(marker.timestamp_ms)}`,
+      timestamp_ms: marker.timestamp_ms,
+      review_relevant: true,
+      suggested_label: marker.suggested_label,
+      event_type: marker.event_type,
+      class_label: marker.class_label,
+      contact_kind: marker.contact_kind,
+      not_racket_kind: marker.not_racket_kind,
+      bounce_side: marker.bounce_side,
+      contact_confidence: marker.contact_confidence,
+      surface_label: marker.surface_label,
+      surface_confidence: marker.surface_confidence,
+      detection_mode: detectionConfig.detection_mode,
+      detection_config_id: detectionConfig.config_id,
+    }));
 }
 
 function applyReviewLabelChoice(marker: AudioReviewMarker, choice: ReviewLabelChoice): AudioReviewMarker {
@@ -573,7 +706,8 @@ function ImuLinePlot({
             <View
               style={[
                 styles.imuMarkerLine,
-                { backgroundColor: selected ? labelColor(marker.final_label) : '#f5c76d' },
+                { backgroundColor: markerColor(marker) },
+                selected && styles.imuMarkerLineActive,
               ]}
             />
           </TouchableOpacity>
@@ -594,6 +728,11 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const playbackModeRef = useRef<PlaybackMode>('idle');
   const playbackRateRef = useRef<PlaybackRate>(1);
   const playbackSourceStartMsRef = useRef(0);
+  const latestAudioCallbackPositionMsRef = useRef(0);
+  const latestAudioCallbackWallClockMsRef = useRef(0);
+  const latestVideoMsRef = useRef(0);
+  const latestVideoProgressWallClockMsRef = useRef(0);
+  const pausedAtAudioMsRef = useRef<number | null>(null);
   const overviewDragStartMsRef = useRef(0);
   const overviewMarkerDragStartMsRef = useRef(0);
   const detailMarkerDragStartMsRef = useRef(0);
@@ -625,6 +764,10 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const [durationMs, setDurationMs] = useState(event.duration_ms);
   const [overviewBins, setOverviewBins] = useState<number[]>([]);
   const [markers, setMarkers] = useState<AudioReviewMarker[]>(event.review?.markers ?? []);
+  const [modelCandidates, setModelCandidates] = useState<AudioModelCandidate[]>(event.model_candidates ?? []);
+  const [detectionConfigSnapshot, setDetectionConfigSnapshot] = useState<AudioDetectionConfigSnapshot>(
+    event.detection_config_snapshot ?? getDefaultAudioDetectionConfigSnapshot(),
+  );
   const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(event.review?.markers?.[0]?.id ?? null);
   const [playbackPositionMs, setPlaybackPositionMs] = useState(0);
   const [playbackMode, setPlaybackMode] = useState<PlaybackMode>('idle');
@@ -652,7 +795,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   } | null>(null);
   const [quickLabelPrompt, setQuickLabelPrompt] = useState<QuickLabelPrompt | null>(null);
   const overviewBinCount = useMemo(
-    () => Math.max(64, Math.floor((overviewWidth || 240) / 2)),
+    () => Math.max(WAVEFORM_MIN_BIN_COUNT, Math.floor(overviewWidth || 320)),
     [overviewWidth],
   );
   const timelineWindowDurationMs = useMemo(
@@ -667,14 +810,74 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const timelineWindowSpanMs = Math.max(1, timelineWindowEndMs - safeTimelineWindowStartMs);
 
   const allOrderedMarkers = useMemo(() => sortMarkers(markers), [markers]);
+  const visibleMarkerCandidateIds = useMemo(() => new Set(
+    allOrderedMarkers
+      .filter(marker => {
+        const status = marker.review_status ?? 'pending';
+        return status !== 'deleted' && status !== 'filtered' && marker.linked_candidate_id;
+      })
+      .map(marker => marker.linked_candidate_id as string),
+  ), [allOrderedMarkers]);
   const isPlayingReview = event.scenario === 'playing' || event.scenario_id === 'free_recording';
-  const isAudioOnlyReview = event.scenario === 'audio_sound' || event.recording_mode === 'guided_audio_only';
+  const isRacketBouncingReview = (
+    event.scenario === 'racket_bouncing' ||
+    event.scenario_id === 'racket_motion_no_bounce' ||
+    event.scenario_id.startsWith('racket_bounce')
+  );
+  const allowsMarkerlessNoBounceSave = event.scenario_id === 'racket_motion_no_bounce';
+  const isAudioOnlyReview = event.scenario === 'audio_sound' || event.recording_mode === 'guided_audio_only' || event.recording_mode === 'imported_audio';
   const quickLabelChoices = useMemo(() => {
     if (isPlayingReview) return PLAYING_REVIEW_LABEL_CHOICES;
+    if (isRacketBouncingReview) return RACKET_BOUNCING_REVIEW_LABEL_CHOICES;
     if (isAudioOnlyReview) return BASE_REVIEW_LABEL_CHOICES;
     return [];
-  }, [isAudioOnlyReview, isPlayingReview]);
+  }, [isAudioOnlyReview, isPlayingReview, isRacketBouncingReview]);
   const supportsQuickLabels = quickLabelChoices.length > 0;
+  const handleDetectionConfigChange = useCallback((
+    nextSensitivity: AudioDetectionSensitivity,
+    nextDetectionMode: AudioDetectionMode,
+  ) => {
+    const nextConfig = getAudioDetectionConfig(nextSensitivity, nextDetectionMode);
+    const decoded = decodedRef.current;
+    setDetectionConfigSnapshot(nextConfig);
+    setQuickLabelPrompt(null);
+
+    if (!decoded) {
+      setModelCandidates([]);
+      return;
+    }
+
+    const reviewData = buildSuggestedReviewData(
+      decoded.samples,
+      decoded.sampleRate,
+      event.scenario_id,
+      nextConfig,
+    );
+    const preservedMarkers = markers.filter(shouldPreserveMarkerWhenConfigChanges);
+    const preservedCandidateIds = new Set(
+      preservedMarkers
+        .map(marker => marker.linked_candidate_id)
+        .filter((candidateId): candidateId is string => Boolean(candidateId)),
+    );
+    const preservedCandidates = modelCandidates.filter(candidate => preservedCandidateIds.has(candidate.id));
+    const nextAutoMarkers = reviewData.markers
+      .filter(autoMarker => !preservedMarkers.some(marker => (
+        Math.abs(marker.timestamp_ms - autoMarker.timestamp_ms) <= PRESERVED_MARKER_DUPLICATE_GAP_MS
+      )))
+      .map((autoMarker, index) => ({
+        ...autoMarker,
+        id: `${autoMarker.id}_${nextConfig.config_id}_${index}`,
+      }));
+    const mergedMarkers = sortMarkers([...preservedMarkers, ...nextAutoMarkers]);
+
+    setMarkers(mergedMarkers);
+    setModelCandidates([...preservedCandidates, ...reviewData.model_candidates]);
+    setSelectedMarkerId(previousSelectedId => (
+      previousSelectedId && mergedMarkers.some(marker => marker.id === previousSelectedId)
+        ? previousSelectedId
+        : mergedMarkers[0]?.id ?? null
+    ));
+  }, [event.scenario_id, markers, modelCandidates]);
   const activePlayingConfidenceFilter = useMemo(
     () => PLAYING_CONFIDENCE_FILTERS.find(filter => filter.id === playingConfidenceFilter) ?? PLAYING_CONFIDENCE_FILTERS[2],
     [playingConfidenceFilter],
@@ -714,10 +917,12 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     [orderedMarkers, selectedMarker],
   );
   const reviewLabelChoices = useMemo(
-    () => isPlayingReview
-      ? PLAYING_REVIEW_LABEL_CHOICES
-      : BASE_REVIEW_LABEL_CHOICES,
-    [isPlayingReview],
+    () => {
+      if (isPlayingReview) return PLAYING_REVIEW_LABEL_CHOICES;
+      if (isRacketBouncingReview) return RACKET_BOUNCING_REVIEW_LABEL_CHOICES;
+      return BASE_REVIEW_LABEL_CHOICES;
+    },
+    [isPlayingReview, isRacketBouncingReview],
   );
 
   const detailFocusMs = playbackMode === 'playing_full_take'
@@ -791,6 +996,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const stopCurrentPlayback = useCallback(async (nextMode: PlaybackMode = 'idle') => {
     playbackModeRef.current = nextMode;
     setPlaybackMode(nextMode);
+    if (nextMode !== 'paused_full_take') {
+      pausedAtAudioMsRef.current = null;
+    }
 
     const tempPath = tempPlaybackPathRef.current;
     tempPlaybackPathRef.current = null;
@@ -845,6 +1053,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   ) => {
     const clampedMs = clampTimestamp(nextTimestampMs, durationMs);
     playbackPositionRef.current = clampedMs;
+    if (playbackModeRef.current === 'paused_full_take') {
+      pausedAtAudioMsRef.current = clampedMs;
+    }
     setPlaybackPositionMs(clampedMs);
     updateTimelineWindowForPlayhead(clampedMs);
     if (
@@ -860,6 +1071,42 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const setPlayheadMs = useCallback((nextTimestampMs: number) => {
     seekToMs(nextTimestampMs);
   }, [seekToMs]);
+
+  const playerPositionMsForAudioMs = useCallback((audioMs: number) => {
+    const playbackRateValue = playbackRateRef.current || 1;
+    const relativeAudioMs = Math.max(0, audioMs - playbackSourceStartMsRef.current);
+    return Math.round(relativeAudioMs / playbackRateValue);
+  }, []);
+
+  const estimateCurrentAudioMsFromClock = useCallback(() => {
+    const mode = playbackModeRef.current;
+    if (mode !== 'playing_full_take' && mode !== 'playing_preview') {
+      return clampTimestamp(playbackPositionRef.current, durationMs);
+    }
+
+    const latestCallbackMs = latestAudioCallbackPositionMsRef.current || playbackPositionRef.current;
+    const latestCallbackWallClockMs = latestAudioCallbackWallClockMsRef.current;
+    if (!latestCallbackWallClockMs) {
+      return clampTimestamp(latestCallbackMs, durationMs);
+    }
+
+    const elapsedWallClockMs = Math.max(0, Date.now() - latestCallbackWallClockMs);
+    return clampTimestamp(latestCallbackMs + elapsedWallClockMs * playbackRateRef.current, durationMs);
+  }, [durationMs]);
+
+  const lockPlaybackPositionToAudioMs = useCallback((nextTimestampMs: number, seekVideo = true) => {
+    const clampedMs = clampTimestamp(nextTimestampMs, durationMs);
+    playbackPositionRef.current = clampedMs;
+    pausedAtAudioMsRef.current = clampedMs;
+    latestAudioCallbackPositionMsRef.current = clampedMs;
+    latestAudioCallbackWallClockMsRef.current = Date.now();
+    setPlaybackPositionMs(clampedMs);
+    updateTimelineWindowForPlayhead(clampedMs);
+    if (seekVideo) {
+      seekVideoToAudioMs(clampedMs, true);
+    }
+    return clampedMs;
+  }, [durationMs, seekVideoToAudioMs, updateTimelineWindowForPlayhead]);
 
   const setManualVideoSyncOffset = useCallback((nextOffsetMs: number) => {
     const clampedOffsetMs = Math.max(-3000, Math.min(3000, Math.round(nextOffsetMs)));
@@ -896,7 +1143,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
 
   const stopForScrubIfNeeded = useCallback(() => {
     if (playbackModeRef.current === 'playing_full_take') {
-      void stopCurrentPlayback('paused_full_take');
+      void stopCurrentPlayback('idle');
     } else if (playbackModeRef.current === 'playing_preview') {
       void stopCurrentPlayback('idle');
     }
@@ -1316,16 +1563,28 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
         setOverviewBins(buildWaveformBins(decoded.samples, overviewBinCount));
         const syncPoint = detectAudioSyncPoint(decoded.samples, decoded.sampleRate);
         const savedVideoSyncOffsetMs = event.video_recording?.video_sync_offset_ms ?? 0;
+        const savedDetectionConfig = event.detection_config_snapshot ?? getDefaultAudioDetectionConfigSnapshot();
 
+        const reviewData = event.review?.markers?.length
+          ? null
+          : buildSuggestedReviewData(decoded.samples, decoded.sampleRate, event.scenario_id, savedDetectionConfig);
         const nextMarkers = event.review?.markers?.length
           ? sortMarkers(event.review.markers.map(marker => ({
               ...marker,
               review_status: marker.review_status ?? 'confirmed',
             })))
-          : buildSuggestedReviewMarkers(decoded.samples, decoded.sampleRate, event.scenario_id);
+          : reviewData?.markers ?? [];
+        const nextModelCandidates = event.model_candidates?.length
+          ? event.model_candidates
+          : reviewData?.model_candidates ?? modelCandidatesFromMarkers(nextMarkers, savedDetectionConfig);
         setMarkers(nextMarkers);
+        setModelCandidates(nextModelCandidates);
+        setDetectionConfigSnapshot(reviewData?.detection_config_snapshot ?? savedDetectionConfig);
         setSelectedMarkerId(nextMarkers[0]?.id ?? null);
         playbackPositionRef.current = 0;
+        latestAudioCallbackPositionMsRef.current = 0;
+        latestAudioCallbackWallClockMsRef.current = 0;
+        pausedAtAudioMsRef.current = null;
         setPlaybackPositionMs(0);
         setTimelineWindowStartMs(0);
         setVideoSyncOffsetMs(savedVideoSyncOffsetMs);
@@ -1346,7 +1605,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     return () => {
       cancelled = true;
     };
-  }, [event, event.review?.markers, event.scenario_id, filePath, overviewBinCount, setSyncCalibrationMode]);
+  }, [event, event.model_candidates, event.review?.markers, event.scenario_id, filePath, overviewBinCount, setSyncCalibrationMode]);
 
   useEffect(() => {
     void ReviewOrientation.lockPortrait();
@@ -1374,6 +1633,8 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
       ) {
         const mappedMs = playbackSourceStartMsRef.current + currentPosition * playbackRateRef.current;
         const clampedMs = clampTimestamp(mappedMs, durationMs);
+        latestAudioCallbackPositionMsRef.current = clampedMs;
+        latestAudioCallbackWallClockMsRef.current = Date.now();
         playbackPositionRef.current = clampedMs;
         setPlaybackPositionMs(clampedMs);
         updateTimelineWindowForPlayhead(clampedMs);
@@ -1510,70 +1771,153 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     setPlayheadMs(nextTimestampMs);
   }, [detailWidth, detailWindow.end_ms, detailWindow.start_ms, setPlayheadMs, stopForScrubIfNeeded]);
 
-  const handlePlayFromHere = useCallback(async () => {
+  const startPlaybackAtAudioMs = useCallback(async (startTimestampMs: number) => {
     if (!decodedRef.current) return;
 
-    try {
-      await stopCurrentPlayback('idle');
-      setVideoPreparingPlayback(hasVideo && (!videoReady || videoBuffering));
-      if (hasVideo) {
-        videoRef.current?.seek(mapAudioPlayheadToVideoMs(event, playbackPositionMs, durationMs, videoSyncOffsetMs) / 1000);
-      }
-      const playOriginalTake = playbackRate === 1;
-      const playbackPath = playOriginalTake
-        ? filePath
-        : await writeTakePlaybackClip(
-            decodedRef.current.samples,
-            decodedRef.current.sampleRate,
-            playbackPositionMs,
-            playbackRate,
-          );
-      tempPlaybackPathRef.current = playOriginalTake ? null : playbackPath;
-      playbackSourceStartMsRef.current = playOriginalTake ? 0 : playbackPositionMs;
-      playbackModeRef.current = 'playing_full_take';
-      setPlaybackMode('playing_full_take');
-      setTimelineInteractionMode('playing');
-      await playerRef.current.startPlayer(playbackPath);
-      if (playOriginalTake && playbackPositionMs > 0) {
-        await playerRef.current.seekToPlayer(playbackPositionMs);
-      }
-      setVideoPreparingPlayback(false);
-    } catch (error) {
-      setVideoPreparingPlayback(false);
-      await stopCurrentPlayback('idle');
-      Alert.alert('Uppspelningsfel', `Kunde inte spela från vald position: ${String(error)}`);
+    const startAudioMs = clampTimestamp(startTimestampMs, durationMs);
+    await stopCurrentPlayback('idle');
+    setVideoPreparingPlayback(hasVideo && (!videoReady || videoBuffering));
+    if (hasVideo) {
+      videoRef.current?.seek(mapAudioPlayheadToVideoMs(event, startAudioMs, durationMs, videoSyncOffsetMs) / 1000);
     }
+    const activePlaybackRate = playbackRateRef.current;
+    const playOriginalTake = activePlaybackRate === 1;
+    const playbackPath = playOriginalTake
+      ? filePath
+      : await writeTakePlaybackClip(
+          decodedRef.current.samples,
+          decodedRef.current.sampleRate,
+          startAudioMs,
+          activePlaybackRate,
+        );
+    tempPlaybackPathRef.current = playOriginalTake ? null : playbackPath;
+    playbackSourceStartMsRef.current = playOriginalTake ? 0 : startAudioMs;
+    playbackPositionRef.current = startAudioMs;
+    pausedAtAudioMsRef.current = null;
+    setPlaybackPositionMs(startAudioMs);
+    updateTimelineWindowForPlayhead(startAudioMs);
+    await playerRef.current.startPlayer(playbackPath);
+    if (playOriginalTake && startAudioMs > 0) {
+      await playerRef.current.seekToPlayer(startAudioMs);
+    }
+    latestAudioCallbackPositionMsRef.current = startAudioMs;
+    latestAudioCallbackWallClockMsRef.current = Date.now();
+    playbackModeRef.current = 'playing_full_take';
+    setPlaybackMode('playing_full_take');
+    setTimelineInteractionMode('playing');
+    setVideoPreparingPlayback(false);
   }, [
     durationMs,
     event,
     filePath,
     hasVideo,
-    playbackPositionMs,
-    playbackRate,
     setTimelineInteractionMode,
     stopCurrentPlayback,
+    updateTimelineWindowForPlayhead,
     videoBuffering,
     videoReady,
     videoSyncOffsetMs,
   ]);
 
-  const handlePause = useCallback(async () => {
-    const nextMode = playbackModeRef.current === 'playing_full_take' ? 'paused_full_take' : 'idle';
-    setVideoPreparingPlayback(false);
-    await stopCurrentPlayback(nextMode);
+  const pauseAtCurrentAudioTime = useCallback(async () => {
+    const mode = playbackModeRef.current;
+    if (mode !== 'playing_full_take') {
+      setVideoPreparingPlayback(false);
+      await stopCurrentPlayback('idle');
+      setTimelineInteractionMode('idle');
+      return;
+    }
+
+    const pauseAudioMs = lockPlaybackPositionToAudioMs(estimateCurrentAudioMsFromClock(), true);
+    playbackModeRef.current = 'paused_full_take';
+    setPlaybackMode('paused_full_take');
     setTimelineInteractionMode('idle');
-  }, [setTimelineInteractionMode, stopCurrentPlayback]);
+    setVideoPreparingPlayback(false);
+
+    try {
+      await playerRef.current.pausePlayer();
+    } catch {
+      await playerRef.current.stopPlayer().catch(() => {});
+    }
+
+    lockPlaybackPositionToAudioMs(pauseAudioMs, true);
+  }, [
+    estimateCurrentAudioMsFromClock,
+    lockPlaybackPositionToAudioMs,
+    setTimelineInteractionMode,
+    stopCurrentPlayback,
+  ]);
+
+  const resumeFromPausedAudioTime = useCallback(async () => {
+    const resumeAudioMs = clampTimestamp(pausedAtAudioMsRef.current ?? playbackPositionRef.current, durationMs);
+
+    try {
+      setVideoPreparingPlayback(hasVideo && (!videoReady || videoBuffering));
+      if (hasVideo) {
+        videoRef.current?.seek(mapAudioPlayheadToVideoMs(event, resumeAudioMs, durationMs, videoSyncOffsetMs) / 1000);
+      }
+      await playerRef.current.seekToPlayer(playerPositionMsForAudioMs(resumeAudioMs));
+      playbackPositionRef.current = resumeAudioMs;
+      latestAudioCallbackPositionMsRef.current = resumeAudioMs;
+      latestAudioCallbackWallClockMsRef.current = Date.now();
+      setPlaybackPositionMs(resumeAudioMs);
+      updateTimelineWindowForPlayhead(resumeAudioMs);
+      playbackModeRef.current = 'playing_full_take';
+      setPlaybackMode('playing_full_take');
+      setTimelineInteractionMode('playing');
+      await playerRef.current.resumePlayer();
+      pausedAtAudioMsRef.current = null;
+      setVideoPreparingPlayback(false);
+    } catch {
+      setVideoPreparingPlayback(false);
+      await startPlaybackAtAudioMs(resumeAudioMs);
+    }
+  }, [
+    durationMs,
+    event,
+    hasVideo,
+    playerPositionMsForAudioMs,
+    setTimelineInteractionMode,
+    startPlaybackAtAudioMs,
+    updateTimelineWindowForPlayhead,
+    videoBuffering,
+    videoReady,
+    videoSyncOffsetMs,
+  ]);
+
+  const handlePlayFromHere = useCallback(async () => {
+    try {
+      if (playbackModeRef.current === 'paused_full_take') {
+        await resumeFromPausedAudioTime();
+        return;
+      }
+      await startPlaybackAtAudioMs(playbackPositionRef.current);
+    } catch (error) {
+      setVideoPreparingPlayback(false);
+      await stopCurrentPlayback('idle');
+      Alert.alert('Uppspelningsfel', `Kunde inte spela från vald position: ${String(error)}`);
+    }
+  }, [resumeFromPausedAudioTime, startPlaybackAtAudioMs, stopCurrentPlayback]);
+
+  const handlePause = useCallback(async () => {
+    if (playbackModeRef.current === 'playing_full_take') {
+      await pauseAtCurrentAudioTime();
+      return;
+    }
+    setVideoPreparingPlayback(false);
+    await stopCurrentPlayback('idle');
+    setTimelineInteractionMode('idle');
+  }, [pauseAtCurrentAudioTime, setTimelineInteractionMode, stopCurrentPlayback]);
 
   const handleToggleVideoPlayback = useCallback(() => {
-    if (
-      playbackModeRef.current === 'playing_full_take' ||
-      playbackModeRef.current === 'playing_preview'
-    ) {
+    if (playbackModeRef.current === 'playing_full_take') {
+      void pauseAtCurrentAudioTime();
+    } else if (playbackModeRef.current === 'playing_preview') {
       void handlePause();
     } else {
       void handlePlayFromHere();
     }
-  }, [handlePause, handlePlayFromHere]);
+  }, [handlePause, handlePlayFromHere, pauseAtCurrentAudioTime]);
 
   const handlePlaySelectedMarker = useCallback(async () => {
     if (!selectedMarker || !decodedRef.current) return;
@@ -1604,11 +1948,11 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   }, [durationMs, event, hasVideo, playbackRate, selectedMarker, setPlayheadMs, setTimelineInteractionMode, stopCurrentPlayback, videoSyncOffsetMs]);
 
   const handleSetPlaybackRate = useCallback((nextRate: PlaybackRate) => {
-    setPlaybackRate(nextRate);
-    playbackRateRef.current = nextRate;
     if (playbackModeRef.current === 'playing_full_take' || playbackModeRef.current === 'playing_preview') {
       void handlePause();
     }
+    setPlaybackRate(nextRate);
+    playbackRateRef.current = nextRate;
   }, [handlePause]);
 
   const updateSelectedMarker = useCallback((updater: (marker: AudioReviewMarker) => AudioReviewMarker) => {
@@ -1713,7 +2057,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   }, [selectedMarker, setPlayheadMs, updateSelectedMarker]);
 
   const handleSave = useCallback(async () => {
-    if (orderedMarkers.length === 0) {
+    if (orderedMarkers.length === 0 && !allowsMarkerlessNoBounceSave) {
       Alert.alert('Inga markers', 'Lägg till minst en marker eller kassera tagningen.');
       return;
     }
@@ -1741,18 +2085,21 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
       await onSave(markersToSave.map(marker => ({
         ...marker,
         timestamp_ms: clampTimestamp(marker.timestamp_ms, durationMs),
-      })), hasVideo ? videoSyncOffsetMs : undefined);
+      })), hasVideo ? videoSyncOffsetMs : undefined, modelCandidates, detectionConfigSnapshot);
     } finally {
       setSaving(false);
     }
   }, [
     activePlayingConfidenceFilter.minConfidence,
+    allowsMarkerlessNoBounceSave,
     allOrderedMarkers,
     durationMs,
     hasVideo,
     isPlayingReview,
+    modelCandidates,
     onSave,
     orderedMarkers,
+    detectionConfigSnapshot,
     videoSyncOffsetMs,
   ]);
 
@@ -1779,7 +2126,50 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     ignore: orderedMarkers.filter(marker => marker.final_label === 'ignore').length,
     pending: orderedMarkers.filter(marker => (marker.review_status ?? 'pending') === 'pending').length,
   }), [orderedMarkers]);
-  const canSave = markerCounts.pending === 0 && orderedMarkers.length > 0;
+  const reviewTruthSummary = useMemo(() => {
+    const liveMarkers = allOrderedMarkers.filter(marker => {
+      const status = marker.review_status ?? 'pending';
+      return status !== 'deleted' && status !== 'filtered';
+    });
+    const linkedAutoCandidateIds = new Set(liveMarkers
+      .filter(marker => marker.source === 'auto' && marker.linked_candidate_id)
+      .map(marker => marker.linked_candidate_id as string));
+    const totalCandidates = modelCandidates.length;
+    const modelFound = modelCandidates.filter(candidate => candidate.review_relevant).length;
+    const added = liveMarkers.filter(marker => marker.source === 'manual').length;
+    const changedAuto = liveMarkers.filter(marker => (
+      marker.source === 'auto' &&
+      (
+        marker.final_label !== marker.suggested_label ||
+        marker.review_status === 'ignored' ||
+        marker.review_status === 'edited'
+      )
+    )).length;
+    const removed = modelCandidates.filter(candidate => (
+      candidate.review_relevant && !linkedAutoCandidateIds.has(candidate.id)
+    )).length;
+    const approved = liveMarkers.filter(marker => (
+      (marker.review_status === 'confirmed' || marker.review_status === 'edited') &&
+      marker.final_label !== 'ignore'
+    )).length;
+    return {
+      totalCandidates,
+      modelFound,
+      added,
+      removedOrChanged: removed + changedAuto,
+      approved,
+    };
+  }, [allOrderedMarkers, modelCandidates]);
+  const canSave = markerCounts.pending === 0 && (orderedMarkers.length > 0 || allowsMarkerlessNoBounceSave);
+  const saveButtonText = saving
+    ? 'Sparar...'
+    : canSave
+      ? allowsMarkerlessNoBounceSave && orderedMarkers.length === 0
+        ? 'Spara utan studs'
+        : 'Spara tagning'
+      : markerCounts.pending > 0
+        ? `Hantera ${markerCounts.pending} markrar`
+        : 'Lägg till marker';
 
   const timelinePlayheadLeft = ratioToLeft(
     playbackPositionMs,
@@ -1964,7 +2354,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                 repeat={false}
                 controls={false}
                 resizeMode="contain"
-                progressUpdateInterval={250}
+                progressUpdateInterval={50}
                 bufferConfig={{
                   minBufferMs: 250,
                   maxBufferMs: 1500,
@@ -1998,6 +2388,10 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                 onBuffer={({ isBuffering }) => {
                   setVideoBuffering(Boolean(isBuffering));
                 }}
+                onProgress={(progress: any) => {
+                  latestVideoMsRef.current = Math.max(0, Math.round(Number(progress?.currentTime ?? 0) * 1000));
+                  latestVideoProgressWallClockMsRef.current = Date.now();
+                }}
                 onError={error => {
                   setVideoReady(false);
                   setVideoBuffering(false);
@@ -2013,7 +2407,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
             {hasVideo && (
               <Pressable
                 style={styles.videoTapLayer}
-                onPress={handleToggleVideoPlayback}
+                onPressIn={handleToggleVideoPlayback}
               />
             )}
             {hasVideo && (videoPreparingPlayback || (!videoReady && videoBuffering)) && (
@@ -2033,7 +2427,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               </TouchableOpacity>
             </View>
             <View style={styles.videoControls}>
-              <TouchableOpacity style={styles.videoPlayBtn} onPress={playbackActive ? handlePause : handlePlayFromHere}>
+              <TouchableOpacity style={styles.videoPlayBtn} onPress={handleToggleVideoPlayback}>
                 <Text style={styles.videoPlayTxt}>{playbackActive ? 'Paus' : 'Spela'}</Text>
               </TouchableOpacity>
               <Text style={styles.videoTimeTxt}>{formatTimelineShort(playbackPositionMs)}</Text>
@@ -2217,6 +2611,13 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               </View>
             )}
 
+            <View style={styles.reviewLayerSummary}>
+              <Text style={styles.reviewLayerTitle}>{detectionConfigTitle(detectionConfigSnapshot)}</Text>
+              <Text style={styles.reviewLayerText}>
+                Kandidater {reviewTruthSummary.totalCandidates} · visas {reviewTruthSummary.modelFound} · tillagda {reviewTruthSummary.added} · ändrade/borttagna {reviewTruthSummary.removedOrChanged}
+              </Text>
+            </View>
+
             <View style={[styles.labelSegment, isPlayingReview && styles.playingLabelSegment]}>
               {reviewLabelChoices.map(choice => {
                 const active = markerMatchesChoice(selectedMarker, choice);
@@ -2302,19 +2703,47 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                 onPress={eventData => handleFullOverviewPress(eventData.nativeEvent.locationX)}
               />
               <View style={styles.fullWaveformRow}>
-                {timelineBins.map((bin, index) => (
+                {timelineBins.map((bin, index) => {
+                  const visualAmplitude = Math.pow(Math.max(0, Math.min(1, bin)), 0.72);
+                  return (
+                    <View
+                      key={`full-bin-${index}`}
+                      style={[
+                        styles.fullWaveBar,
+                        {
+                          height: Math.max(2, visualAmplitude * WAVEFORM_MAX_BAR_HEIGHT),
+                          opacity: 0.34 + visualAmplitude * 0.66,
+                        },
+                      ]}
+                    />
+                  );
+                })}
+              </View>
+              {modelCandidates.filter(candidate => (
+                !visibleMarkerCandidateIds.has(candidate.id) &&
+                shouldShowCandidatePin(candidate, detectionConfigSnapshot) &&
+                isTimestampVisible(candidate.timestamp_ms, safeTimelineWindowStartMs, timelineWindowEndMs)
+              )).map(candidate => {
+                const left = ratioToLeft(
+                  candidate.timestamp_ms,
+                  safeTimelineWindowStartMs,
+                  timelineWindowEndMs,
+                  overviewWidth,
+                );
+                return (
                   <View
-                    key={`full-bin-${index}`}
+                    key={`candidate-pin-${candidate.id}`}
                     style={[
-                      styles.fullWaveBar,
+                      styles.candidatePin,
                       {
-                        height: Math.max(3, bin * 50),
-                        opacity: 0.38 + bin * 0.62,
+                        left: Math.max(0, left - 5),
+                        backgroundColor: candidateColor(candidate),
+                        opacity: candidate.review_relevant ? 0.58 : 0.42,
                       },
                     ]}
                   />
-                ))}
-              </View>
+                );
+              })}
               {orderedMarkers.filter(marker => isTimestampVisible(
                 marker.timestamp_ms,
                 safeTimelineWindowStartMs,
@@ -2334,7 +2763,13 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                     onPress={() => handleSelectMarker(marker)}
                     {...(isSelected ? overviewMarkerResponder.panHandlers : {})}
                   >
-                    <View style={[styles.fullMarkerPin, { backgroundColor: isSelected ? labelColor(marker.final_label) : '#f5c76d' }]} />
+                    <View
+                      style={[
+                        styles.fullMarkerPin,
+                        { backgroundColor: markerColor(marker) },
+                        isSelected && styles.fullMarkerPinActive,
+                      ]}
+                    />
                   </TouchableOpacity>
                 );
               })}
@@ -2365,6 +2800,12 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
             <Text style={styles.waveHelpTxt}>
               Dra playhead till träffen. Håll på den vita markeringen i 2 sekunder för att skapa marker.
             </Text>
+
+            {allowsMarkerlessNoBounceSave && orderedMarkers.length === 0 && (
+              <Text style={styles.waveHelpTxt}>
+                Denna tagning kan sparas utan markers. Hela IMU-sekvensen används som negativ no-bounce-data.
+              </Text>
+            )}
 
             {quickLabelPrompt && supportsQuickLabels && (
               <View style={styles.quickLabelPanel}>
@@ -2606,6 +3047,54 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
             </View>
           </View>
 
+          <View style={styles.algorithmPanel}>
+            <View style={styles.algorithmHeaderRow}>
+              <Text style={styles.algorithmTitle}>{detectionConfigTitle(detectionConfigSnapshot)}</Text>
+              <Text style={styles.algorithmMeta}>
+                Kandidater {reviewTruthSummary.totalCandidates} · review {reviewTruthSummary.modelFound} · Love lade till {reviewTruthSummary.added} · ändrade/tog bort {reviewTruthSummary.removedOrChanged}
+              </Text>
+            </View>
+            <Text style={styles.algorithmSaveHint}>
+              Save tränar på {reviewTruthSummary.approved} mänskligt godkända/ändrade markers. Kandidater sparas bara för analys.
+            </Text>
+            <Text style={styles.algorithmLabel}>Känslighet</Text>
+            <View style={styles.algorithmOptionRow}>
+              {REVIEW_SENSITIVITY_OPTIONS.map(option => {
+                const active = detectionConfigSnapshot.sensitivity === option;
+                return (
+                  <TouchableOpacity
+                    key={`review-sensitivity-${option}`}
+                    style={[styles.algorithmOptionBtn, active && styles.algorithmOptionBtnActive]}
+                    onPress={() => handleDetectionConfigChange(option, detectionConfigSnapshot.detection_mode)}
+                    disabled={loading}
+                  >
+                    <Text style={[styles.algorithmOptionTxt, active && styles.algorithmOptionTxtActive]}>
+                      {sensitivityTitle(option)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            <Text style={styles.algorithmLabel}>Modelläge</Text>
+            <View style={styles.algorithmOptionRow}>
+              {REVIEW_DETECTION_MODE_OPTIONS.map(option => {
+                const active = detectionConfigSnapshot.detection_mode === option;
+                return (
+                  <TouchableOpacity
+                    key={`review-mode-${option}`}
+                    style={[styles.algorithmOptionBtn, active && styles.algorithmOptionBtnActive]}
+                    onPress={() => handleDetectionConfigChange(detectionConfigSnapshot.sensitivity, option)}
+                    disabled={loading}
+                  >
+                    <Text style={[styles.algorithmOptionTxt, active && styles.algorithmOptionTxtActive]}>
+                      {detectionModeTitle(option)}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
           <View style={styles.footerActions}>
             <TouchableOpacity
               style={[styles.footerBtn, styles.saveBtn, (!canSave || saving) && styles.saveBtnDisabled]}
@@ -2613,7 +3102,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               disabled={saving || !canSave}
             >
               <Text style={[styles.saveBtnTxt, !canSave && styles.saveBtnTxtDisabled]}>
-                {saving ? 'Sparar...' : canSave ? 'Spara tagning' : `Hantera ${markerCounts.pending} markrar`}
+                {saveButtonText}
               </Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.footerBtn, styles.discardBtn]} onPress={handleDiscard}>
@@ -2922,6 +3411,52 @@ const styles = StyleSheet.create({
   playingFilterBtnActive: { borderColor: '#2ecc71', backgroundColor: '#12351f' },
   playingFilterTxt: { color: '#aeb4be', fontSize: 11, fontWeight: '900' },
   playingFilterTxtActive: { color: '#2ee678' },
+  reviewLayerSummary: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#24303a',
+    backgroundColor: '#0b1115',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    gap: 2,
+  },
+  reviewLayerTitle: { color: '#2ee678', fontSize: 12, fontWeight: '900' },
+  reviewLayerText: { color: '#aeb4be', fontSize: 11, fontWeight: '700' },
+  algorithmPanel: {
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#24303a',
+    backgroundColor: '#0b1115',
+    padding: 10,
+    gap: 7,
+  },
+  algorithmHeaderRow: {
+    gap: 2,
+  },
+  algorithmTitle: { color: '#2ee678', fontSize: 12, fontWeight: '900' },
+  algorithmMeta: { color: '#aeb4be', fontSize: 11, fontWeight: '700' },
+  algorithmSaveHint: { color: '#7f8993', fontSize: 10, lineHeight: 14, fontWeight: '700' },
+  algorithmLabel: {
+    color: '#727b86',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
+  },
+  algorithmOptionRow: { flexDirection: 'row', gap: 6 },
+  algorithmOptionBtn: {
+    flex: 1,
+    minHeight: 30,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#2c333a',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+  },
+  algorithmOptionBtnActive: { borderColor: '#2ecc71', backgroundColor: '#12351f' },
+  algorithmOptionTxt: { color: '#aeb4be', fontSize: 11, fontWeight: '900' },
+  algorithmOptionTxtActive: { color: '#2ee678' },
   labelSegment: {
     minHeight: 42,
     borderRadius: 13,
@@ -3023,17 +3558,33 @@ const styles = StyleSheet.create({
   },
   fullMarker: {
     position: 'absolute',
-    top: 22,
-    width: 24,
-    height: 70,
+    top: 20,
+    width: 28,
+    height: 28,
     alignItems: 'center',
+    justifyContent: 'center',
     zIndex: 4,
     elevation: 4,
+  },
+  candidatePin: {
+    position: 'absolute',
+    top: 29,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    zIndex: 2,
   },
   fullMarkerPin: {
     width: 10,
     height: 10,
     borderRadius: 5,
+  },
+  fullMarkerPinActive: {
+    borderWidth: 2,
+    borderColor: '#ffffff',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
   },
   syncPointMarker: {
     position: 'absolute',
@@ -3219,6 +3770,10 @@ const styles = StyleSheet.create({
     width: 2,
     height: IMU_PLOT_HEIGHT,
     opacity: 0.75,
+  },
+  imuMarkerLineActive: {
+    width: 4,
+    opacity: 1,
   },
   imuPlayhead: {
     position: 'absolute',

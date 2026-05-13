@@ -14,6 +14,7 @@ import type { BleError, Characteristic, Device } from 'react-native-ble-plx';
 import RNFS from 'react-native-fs';
 import { AudioStream, AudioStreamEmitter } from './NativeAudioStream';
 import { decodeBase64PCM } from './NativeAudioCapture';
+import { getAudioDetectionConfig } from './audioDetectionConfig';
 import { detectAudioContact } from './audioContactEngine';
 import {
   ACCEL_UUID,
@@ -48,11 +49,13 @@ const EXPORT_DIR = `${RNFS.ExternalStorageDirectoryPath}/Download/pingis_session
 
 const DEFAULT_BOUNCE_PRESET_ID: BouncePresetId = 'B0';
 const DEFAULT_BOUNCE_PRESET_LABEL = 'B0 Default';
-const CONTACT_GROUP_WINDOW_MS = 650;
+const DEFAULT_AUDIO_CONFIG = getAudioDetectionConfig('normal', 'four_class_only');
 const DEFAULT_BOUNCE_SETTINGS: BounceSettings = {
-  audioThreshold: 0.02,
-  audioConfidence: 0.7,
-  audioDedupMs: 260,
+  audioThreshold: DEFAULT_AUDIO_CONFIG.onset_threshold,
+  audioRetriggerMs: 220,
+  audioGroupWindowMs: 80,
+  audioConfidence: DEFAULT_AUDIO_CONFIG.contact_confidence_min,
+  audioDedupMs: DEFAULT_AUDIO_CONFIG.merge_window_ms,
   motionWindowMs: 240,
   motionGyroThreshold: 45,
   motionAccelThreshold: 180,
@@ -264,6 +267,7 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
     settingsRef.current = settings;
     if (isRunning) {
       AudioStream.setThreshold(settings.audioThreshold).catch(() => {});
+      AudioStream.setRetriggerMs(settings.audioRetriggerMs).catch(() => {});
     }
   }, [isRunning, settings]);
 
@@ -350,7 +354,7 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
       });
 
       const activeGroup = contactGroupRef.current;
-      const inActiveGroup = !!activeGroup && detectedAt - activeGroup.startedAtMs <= CONTACT_GROUP_WINDOW_MS;
+      const inActiveGroup = !!activeGroup && detectedAt - activeGroup.startedAtMs <= settingsRef.current.audioGroupWindowMs;
       if (audioEvent.qualified && inActiveGroup) {
         audioEvent.qualified = false;
         audioEvent.ignored_reason = 'group_duplicate';
@@ -565,6 +569,7 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
     resetRun();
     sessionStartRef.current = Date.now();
     try {
+      await AudioStream.setRetriggerMs(settingsRef.current.audioRetriggerMs);
       await AudioStream.startStreaming(settingsRef.current.audioThreshold);
       setIsRunning(true);
       setFeedback(`${modeLabel(mode)} running.`);
@@ -724,12 +729,34 @@ export function BounceTestScreen({ setup, calibration, device, mode, onDone }: P
           label="Audio onset"
           value={settings.audioThreshold}
           min={0.005}
-          max={0.06}
+          max={0.08}
           step={0.005}
           onChange={value => setSettings(prev => ({ ...prev, audioThreshold: value }))}
           valueFormatter={value => value.toFixed(3)}
           leftHint="0.005"
-          rightHint="0.060"
+          rightHint="0.080"
+        />
+        <DebugSlider
+          label="Retrigger window"
+          value={settings.audioRetriggerMs}
+          min={0}
+          max={420}
+          step={20}
+          onChange={value => setSettings(prev => ({ ...prev, audioRetriggerMs: value }))}
+          valueFormatter={value => `${Math.round(value)} ms`}
+          leftHint="0"
+          rightHint="420"
+        />
+        <DebugSlider
+          label="Group window"
+          value={settings.audioGroupWindowMs}
+          min={0}
+          max={240}
+          step={20}
+          onChange={value => setSettings(prev => ({ ...prev, audioGroupWindowMs: value }))}
+          valueFormatter={value => `${Math.round(value)} ms`}
+          leftHint="0"
+          rightHint="240"
         />
         <DebugSlider
           label="Audio confidence"

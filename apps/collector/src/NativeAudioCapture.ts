@@ -8,8 +8,20 @@ interface AudioCaptureInterface {
   startSession(outputPath: string, targetDurationMs?: number): Promise<string>;
   /** Stoppar pagaende WAV-session. Returnerar faktisk inspelningstid (ms). */
   stopSession(): Promise<number>;
+  /** Importerar en ljudfil via Androids filvaljare och skriver om den till WAV. */
+  importAudioFile(outputPath: string): Promise<ImportedAudioFile>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
+}
+
+export interface ImportedAudioFile {
+  outputPath: string;
+  displayName?: string;
+  sourceUri?: string;
+  durationMs: number;
+  sampleRate: number;
+  channels: number;
+  writtenSamples: number;
 }
 
 export interface AudioCaptureStoppedEvent {

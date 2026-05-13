@@ -1,9 +1,13 @@
 import RNFS from 'react-native-fs';
 import { Buffer } from 'buffer';
+import { getDefaultAudioDetectionConfigSnapshot } from './audioDetectionConfig';
 import { detectAudioContact } from './audioContactEngine';
 import type {
   AudioDetectionEvent,
+  AudioDetectionConfigSnapshot,
+  AudioDetectionMode,
   AudioContactKind,
+  AudioModelCandidate,
   AudioNotRacketKind,
   AudioReviewBounceSide,
   AudioReviewClassLabel,
@@ -14,24 +18,35 @@ import type {
 } from './types';
 
 export const TARGET_AUDIO_SR = 22050;
-export const REVIEW_PRE_MS = 300;
-export const REVIEW_POST_MS = 700;
+export const REVIEW_PRE_MS = 100;
+export const REVIEW_POST_MS = 200;
 export const REVIEW_MARKER_ZOOM_PRE_MS = 80;
 export const REVIEW_MARKER_ZOOM_POST_MS = 80;
 
 const REVIEW_REQUIRED_SCENARIOS = new Set<AudioScenarioId>([
+  'imported_audio',
   'racket_bounce_fh',
   'racket_bounce_bh',
   'racket_bounce_mixed',
+  'racket_motion_no_bounce',
   'table_bounce',
+  'table_noisy',
   'floor_bounce',
+  'floor_noisy',
   'catch_after_sound',
   'speech_music_noise',
   'free_recording',
   'racket_quiet',
+  'racket_speech',
   'racket_counting',
+  'racket_music',
   'racket_music_low',
   'racket_music_mid',
+  'racket_other_bounces',
+  'racket_fast',
+  'playing_dense_audio',
+  'playing_dense_imu',
+  'other_bounce_noise',
   'speech_only',
   'desk_keyboard_only',
   'music_low_only',
@@ -76,23 +91,41 @@ export interface AudioSyncPoint {
   window_end_ms: number;
 }
 
+export interface SuggestedReviewData {
+  markers: AudioReviewMarker[];
+  model_candidates: AudioModelCandidate[];
+  detection_config_snapshot: AudioDetectionConfigSnapshot;
+}
+
 export function requiresAudioReview(scenarioId: AudioScenarioId): boolean {
   return REVIEW_REQUIRED_SCENARIOS.has(scenarioId);
 }
 
 export function suggestedReviewLabelForScenario(scenarioId: AudioScenarioId): AudioReviewLabel {
-  return scenarioId.startsWith('racket_') || scenarioId === 'free_recording'
+  if (scenarioId === 'racket_motion_no_bounce') return 'not_racket_contact';
+  return scenarioId.startsWith('racket_') ||
+    scenarioId === 'free_recording' ||
+    scenarioId === 'playing_dense_audio' ||
+    scenarioId === 'playing_dense_imu' ||
+    scenarioId === 'imported_audio'
     ? 'racket_contact'
     : 'not_racket_contact';
 }
 
 function contactKindForScenario(scenarioId: AudioScenarioId): AudioContactKind | undefined {
-  return scenarioId.startsWith('racket_') || scenarioId === 'free_recording' ? 'racket_bounce' : undefined;
+  if (scenarioId === 'racket_motion_no_bounce') return undefined;
+  return scenarioId.startsWith('racket_') ||
+    scenarioId === 'free_recording' ||
+    scenarioId === 'playing_dense_audio' ||
+    scenarioId === 'playing_dense_imu' ||
+    scenarioId === 'imported_audio'
+    ? 'racket_bounce'
+    : undefined;
 }
 
 function notRacketKindForScenario(scenarioId: AudioScenarioId): AudioNotRacketKind | undefined {
-  if (scenarioId === 'table_bounce' || scenarioId === 'table_quiet') return 'table_bounce';
-  if (scenarioId === 'floor_bounce' || scenarioId === 'floor_quiet') return 'floor_bounce';
+  if (scenarioId === 'table_bounce' || scenarioId === 'table_noisy' || scenarioId === 'table_quiet') return 'table_bounce';
+  if (scenarioId === 'floor_bounce' || scenarioId === 'floor_noisy' || scenarioId === 'floor_quiet') return 'floor_bounce';
   if (scenarioId === 'catch_after_sound') return 'catch_after_sound';
   if (
     scenarioId === 'speech_music_noise' ||
@@ -102,7 +135,7 @@ function notRacketKindForScenario(scenarioId: AudioScenarioId): AudioNotRacketKi
   ) {
     return 'voice_music_noise';
   }
-  if (scenarioId === 'desk_keyboard_only') return 'other_impact';
+  if (scenarioId === 'desk_keyboard_only' || scenarioId === 'other_bounce_noise') return 'other_impact';
   return undefined;
 }
 
@@ -178,11 +211,29 @@ export function buildSuggestedReviewMarkers(
   sampleRate: number,
   scenarioId: AudioScenarioId,
 ): AudioReviewMarker[] {
+  return buildSuggestedReviewData(samples, sampleRate, scenarioId).markers;
+}
+
+export function buildSuggestedReviewData(
+  samples: Float32Array,
+  sampleRate: number,
+  scenarioId: AudioScenarioId,
+  detectionConfig: AudioDetectionConfigSnapshot = getDefaultAudioDetectionConfigSnapshot(),
+): SuggestedReviewData {
+  if (scenarioId === 'racket_motion_no_bounce') {
+    return {
+      markers: [],
+      model_candidates: [],
+      detection_config_snapshot: detectionConfig,
+    };
+  }
+
   const markers: AudioReviewMarker[] = [];
+  const modelCandidates: AudioModelCandidate[] = [];
   let lastAcceptedMs = -Infinity;
-  const contactConfidenceThreshold = scenarioId === 'free_recording'
-    ? PLAYING_REVIEW_CONTACT_FLOOR
-    : REVIEW_CONTACT_CONFIDENCE;
+  const contactConfidenceThreshold = scenarioId === 'free_recording' || scenarioId === 'imported_audio'
+    ? Math.min(detectionConfig.contact_confidence_min, PLAYING_REVIEW_CONTACT_FLOOR)
+    : detectionConfig.contact_confidence_min;
 
   for (const candidate of detectReviewCandidates(samples, sampleRate)) {
     if (candidate.refined_timestamp_ms - lastAcceptedMs < REVIEW_MARKER_DEDUP_MS) continue;
@@ -191,16 +242,41 @@ export function buildSuggestedReviewMarkers(
       detectedAtMs: candidate.refined_timestamp_ms,
       pcm: slicePreviewWindow(samples, sampleRate, candidate.refined_timestamp_ms),
       confidenceThreshold: contactConfidenceThreshold,
-      dedupMs: REVIEW_MARKER_DEDUP_MS,
+      dedupMs: detectionConfig.merge_window_ms,
       lastQualifiedTsMs: Number.isFinite(lastAcceptedMs) ? lastAcceptedMs : undefined,
+      config: detectionConfig,
     });
-    const suggestedLabel = reviewLabelForDecision(scenarioId, decision, contactConfidenceThreshold);
+    const suggestedLabel = reviewLabelForDecision(
+      scenarioId,
+      decision,
+      contactConfidenceThreshold,
+      detectionConfig.surface_veto_confidence,
+      detectionConfig.detection_mode,
+    );
+    const candidateId = `candidate_${modelCandidates.length}_${candidate.refined_timestamp_ms}`;
+    const candidateMetadata = suggestedLabel
+      ? metadataForScenario(scenarioId, suggestedLabel, decision)
+      : {};
+    modelCandidates.push({
+      id: candidateId,
+      timestamp_ms: candidate.refined_timestamp_ms,
+      review_relevant: !!suggestedLabel,
+      suggested_label: suggestedLabel ?? undefined,
+      contact_confidence: decision.confidence,
+      surface_label: decision.surface_label,
+      surface_confidence: decision.surface_confidence,
+      detection_mode: detectionConfig.detection_mode,
+      detection_config_id: detectionConfig.config_id,
+      ignored_reason: suggestedLabel ? undefined : decision.ignored_reason ?? 'not_preset_relevant',
+      ...candidateMetadata,
+    });
     if (!suggestedLabel) continue;
 
     markers.push({
       id: `auto_${markers.length}_${candidate.refined_timestamp_ms}`,
       timestamp_ms: candidate.refined_timestamp_ms,
       source: 'auto',
+      linked_candidate_id: candidateId,
       suggested_label: suggestedLabel,
       final_label: suggestedLabel,
       review_status: 'pending',
@@ -212,7 +288,11 @@ export function buildSuggestedReviewMarkers(
     lastAcceptedMs = candidate.refined_timestamp_ms;
   }
 
-  return markers;
+  return {
+    markers,
+    model_candidates: modelCandidates,
+    detection_config_snapshot: detectionConfig,
+  };
 }
 
 export function detectAudioSyncPoint(
@@ -270,14 +350,19 @@ function reviewLabelForDecision(
   scenarioId: AudioScenarioId,
   decision: AudioDetectionEvent,
   contactConfidenceThreshold = REVIEW_CONTACT_CONFIDENCE,
+  surfaceVetoConfidence = REVIEW_SURFACE_VETO_CONFIDENCE,
+  detectionMode: AudioDetectionMode = 'hybrid',
 ): AudioReviewLabel | null {
   const surfaceLabel = decision.surface_label;
   const surfaceConfidence = decision.surface_confidence ?? 0;
+  const allowSurfaceVeto = detectionMode !== 'binary_only';
 
   if (scenarioId.startsWith('racket_')) {
+    if (scenarioId === 'racket_motion_no_bounce') return null;
     const surfaceVeto = (
-      (surfaceLabel === 'table_bounce' || surfaceLabel === 'floor_bounce') &&
-      surfaceConfidence >= REVIEW_SURFACE_VETO_CONFIDENCE
+      allowSurfaceVeto &&
+      (surfaceLabel === 'table_bounce' || surfaceLabel === 'floor_bounce' || surfaceLabel === 'noise') &&
+      surfaceConfidence >= surfaceVetoConfidence
     );
     if (
       decision.label === 'racket_contact' &&
@@ -289,9 +374,15 @@ function reviewLabelForDecision(
     return null;
   }
 
-  if (scenarioId === 'free_recording') {
+  if (
+    scenarioId === 'free_recording' ||
+    scenarioId === 'imported_audio' ||
+    scenarioId === 'playing_dense_audio' ||
+    scenarioId === 'playing_dense_imu'
+  ) {
     const surfaceVeto = (
-      (surfaceLabel === 'table_bounce' || surfaceLabel === 'floor_bounce') &&
+      allowSurfaceVeto &&
+      (surfaceLabel === 'table_bounce' || surfaceLabel === 'floor_bounce' || surfaceLabel === 'noise') &&
       surfaceConfidence >= REVIEW_SURFACE_CONFIDENCE
     );
     if (surfaceVeto) return 'not_racket_contact';
@@ -300,19 +391,19 @@ function reviewLabelForDecision(
       : null;
   }
 
-  if (scenarioId === 'table_bounce' || scenarioId === 'table_quiet') {
+  if (scenarioId === 'table_bounce' || scenarioId === 'table_noisy' || scenarioId === 'table_quiet') {
     return surfaceLabel === 'table_bounce' && surfaceConfidence >= REVIEW_SURFACE_CONFIDENCE
       ? 'not_racket_contact'
       : null;
   }
 
-  if (scenarioId === 'floor_bounce' || scenarioId === 'floor_quiet') {
+  if (scenarioId === 'floor_bounce' || scenarioId === 'floor_noisy' || scenarioId === 'floor_quiet') {
     return surfaceLabel === 'floor_bounce' && surfaceConfidence >= REVIEW_SURFACE_CONFIDENCE
       ? 'not_racket_contact'
       : null;
   }
 
-  if (scenarioId === 'catch_after_sound' || scenarioId === 'desk_keyboard_only') {
+  if (scenarioId === 'catch_after_sound' || scenarioId === 'desk_keyboard_only' || scenarioId === 'other_bounce_noise') {
     return decision.label === 'not_racket_contact' || decision.confidence < REVIEW_CONTACT_CONFIDENCE
       ? 'not_racket_contact'
       : null;
@@ -605,9 +696,19 @@ function slicePreviewWindow(
   sampleRate: number,
   timestampMs: number,
 ): Float32Array {
+  return sliceWindow(samples, sampleRate, timestampMs, REVIEW_PRE_MS, REVIEW_POST_MS);
+}
+
+function sliceWindow(
+  samples: Float32Array,
+  sampleRate: number,
+  timestampMs: number,
+  preMs: number,
+  postMs: number,
+): Float32Array {
   const centerSample = Math.round((timestampMs / 1000) * sampleRate);
-  const preSamples = Math.round((REVIEW_PRE_MS / 1000) * sampleRate);
-  const totalSamples = Math.round(((REVIEW_PRE_MS + REVIEW_POST_MS) / 1000) * sampleRate);
+  const preSamples = Math.round((preMs / 1000) * sampleRate);
+  const totalSamples = Math.round(((preMs + postMs) / 1000) * sampleRate);
   const start = Math.max(0, centerSample - preSamples);
   const end = Math.min(samples.length, start + totalSamples);
   const slice = samples.slice(start, end);

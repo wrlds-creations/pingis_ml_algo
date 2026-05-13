@@ -6,7 +6,7 @@
  * and counts qualified racket_contact events.
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, TouchableOpacity, ScrollView, Pressable,
   StyleSheet, StatusBar, PanResponder,
@@ -14,18 +14,21 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { decodeBase64PCM } from './NativeAudioCapture';
 import { AudioStream, AudioStreamEmitter } from './NativeAudioStream';
+import { detectionConfigTitle, getAudioDetectionConfig } from './audioDetectionConfig';
 import { detectAudioContact } from './audioContactEngine';
-import type { AudioDetectionEvent, PlayerSetup } from './types';
+import type { AudioDetectionEvent, AudioDetectionMode, AudioDetectionSensitivity, PlayerSetup } from './types';
 
-const DEFAULT_THRESHOLD = 0.020;
+const DEFAULT_LIVE_CONFIG = getAudioDetectionConfig('normal', 'four_class_only');
+const DEFAULT_THRESHOLD = DEFAULT_LIVE_CONFIG.onset_threshold;
 const THRESHOLD_MIN = 0.005;
-const THRESHOLD_MAX = 0.15;
+const THRESHOLD_MAX = 0.08;
 
-const DEFAULT_CONF = 0.65;
+const DEFAULT_CONF = DEFAULT_LIVE_CONFIG.contact_confidence_min;
 const CONF_MIN = 0.30;
 const CONF_MAX = 0.95;
-const DEFAULT_MERGE_WINDOW_MS = 260;
-const CONTACT_GROUP_WINDOW_MS = 650;
+const DEFAULT_MERGE_WINDOW_MS = DEFAULT_LIVE_CONFIG.merge_window_ms;
+const DEFAULT_RETRIGGER_WINDOW_MS = 220;
+const DEFAULT_GROUP_WINDOW_MS = 80;
 
 const LABEL_CONFIG: Record<string, { name: string; color: string; bg: string }> = {
   racket_contact: { name: 'CONTACT', color: '#2ecc71', bg: '#0a2018' },
@@ -98,7 +101,11 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
   const [recentEvents, setRecentEvents] = useState<RecentEvent[]>([]);
   const [confidence, setConfidence] = useState(DEFAULT_CONF);
   const [threshold, setThreshold] = useState(DEFAULT_THRESHOLD);
+  const [retriggerWindowMs, setRetriggerWindowMs] = useState(DEFAULT_RETRIGGER_WINDOW_MS);
+  const [groupWindowMs, setGroupWindowMs] = useState(DEFAULT_GROUP_WINDOW_MS);
   const [mergeWindowMs, setMergeWindowMs] = useState(DEFAULT_MERGE_WINDOW_MS);
+  const [sensitivity, setSensitivity] = useState<AudioDetectionSensitivity>('normal');
+  const [detectionMode, setDetectionMode] = useState<AudioDetectionMode>('four_class_only');
   const [debug, setDebug] = useState<DebugInfo | null>(null);
   const [eventCount, setEventCount] = useState(0);
   const [hitCount, setHitCount] = useState(0);
@@ -108,6 +115,11 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
   confRef.current = confidence;
   const mergeWindowRef = useRef(DEFAULT_MERGE_WINDOW_MS);
   mergeWindowRef.current = mergeWindowMs;
+  const retriggerWindowRef = useRef(DEFAULT_RETRIGGER_WINDOW_MS);
+  retriggerWindowRef.current = retriggerWindowMs;
+  const groupWindowRef = useRef(DEFAULT_GROUP_WINDOW_MS);
+  groupWindowRef.current = groupWindowMs;
+  const activeDetectionConfig = useMemo(() => getAudioDetectionConfig(sensitivity, detectionMode), [detectionMode, sensitivity]);
   const lastQualifiedTsRef = useRef<number | undefined>(undefined);
   const contactGroupRef = useRef<ContactGroupState | null>(null);
   const groupCounterRef = useRef(0);
@@ -155,7 +167,12 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
     setThreshold(v);
     if (isListening) AudioStream.setThreshold(v);
   }, THRESHOLD_MIN, THRESHOLD_MAX, 0.005);
-  const mergeSlider = makeSlider(mergeWindowMs, setMergeWindowMs, 80, 360, 0.0714285714);
+  const mergeSlider = makeSlider(mergeWindowMs, setMergeWindowMs, 120, 420, 0.0714285714);
+  const retriggerSlider = makeSlider(retriggerWindowMs, v => {
+    setRetriggerWindowMs(v);
+    if (isListening) AudioStream.setRetriggerMs(v);
+  }, 0, 420, 0.0476190476);
+  const groupSlider = makeSlider(groupWindowMs, setGroupWindowMs, 0, 240, 0.0833333333);
 
   const toggle = useCallback(() => {
     if (isListening) {
@@ -167,6 +184,7 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
     lastQualifiedTsRef.current = undefined;
     contactGroupRef.current = null;
     groupCounterRef.current = 0;
+    AudioStream.setRetriggerMs(retriggerWindowRef.current);
     AudioStream.startStreaming(threshold);
     setIsListening(true);
   }, [isListening, threshold]);
@@ -184,11 +202,17 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           pcm,
           confidenceThreshold: confRef.current,
           dedupMs: mergeWindowRef.current,
+          config: {
+            ...activeDetectionConfig,
+            contact_confidence_min: confRef.current,
+            merge_window_ms: mergeWindowRef.current,
+            onset_threshold: threshold,
+          },
           lastQualifiedTsMs: lastQualifiedTsRef.current,
         });
 
         const activeGroup = contactGroupRef.current;
-        const inActiveGroup = !!activeGroup && detectedAtMs - activeGroup.startedAtMs <= CONTACT_GROUP_WINDOW_MS;
+        const inActiveGroup = !!activeGroup && detectedAtMs - activeGroup.startedAtMs <= groupWindowRef.current;
         if (result.qualified && inActiveGroup) {
           result.qualified = false;
           result.ignored_reason = 'group_duplicate';
@@ -272,7 +296,7 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
     });
 
     return () => sub.remove();
-  }, [isListening]);
+  }, [activeDetectionConfig, isListening, threshold]);
 
   useEffect(() => () => { AudioStream.stopStreaming(); }, []);
 
@@ -330,6 +354,43 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
         </Text>
       )}
 
+      <View style={styles.presetSection}>
+        <Text style={styles.presetTitle}>{detectionConfigTitle(activeDetectionConfig)}</Text>
+        <View style={styles.presetRow}>
+          {(['strict', 'normal', 'sensitive'] as AudioDetectionSensitivity[]).map(item => (
+            <TouchableOpacity
+              key={item}
+              style={[styles.presetBtn, sensitivity === item && styles.presetBtnActive]}
+              onPress={() => {
+                const nextConfig = getAudioDetectionConfig(item, detectionMode);
+                setSensitivity(item);
+                setConfidence(nextConfig.contact_confidence_min);
+                setThreshold(nextConfig.onset_threshold);
+                setMergeWindowMs(nextConfig.merge_window_ms);
+                if (isListening) AudioStream.setThreshold(nextConfig.onset_threshold);
+              }}
+            >
+              <Text style={[styles.presetTxt, sensitivity === item && styles.presetTxtActive]}>
+                {item === 'strict' ? 'Strikt' : item === 'sensitive' ? 'Känslig' : 'Normal'}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+        <View style={styles.presetRow}>
+          {(['hybrid', 'four_class_only', 'binary_only'] as AudioDetectionMode[]).map(item => (
+            <TouchableOpacity
+              key={item}
+              style={[styles.presetBtn, detectionMode === item && styles.presetBtnActive]}
+              onPress={() => setDetectionMode(item)}
+            >
+              <Text style={[styles.presetTxt, detectionMode === item && styles.presetTxtActive]}>
+                {item === 'hybrid' ? 'Hybrid' : item === 'four_class_only' ? '4-klass' : 'Binär'}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
       <View style={styles.sliderSection}>
         <View style={styles.sliderHeader}>
           <Text style={styles.sliderLabel}>CONFIDENCE</Text>
@@ -375,6 +436,46 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
         <View style={styles.sliderHints}>
           <Text style={styles.sliderHint}>0.005</Text>
           <Text style={styles.sliderHint}>0.150</Text>
+        </View>
+      </View>
+
+      <View style={styles.sliderSection}>
+        <View style={styles.sliderHeader}>
+          <Text style={styles.sliderLabel}>RETRIGGER WINDOW</Text>
+          <Text style={styles.sliderValue}>{Math.round(retriggerWindowMs)} ms</Text>
+        </View>
+        <View
+          ref={retriggerSlider.trackRef}
+          onLayout={retriggerSlider.onLayout}
+          style={[styles.sliderTouchArea, { marginHorizontal: THUMB / 2 }]}
+          {...retriggerSlider.pan.panHandlers}
+        >
+          <Pressable style={styles.sliderTouchFill} hitSlop={8} onPress={e => retriggerSlider.applyX(e.nativeEvent.pageX)}>
+            <View style={styles.sliderTrack}>
+              <View style={[styles.sliderFill, { width: `${retriggerSlider.fillPct}%` }]} />
+              <View style={[styles.sliderThumb, { left: `${retriggerSlider.fillPct}%` as any, width: THUMB, height: THUMB, borderRadius: THUMB / 2, top: -(THUMB / 2 - 3) }]} />
+            </View>
+          </Pressable>
+        </View>
+      </View>
+
+      <View style={styles.sliderSection}>
+        <View style={styles.sliderHeader}>
+          <Text style={styles.sliderLabel}>GROUP WINDOW</Text>
+          <Text style={styles.sliderValue}>{Math.round(groupWindowMs)} ms</Text>
+        </View>
+        <View
+          ref={groupSlider.trackRef}
+          onLayout={groupSlider.onLayout}
+          style={[styles.sliderTouchArea, { marginHorizontal: THUMB / 2 }]}
+          {...groupSlider.pan.panHandlers}
+        >
+          <Pressable style={styles.sliderTouchFill} hitSlop={8} onPress={e => groupSlider.applyX(e.nativeEvent.pageX)}>
+            <View style={styles.sliderTrack}>
+              <View style={[styles.sliderFill, { width: `${groupSlider.fillPct}%` }]} />
+              <View style={[styles.sliderThumb, { left: `${groupSlider.fillPct}%` as any, width: THUMB, height: THUMB, borderRadius: THUMB / 2, top: -(THUMB / 2 - 3) }]} />
+            </View>
+          </Pressable>
         </View>
       </View>
 
@@ -496,6 +597,22 @@ const styles = StyleSheet.create({
   predTime: { fontSize: 11, color: '#555', marginTop: 6, fontFamily: 'monospace' },
   waitTxt: { color: '#333', fontSize: 15, textAlign: 'center', paddingHorizontal: 24 },
   debugTxt: { marginHorizontal: 20, marginTop: 6, fontSize: 10, color: '#444', fontFamily: 'monospace' },
+  presetSection: { marginHorizontal: 16, marginTop: 14, gap: 8 },
+  presetTitle: { color: '#2ee678', fontSize: 12, fontWeight: '900' },
+  presetRow: { flexDirection: 'row', gap: 6 },
+  presetBtn: {
+    flex: 1,
+    minHeight: 32,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#252b31',
+    backgroundColor: '#111',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  presetBtnActive: { borderColor: '#2ecc71', backgroundColor: '#12351f' },
+  presetTxt: { color: '#aeb4be', fontSize: 11, fontWeight: '900' },
+  presetTxtActive: { color: '#2ee678' },
   sliderSection: { marginHorizontal: 16, marginTop: 14 },
   sliderHeader: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 10 },
   sliderLabel: { color: '#444', fontSize: 10, letterSpacing: 1.5 },

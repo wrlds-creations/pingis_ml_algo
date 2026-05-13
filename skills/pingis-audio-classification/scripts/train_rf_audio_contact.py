@@ -50,23 +50,49 @@ META_COLS = {
     "contact_kind",
     "not_racket_kind",
     "bounce_side",
+    "binary_label",
+    "class_label",
+    "event_type",
+    "scenario",
+    "bounce_context",
+    "calibration_status",
+    "contact_confidence",
+    "surface_label",
+    "surface_confidence",
+    "linked_candidate_id",
+    "detection_config_id",
+    "detection_sensitivity",
+    "detection_mode",
+    "nearest_prev_event_ms",
+    "nearest_next_event_ms",
+    "event_density_1s",
+    "close_event_bucket",
 }
 SCENARIO_BREAKDOWN_IDS = [
+    "racket_quiet",
+    "racket_speech",
+    "racket_music",
+    "racket_music_low",
+    "racket_other_bounces",
+    "racket_fast",
+    "table_bounce",
+    "table_noisy",
+    "floor_bounce",
+    "floor_noisy",
+    "other_bounce_noise",
     "racket_bounce_fh",
     "racket_bounce_bh",
     "racket_bounce_mixed",
-    "table_bounce",
-    "floor_bounce",
     "catch_after_sound",
     "speech_music_noise",
-    "racket_quiet",
     "racket_counting",
-    "racket_music_low",
     "racket_music_mid",
     "speech_only",
     "desk_keyboard_only",
     "music_low_only",
     "music_mid_only",
+    "table_quiet",
+    "floor_quiet",
 ]
 
 
@@ -240,7 +266,7 @@ def main() -> None:
     counts = df["label"].value_counts()
     print(f"Loaded {len(df)} rows | labels: {counts.to_dict()}")
     print(f"Review completed rows: {int(df.get('review_completed', pd.Series([], dtype=bool)).fillna(False).sum())}")
-    for column in ["source_trust", "contact_origin", "bounce_side", "not_racket_kind"]:
+    for column in ["source_trust", "contact_origin", "background_condition", "close_event_bucket", "bounce_side", "not_racket_kind"]:
         if column in df.columns:
             print(f"{column}: {df[column].fillna('').astype(str).value_counts().to_dict()}")
 
@@ -298,11 +324,19 @@ def main() -> None:
     scenario_breakdown = get_scenario_breakdown(test_df, y_test, y_pred, le)
     print_scenario_breakdown(scenario_breakdown)
     source_trust_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "source_trust")
+    background_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "background_condition")
+    close_event_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "close_event_bucket")
     not_racket_kind_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "not_racket_kind")
     bounce_side_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "bounce_side")
+    detection_mode_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "detection_mode")
+    detection_sensitivity_breakdown = get_column_breakdown(test_df, y_test, y_pred, le, "detection_sensitivity")
     print_column_breakdown("Source/trust breakdown", source_trust_breakdown)
+    print_column_breakdown("Background breakdown", background_breakdown)
+    print_column_breakdown("Close-event breakdown", close_event_breakdown)
     print_column_breakdown("Hard-negative breakdown", not_racket_kind_breakdown)
     print_column_breakdown("Bounce-side breakdown", bounce_side_breakdown)
+    print_column_breakdown("Detection-mode breakdown", detection_mode_breakdown)
+    print_column_breakdown("Detection-sensitivity breakdown", detection_sensitivity_breakdown)
 
     X_full_raw = df[feature_cols].values.astype(np.float32)
     y_full = le.transform(df["label"].values)
@@ -359,8 +393,12 @@ def main() -> None:
                     "grouped_test_report": report_dict,
                     "scenario_breakdown": scenario_breakdown,
                     "source_trust_breakdown": source_trust_breakdown,
+                    "background_breakdown": background_breakdown,
+                    "close_event_breakdown": close_event_breakdown,
                     "not_racket_kind_breakdown": not_racket_kind_breakdown,
                     "bounce_side_breakdown": bounce_side_breakdown,
+                    "detection_mode_breakdown": detection_mode_breakdown,
+                    "detection_sensitivity_breakdown": detection_sensitivity_breakdown,
                 },
                 indent=2,
             ),

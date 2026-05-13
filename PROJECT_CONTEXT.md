@@ -83,7 +83,13 @@ This file is the living project memory for Codex and WRLDS. Use it together with
 - Audio review markers now carry explicit `review_status`, `contact_kind`, `not_racket_kind`, and `bounce_side` fields. `ignore` means skipped data, not a negative label.
 - Playing review markers are intentionally compact: human labels are `forehand_hit`, `backhand_hit`, or `table_bounce`; auto-candidates carry audio confidence and can be saved as `filtered` so they do not become training truth.
 - Audio+IMU takes store AirHive `sensor_ts`, absolute `received_at_ms`, and take-relative `take_ts_ms` for IMU samples, plus per-take target/measured sample-rate and quality metadata.
-- Audio session events now distinguish high-level `scenario` (`audio_sound`, `racket_bouncing`, `playing`) from detailed `scenario_id`; racket-bounce side coverage is stored as `bounce_context` (`forehand_side`, `backhand_side`, `mixed`).
+- Audio session events now distinguish high-level `scenario` (`audio_sound`, `racket_bouncing`, `playing`) from detailed `scenario_id`; guided racket-bounce IMU now exposes FH-side, BH-side, and `racket_motion_no_bounce` for natural racket-arm motion without ball contact. Mixed racket-bounce is treated as legacy/free-review data rather than a guided preset.
+- `racket_motion_no_bounce` review can be saved with zero markers; the whole reviewed take means "no bounce happened", and bounce-IMU preprocessing samples negative IMU windows from the saved sequence after the sync lead-in. Any explicit `no_bounce_motion` markers are IMU-only and must not be used as audio training examples.
+- Audio-only collection now separates quiet, speech/music, other-bounce, and fast-racket scenarios. `Racket + musik` uses an explicit low/medium/high background level instead of exposing separate `music_low` presets in the UI. Reviewed marker preprocessing uses short event-centered clips and stores nearest-event spacing metadata so dense contact sequences can be evaluated separately from isolated sounds.
+- New recordings store a detection config snapshot (`strict/normal/sensitive`, `hybrid/four_class_only/binary_only`, thresholds, merge window, model versions) plus model candidates separately from human review markers. Human-reviewed markers remain training truth; candidates are analysis data for misses and false positives.
+- Current live baseline is `collector_bounce_live_v2026_05_13_normal_4class_220_80_220`: `Normal / 4-klass`, `-100/+200 ms` model clips, and timing gates `Retrigger 220 ms`, `Group 80 ms`, `Merge 220 ms`. This is the single source of truth for the Collector bounce detector until a later full-chain replay plus Motorola test beats it.
+- Review markers and candidate pins are color-coded by detected/reviewed class: racket, table, floor, noise/music, other, and ignore.
+- Audio preprocessing skips negative/noise/table/floor training windows that land within 300 ms of a confirmed racket contact, because those clips can contain both sounds and should be analysis-only.
 - Data ownership: TBD.
 - Data retention: Raw training data is local and can be large; keep `/data/` gitignored.
 - Data import/export requirements: Pull `audio_session_*.json` and matching media folders from device storage into local raw data folders.
@@ -107,8 +113,10 @@ This file is the living project memory for Codex and WRLDS. Use it together with
 ## Current Known Problems
 
 - One physical racket contact can sometimes count twice, especially with catch/after-sound; live JS now adds `contact_group` debug and duplicate suppression, but Motorola validation is still required.
-- Collection modes are separated: `Ljudinsamling` is audio-only sound data for racket/table/floor/noise; `Audio plus IMU` contains `Racketstuds` for controlled racket-bounce IMU and `Playing` for longer review-first sequences. The old separate `Fri inspelning` card is hidden from the startsida.
+- Collection modes are separated: `Ljudinsamling` is audio-only sound data for racket/table/floor/noise; `Audio plus IMU` contains `Racketstuds` for controlled racket-bounce IMU and natural no-bounce racket-arm motion, plus `Playing` for longer review-first sequences. The old separate `Fri inspelning` card is hidden from the startsida.
+- Dense play collection is now first-class: `Spel: racket + bord` under `Ljudinsamling` and `Playing: racket + bord` under `Audio plus IMU` are for realistic alternating table/racket sequences where contacts can be 170-300 ms apart. These takes must be evaluated separately from isolated racket-bounce takes.
 - Floor/table/catch-after-sound rejection now requires reviewed hard-negative takes before primary contact training.
+- Quiet audio is no longer enough for model progress; the next data gap is reviewed noisy/fast racket positives plus noisy table/floor/other-impact negatives.
 - Review video/audio offset is handled in Review with saved `audio_origin_in_video_ms`, per-take `video_sync_offset_ms`, and an optional clap/tap sync event at the start of new takes.
 
 ## Commands

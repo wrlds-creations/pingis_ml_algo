@@ -42,6 +42,10 @@ from preprocess_audio import (
     multiclass_label_for_marker,
     not_racket_kind_for,
     event_type_for_class_label,
+    reviewed_marker_timestamps,
+    spacing_metadata_for_timestamp,
+    SKIPPED_REVIEW_STATUSES,
+    NON_AUDIO_REVIEW_CLASS_LABELS,
 )
 
 TARGET_LABELS = {"racket_bounce", "table_bounce", "floor_bounce", "noise"}
@@ -82,6 +86,14 @@ def append_contact_row(
     contact_confidence: str | float = "",
     surface_label: str = "",
     surface_confidence: str | float = "",
+    linked_candidate_id: str = "",
+    detection_config_id: str = "",
+    detection_sensitivity: str = "",
+    detection_mode: str = "",
+    nearest_prev_event_ms: str | int | float = "",
+    nearest_next_event_ms: str | int | float = "",
+    event_density_1s: str | int = "",
+    close_event_bucket: str = "",
 ) -> bool:
     try:
         feats = extract_features(clip, sr)
@@ -115,6 +127,14 @@ def append_contact_row(
     feats["contact_confidence"] = contact_confidence
     feats["surface_label"] = surface_label
     feats["surface_confidence"] = surface_confidence
+    feats["linked_candidate_id"] = linked_candidate_id
+    feats["detection_config_id"] = detection_config_id
+    feats["detection_sensitivity"] = detection_sensitivity
+    feats["detection_mode"] = detection_mode
+    feats["nearest_prev_event_ms"] = nearest_prev_event_ms
+    feats["nearest_next_event_ms"] = nearest_next_event_ms
+    feats["event_density_1s"] = event_density_1s
+    feats["close_event_bucket"] = close_event_bucket
     if review_completed is not None:
         feats["review_completed"] = review_completed
         feats["marker_source"] = marker_source
@@ -194,6 +214,10 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
             calibration_status = str(
                 event.get("calibration_status") or session["session_meta"].get("calibration_status") or ""
             )
+            detection_config = event.get("detection_config_snapshot") or session["session_meta"].get("detection_config_snapshot") or {}
+            detection_config_id = str(detection_config.get("config_id") or "")
+            detection_sensitivity = str(detection_config.get("sensitivity") or "")
+            detection_mode = str(detection_config.get("detection_mode") or "")
             background_condition = str(event.get("background_condition", "quiet"))
             take_index = int(event.get("take_index", 0))
             target_duration_s = int(event.get("target_duration_s", 0))
@@ -211,15 +235,20 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
 
             if review_completed:
                 accepted_markers = 0
+                review_timestamps = reviewed_marker_timestamps(markers)
                 for marker_idx, marker in enumerate(markers):
                     final_label = str(marker.get("final_label", "ignore"))
                     review_status = str(marker.get("review_status") or "confirmed")
-                    if review_status in {"pending", "deleted", "filtered"} or final_label == "ignore":
+                    marker_class_label = str(marker.get("class_label") or "")
+                    if review_status in SKIPPED_REVIEW_STATUSES or final_label == "ignore":
+                        continue
+                    if marker_class_label in NON_AUDIO_REVIEW_CLASS_LABELS:
                         continue
                     if final_label not in {"racket_contact", "not_racket_contact"}:
                         continue
 
                     timestamp_ms = int(marker.get("timestamp_ms", 0))
+                    spacing = spacing_metadata_for_timestamp(review_timestamps, timestamp_ms)
                     marker_source = str(marker.get("source", "auto"))
                     contact_kind = str(
                         marker.get("contact_kind")
@@ -231,11 +260,12 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                     )
                     bounce_side = str(marker.get("bounce_side") or "unknown")
                     multi_label = multiclass_label_for_marker(final_label, contact_kind, not_racket_kind)
-                    class_label = str(marker.get("class_label") or multi_label)
+                    class_label = marker_class_label or multi_label
                     event_type = str(marker.get("event_type") or event_type_for_class_label(class_label))
                     marker_contact_confidence = marker.get("contact_confidence", "")
                     marker_surface_label = str(marker.get("surface_label") or "")
                     marker_surface_confidence = marker.get("surface_confidence", "")
+                    linked_candidate_id = str(marker.get("linked_candidate_id") or "")
                     clip = extract_clip_around_ms(y, sr, timestamp_ms)
                     clip_id = f"{group_id}:review:{marker_idx:03d}"
                     if append_contact_row(
@@ -271,6 +301,11 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                         contact_confidence=marker_contact_confidence,
                         surface_label=marker_surface_label,
                         surface_confidence=marker_surface_confidence,
+                        linked_candidate_id=linked_candidate_id,
+                        detection_config_id=detection_config_id,
+                        detection_sensitivity=detection_sensitivity,
+                        detection_mode=detection_mode,
+                        **spacing,
                     ):
                         raw_count += 1
                         accepted_markers += 1
@@ -303,6 +338,11 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                                     "contact_confidence": marker_contact_confidence,
                                     "surface_label": marker_surface_label,
                                     "surface_confidence": marker_surface_confidence,
+                                    "linked_candidate_id": linked_candidate_id,
+                                    "detection_config_id": detection_config_id,
+                                    "detection_sensitivity": detection_sensitivity,
+                                    "detection_mode": detection_mode,
+                                    **spacing,
                                 }
                             )
                         else:
@@ -359,6 +399,9 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                     scenario=recording_scenario,
                     bounce_context=bounce_context,
                     calibration_status=calibration_status,
+                    detection_config_id=detection_config_id,
+                    detection_sensitivity=detection_sensitivity,
+                    detection_mode=detection_mode,
                 ):
                     raw_count += 1
                     fixed_clip = librosa.util.fix_length(clip.copy(), size=TARGET_SR)
@@ -387,6 +430,9 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                                 "scenario": recording_scenario,
                                 "bounce_context": bounce_context,
                                 "calibration_status": calibration_status,
+                                "detection_config_id": detection_config_id,
+                                "detection_sensitivity": detection_sensitivity,
+                                "detection_mode": detection_mode,
                             }
                         )
                     else:
@@ -428,6 +474,14 @@ def build_variant(mode: str) -> tuple[pd.DataFrame, int, int]:
                     scenario=example.get("scenario", ""),
                     bounce_context=example.get("bounce_context", ""),
                     calibration_status=example.get("calibration_status", ""),
+                    linked_candidate_id=example.get("linked_candidate_id", ""),
+                    detection_config_id=example.get("detection_config_id", ""),
+                    detection_sensitivity=example.get("detection_sensitivity", ""),
+                    detection_mode=example.get("detection_mode", ""),
+                    nearest_prev_event_ms=example.get("nearest_prev_event_ms", ""),
+                    nearest_next_event_ms=example.get("nearest_next_event_ms", ""),
+                    event_density_1s=example.get("event_density_1s", ""),
+                    close_event_bucket=example.get("close_event_bucket", ""),
                 ):
                     aug_count += 1
 
@@ -465,6 +519,10 @@ def main() -> None:
         print(f"  origins={df['contact_origin'].value_counts().to_dict()}")
     if "source_trust" in df.columns:
         print(f"  source_trust={df['source_trust'].value_counts().to_dict()}")
+    if "background_condition" in df.columns:
+        print(f"  background={df['background_condition'].value_counts().to_dict()}")
+    if "close_event_bucket" in df.columns:
+        print(f"  close_event_buckets={df['close_event_bucket'].value_counts().to_dict()}")
     if "not_racket_kind" in df.columns:
         print(f"  hard_negatives={df['not_racket_kind'].value_counts().to_dict()}")
     if "bounce_side" in df.columns:

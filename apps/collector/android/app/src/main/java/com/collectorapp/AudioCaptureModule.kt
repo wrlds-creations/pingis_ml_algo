@@ -1,13 +1,21 @@
 package com.collectorapp
 
 import android.Manifest
+import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioFormat
 import android.media.AudioRecord
+import android.media.MediaCodec
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaRecorder
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Base64
 import androidx.core.app.ActivityCompat
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
@@ -18,6 +26,8 @@ import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.floor
+import kotlin.math.roundToInt
 
 /**
  * Två funktioner:
@@ -34,6 +44,11 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
 
     override fun getName() = "AudioCapture"
 
+    companion object {
+        private const val TARGET_SAMPLE_RATE = 22_050
+        private const val IMPORT_AUDIO_REQUEST = 7042
+    }
+
     @Volatile private var sessionRecord: AudioRecord? = null
     @Volatile private var sessionRunning = false
     @Volatile private var sessionStopRequested = false
@@ -44,8 +59,71 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
     @Volatile private var sessionPath: String? = null
     @Volatile private var sessionThread: Thread? = null
     @Volatile private var sessionWrittenSamples = 0L
-    @Volatile private var sessionSampleRate = 22_050
+    @Volatile private var sessionSampleRate = TARGET_SAMPLE_RATE
     @Volatile private var sessionAutoStopped = false
+    @Volatile private var pendingImportPromise: Promise? = null
+    @Volatile private var pendingImportOutputPath: String? = null
+
+    private data class ImportedAudioResult(
+        val displayName: String?,
+        val sourceUri: String,
+        val durationMs: Long,
+        val sourceSampleRate: Int,
+        val sourceChannels: Int,
+        val writtenSamples: Int,
+    )
+
+    private val activityEventListener = object : BaseActivityEventListener() {
+        override fun onActivityResult(activity: Activity, requestCode: Int, resultCode: Int, data: Intent?) {
+            if (requestCode != IMPORT_AUDIO_REQUEST) return
+
+            val promise = pendingImportPromise
+            val outputPath = pendingImportOutputPath
+            pendingImportPromise = null
+            pendingImportOutputPath = null
+
+            if (promise == null || outputPath == null) return
+            if (resultCode != Activity.RESULT_OK) {
+                promise.reject("IMPORT_CANCELLED", "Audio import cancelled")
+                return
+            }
+
+            val uri = data?.data
+            if (uri == null) {
+                promise.reject("IMPORT_NO_URI", "No audio file selected")
+                return
+            }
+
+            try {
+                val flags = data.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION
+                ctx.contentResolver.takePersistableUriPermission(uri, flags)
+            } catch (_: Exception) {
+            }
+
+            Thread {
+                try {
+                    val result = decodeAudioUriToWav(uri, outputPath)
+                    val payload = Arguments.createMap().apply {
+                        putString("outputPath", outputPath)
+                        putString("displayName", result.displayName)
+                        putString("sourceUri", result.sourceUri)
+                        putDouble("durationMs", result.durationMs.toDouble())
+                        putDouble("sampleRate", TARGET_SAMPLE_RATE.toDouble())
+                        putDouble("sourceSampleRate", result.sourceSampleRate.toDouble())
+                        putDouble("channels", result.sourceChannels.toDouble())
+                        putDouble("writtenSamples", result.writtenSamples.toDouble())
+                    }
+                    promise.resolve(payload)
+                } catch (e: Exception) {
+                    promise.reject("IMPORT_AUDIO_ERROR", e.message, e)
+                }
+            }.start()
+        }
+    }
+
+    init {
+        ctx.addActivityEventListener(activityEventListener)
+    }
 
     @ReactMethod
     fun capture(durationMs: Int, promise: Promise) {
@@ -55,7 +133,7 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
             return
         }
 
-        val sampleRate = 22_050
+        val sampleRate = TARGET_SAMPLE_RATE
         val nSamples = sampleRate * durationMs / 1_000
         val minBuf = AudioRecord.getMinBufferSize(
             sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -99,6 +177,37 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
     }
 
     @ReactMethod
+    fun importAudioFile(outputPath: String, promise: Promise) {
+        val activity = ctx.currentActivity
+        if (activity == null) {
+            promise.reject("NO_ACTIVITY", "No active Android activity")
+            return
+        }
+        if (pendingImportPromise != null) {
+            promise.reject("IMPORT_ACTIVE", "An audio import is already active")
+            return
+        }
+
+        pendingImportPromise = promise
+        pendingImportOutputPath = outputPath
+
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "audio/*"
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+        }
+
+        try {
+            activity.startActivityForResult(intent, IMPORT_AUDIO_REQUEST)
+        } catch (e: Exception) {
+            pendingImportPromise = null
+            pendingImportOutputPath = null
+            promise.reject("IMPORT_PICKER_ERROR", e.message, e)
+        }
+    }
+
+    @ReactMethod
     fun startSession(outputPath: String, targetDurationMs: Int, promise: Promise) {
         if (sessionRunning) {
             promise.reject("SESSION_ACTIVE", "A session is already running")
@@ -110,7 +219,7 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
             return
         }
 
-        val sr = 22_050
+        val sr = TARGET_SAMPLE_RATE
         val minBuf = AudioRecord.getMinBufferSize(
             sr, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val bufSize = maxOf(minBuf, sr / 5 * 2)
@@ -298,4 +407,242 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
 
     private fun intToLEBytes(v: Int): ByteArray =
         ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
+
+    private fun decodeAudioUriToWav(uri: Uri, outputPath: String): ImportedAudioResult {
+        val displayName = displayNameForUri(uri)
+        val extractor = MediaExtractor()
+        var decoder: MediaCodec? = null
+        val decodedChunks = mutableListOf<ShortArray>()
+        var decodedSampleCount = 0L
+        var outputSampleRate = 0
+        var outputChannels = 1
+        var outputEncoding = AudioFormat.ENCODING_PCM_16BIT
+
+        try {
+            extractor.setDataSource(ctx, uri, null)
+            var audioTrackIndex = -1
+            var inputFormat: MediaFormat? = null
+
+            for (index in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(index)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) {
+                    audioTrackIndex = index
+                    inputFormat = format
+                    break
+                }
+            }
+
+            val format = inputFormat ?: throw IllegalArgumentException("No audio track found")
+            val mime = format.getString(MediaFormat.KEY_MIME)
+                ?: throw IllegalArgumentException("Audio track is missing MIME type")
+            outputSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+            outputChannels = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+
+            extractor.selectTrack(audioTrackIndex)
+            val activeDecoder = MediaCodec.createDecoderByType(mime)
+            decoder = activeDecoder
+            activeDecoder.configure(format, null, null, 0)
+            activeDecoder.start()
+
+            val bufferInfo = MediaCodec.BufferInfo()
+            var inputDone = false
+            var outputDone = false
+
+            while (!outputDone) {
+                if (!inputDone) {
+                    val inputIndex = activeDecoder.dequeueInputBuffer(10_000)
+                    if (inputIndex >= 0) {
+                        val inputBuffer = activeDecoder.getInputBuffer(inputIndex)
+                        inputBuffer?.clear()
+                        val sampleSize = if (inputBuffer != null) {
+                            extractor.readSampleData(inputBuffer, 0)
+                        } else {
+                            -1
+                        }
+
+                        if (sampleSize < 0) {
+                            activeDecoder.queueInputBuffer(
+                                inputIndex,
+                                0,
+                                0,
+                                0L,
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM,
+                            )
+                            inputDone = true
+                        } else {
+                            activeDecoder.queueInputBuffer(
+                                inputIndex,
+                                0,
+                                sampleSize,
+                                extractor.sampleTime.coerceAtLeast(0L),
+                                0,
+                            )
+                            extractor.advance()
+                        }
+                    }
+                }
+
+                when (val outputIndex = activeDecoder.dequeueOutputBuffer(bufferInfo, 10_000)) {
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                    }
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                        val outputFormat = activeDecoder.outputFormat
+                        outputSampleRate = outputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        outputChannels = outputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT).coerceAtLeast(1)
+                        outputEncoding = if (outputFormat.containsKey(MediaFormat.KEY_PCM_ENCODING)) {
+                            outputFormat.getInteger(MediaFormat.KEY_PCM_ENCODING)
+                        } else {
+                            AudioFormat.ENCODING_PCM_16BIT
+                        }
+                    }
+                    else -> {
+                        if (outputIndex >= 0) {
+                            val outputBuffer = activeDecoder.getOutputBuffer(outputIndex)
+                            if (outputBuffer != null && bufferInfo.size > 0) {
+                                outputBuffer.position(bufferInfo.offset)
+                                outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
+                                val monoSamples = pcmBufferToMonoShorts(
+                                    outputBuffer.slice(),
+                                    outputChannels,
+                                    outputEncoding,
+                                )
+                                if (monoSamples.isNotEmpty()) {
+                                    decodedChunks.add(monoSamples)
+                                    decodedSampleCount += monoSamples.size.toLong()
+                                }
+                            }
+                            if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                outputDone = true
+                            }
+                            activeDecoder.releaseOutputBuffer(outputIndex, false)
+                        }
+                    }
+                }
+            }
+        } finally {
+            try { decoder?.stop() } catch (_: Exception) {}
+            try { decoder?.release() } catch (_: Exception) {}
+            try { extractor.release() } catch (_: Exception) {}
+        }
+
+        if (decodedSampleCount <= 0 || outputSampleRate <= 0) {
+            throw IllegalArgumentException("Selected audio file decoded to no samples")
+        }
+
+        val resampled = resampleMono(decodedChunks, decodedSampleCount, outputSampleRate, TARGET_SAMPLE_RATE)
+        writeWavFile(outputPath, TARGET_SAMPLE_RATE, resampled)
+
+        return ImportedAudioResult(
+            displayName = displayName,
+            sourceUri = uri.toString(),
+            durationMs = resampled.size * 1000L / TARGET_SAMPLE_RATE,
+            sourceSampleRate = outputSampleRate,
+            sourceChannels = outputChannels,
+            writtenSamples = resampled.size,
+        )
+    }
+
+    private fun pcmBufferToMonoShorts(buffer: ByteBuffer, channels: Int, encoding: Int): ShortArray {
+        val safeChannels = channels.coerceAtLeast(1)
+        val ordered = buffer.order(ByteOrder.LITTLE_ENDIAN)
+
+        if (encoding == AudioFormat.ENCODING_PCM_FLOAT) {
+            val frameCount = ordered.remaining() / (4 * safeChannels)
+            val output = ShortArray(frameCount)
+            for (frame in 0 until frameCount) {
+                var sum = 0.0
+                for (channel in 0 until safeChannels) {
+                    sum += ordered.float.toDouble()
+                }
+                val mono = (sum / safeChannels).coerceIn(-1.0, 1.0)
+                output[frame] = (mono * 32767.0).roundToInt().toShort()
+            }
+            return output
+        }
+
+        val frameCount = ordered.remaining() / (2 * safeChannels)
+        val output = ShortArray(frameCount)
+        for (frame in 0 until frameCount) {
+            var sum = 0
+            for (channel in 0 until safeChannels) {
+                sum += ordered.short.toInt()
+            }
+            output[frame] = (sum / safeChannels)
+                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                .toShort()
+        }
+        return output
+    }
+
+    private fun resampleMono(
+        chunks: List<ShortArray>,
+        sampleCount: Long,
+        sourceRate: Int,
+        targetRate: Int,
+    ): ShortArray {
+        if (sampleCount > Int.MAX_VALUE) {
+            throw IllegalArgumentException("Audio file is too long to import in one pass")
+        }
+
+        val source = ShortArray(sampleCount.toInt())
+        var offset = 0
+        for (chunk in chunks) {
+            chunk.copyInto(source, offset)
+            offset += chunk.size
+        }
+
+        if (sourceRate == targetRate) return source
+
+        val outputLength = ((sampleCount.toDouble() * targetRate.toDouble()) / sourceRate.toDouble())
+            .roundToInt()
+            .coerceAtLeast(1)
+        val output = ShortArray(outputLength)
+        val step = sourceRate.toDouble() / targetRate.toDouble()
+
+        for (index in output.indices) {
+            val sourcePos = index * step
+            val leftIndex = floor(sourcePos).toInt().coerceIn(0, source.lastIndex)
+            val rightIndex = (leftIndex + 1).coerceAtMost(source.lastIndex)
+            val fraction = sourcePos - leftIndex
+            val sample = source[leftIndex] * (1.0 - fraction) + source[rightIndex] * fraction
+            output[index] = sample.roundToInt()
+                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt())
+                .toShort()
+        }
+
+        return output
+    }
+
+    private fun writeWavFile(outputPath: String, sampleRate: Int, samples: ShortArray) {
+        val file = File(outputPath)
+        file.parentFile?.mkdirs()
+        FileOutputStream(file).use { fos ->
+            writeWavHeader(fos, sampleRate, samples.size * 2)
+            val byteBuffer = ByteBuffer.allocate(8192 * 2).order(ByteOrder.LITTLE_ENDIAN)
+            var index = 0
+            while (index < samples.size) {
+                byteBuffer.clear()
+                val end = minOf(samples.size, index + 8192)
+                for (sampleIndex in index until end) {
+                    byteBuffer.putShort(samples[sampleIndex])
+                }
+                fos.write(byteBuffer.array(), 0, (end - index) * 2)
+                index = end
+            }
+        }
+    }
+
+    private fun displayNameForUri(uri: Uri): String? {
+        try {
+            ctx.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (index >= 0) return cursor.getString(index)
+                }
+            }
+        } catch (_: Exception) {
+        }
+        return uri.lastPathSegment
+    }
 }
