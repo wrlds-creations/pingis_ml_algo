@@ -53,6 +53,7 @@ data/audio/models/
 | `scripts/preprocess_audio.py` | Feature extraction (35 features per clip) |
 | `scripts/build_playing_retro_candidate_report.py` | Candidate-centered `spel_retro_audio` peak report before training |
 | `scripts/train_playing_retro_audio.py` | Local `spel_retro_audio` candidate training/evaluation, separate from app export |
+| `scripts/evaluate_playing_retro_audio_variants.py` | T0006 focused `spel_retro_audio` variant comparison and local safe-candidate save |
 | `scripts/train_rf_audio.py` | Model training + evaluation |
 | `scripts/serve_api_audio.py` | Inference API (port 5001) |
 
@@ -105,6 +106,7 @@ pip install -r skills/pingis-audio-classification/requirements.txt
 python skills/pingis-audio-classification/scripts/preprocess_audio.py
 python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py
 python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py
+python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_variants.py
 python skills/pingis-audio-classification/scripts/train_rf_audio.py
 
 # Start inference API:
@@ -152,6 +154,11 @@ Current local workflow:
   training rows by timing config.
 - Ordinary up/down bounce is evaluated as a separate regression slice; it is not
   mixed into dense playing metrics.
+- T0006 selected `playing_retro_audio_rf_v2026_06_02_safe_racket_weighted`,
+  but it stays local because holdout racket recall only improved to 0.623.
+- Next improvement should use true multi-window and non-leaky candidate-context
+  features. Do not use truth-derived `close_event_bucket` or `neighbor_sequence`
+  as model features.
 
 ## Collecting Data
 

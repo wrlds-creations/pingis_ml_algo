@@ -6,15 +6,15 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0006`
+`T0007`
 
 ## Branch
 
-`codex/t0006-improve-playing-retro-audio-candidate`
+`codex/t0007-playing-retro-audio-multi-window-context`
 
 ## Goal
 
-Improve the `spel_retro_audio` candidate before any app integration by analyzing T0005 holdout errors and testing focused candidate/window/context variants that raise racket recall without making table or non-target behavior worse.
+Build the next `spel_retro_audio` improvement step around real multi-window and candidate-context features, because T0006 only produced a small safe racket-recall gain and is not enough for app integration.
 
 ## Dependencies
 
@@ -24,6 +24,8 @@ Improve the `spel_retro_audio` candidate before any app integration by analyzing
 - T0004 generated `data/audio/processed/playing_retro_candidate_peak_rows.csv`, `playing_retro_candidate_peak_summary.csv`, and `playing_retro_candidate_peak_report.md` locally.
 - T0005 trained local candidate `playing_retro_audio_rf_v2026_06_02_app_candidates_100_200` from 4,028 candidate-centered rows across 16 reviewed playing sessions.
 - T0005 holdout on `audio_session_2026-05-29_002` reached `0.759` accuracy versus old app prediction `0.682`, but racket recall was only `0.604`, so it is not ready for app export.
+- T0006 compared focused one-window variants and selected local candidate `playing_retro_audio_rf_v2026_06_02_safe_racket_weighted`.
+- T0006 selected variant improved holdout racket recall from `0.604` to `0.623`, table recall from `0.924` to `0.933`, and kept non-target recall at `0.625`; this is useful but too small for app integration.
 - Current audio source-of-truth lives in `PROJECT_CONTEXT.md`, `DECISIONS.md`, and `ITERATION_LOG.md`.
 - Existing audio scripts and replay behavior live under `skills/pingis-audio-classification/scripts/`.
 
@@ -52,11 +54,10 @@ Improve the `spel_retro_audio` candidate before any app integration by analyzing
 
 ## Requirements
 
-- Use the T0005 candidate dataset and evaluation report as the baseline.
-- Keep the T0005 training choice fixed unless the error analysis proves that a different row policy is necessary.
-- Start from the T0005 dataset, evaluation CSV, and local model report.
-- Inspect holdout errors by `source_rule`, close-event bucket, and confusion class, especially `wrong_class_racket_as_table`, `manual_missed_marker`, and sub-120 ms gaps.
-- Try focused candidate variants only when the error analysis points to a concrete hypothesis.
+- Start from the T0006 variant report, holdout prediction CSV, and selected local candidate.
+- Add or test multi-window feature extraction per candidate peak, at minimum tight `-60/+140 ms` plus normal `-100/+200 ms`; include a broader context window only if runtime stays practical.
+- Add non-leaky candidate-context features only if they can be computed during retro inference, such as previous/next candidate gap and candidate-sequence position. Do not use truth-derived `close_event_bucket` or `neighbor_sequence` as model features.
+- Compare multi-window/context variants against both T0005 baseline and T0006 `safe_racket_weighted`.
 - Evaluate every variant by dense bucket/session and separately against ordinary up/down bounce regression sessions.
 - Do not export the candidate into Collector app model JSON in this ticket.
 - Do not build or install an APK in this ticket.
@@ -70,15 +71,15 @@ Improve the `spel_retro_audio` candidate before any app integration by analyzing
 
 ## Acceptance criteria
 
-- A deterministic command or report identifies the largest T0005 error causes and compares any tested variants against the T0005 baseline.
+- A deterministic command or report compares multi-window/context variants against T0005 and T0006 baselines.
 - Evaluation reports per-session and per-bucket racket/table recall, false positives, wrong-class table/racket errors, and close-event performance.
 - Ordinary bounce regression results are reported separately and must not be mixed into dense playing aggregate metrics.
 - Candidate remains local unless a later ticket explicitly approves app export.
 
 ## Manual verification
 
-- Inspect `audio_session_2026-05-29_002` candidate errors before and after any variant.
-- Confirm T0006 does not treat ordinary up/down bounce as the same promotion bucket as Tomas/Stiga dense play.
+- Inspect `audio_session_2026-05-29_002` candidate errors before and after any multi-window/context variant.
+- Confirm T0007 does not treat ordinary up/down bounce as the same promotion bucket as Tomas/Stiga dense play.
 
 ## Automated validation
 
