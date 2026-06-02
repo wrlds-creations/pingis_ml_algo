@@ -55,6 +55,7 @@ data/audio/models/
 | `scripts/train_playing_retro_audio.py` | Local `spel_retro_audio` candidate training/evaluation, separate from app export |
 | `scripts/evaluate_playing_retro_audio_variants.py` | T0006 focused `spel_retro_audio` variant comparison and local safe-candidate save |
 | `scripts/evaluate_playing_retro_audio_multi_window.py` | T0007 multi-window/context `spel_retro_audio` variant comparison and local candidate save |
+| `scripts/evaluate_playing_retro_audio_cross_session.py` | T0008 cross-session validation for T0007/T0008 `spel_retro_audio` promotion decisions |
 | `scripts/train_rf_audio.py` | Model training + evaluation |
 | `scripts/serve_api_audio.py` | Inference API (port 5001) |
 
@@ -109,6 +110,7 @@ python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_
 python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py
 python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_variants.py
 python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_multi_window.py
+python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_cross_session.py
 python skills/pingis-audio-classification/scripts/train_rf_audio.py
 
 # Start inference API:
@@ -160,7 +162,10 @@ Current local workflow:
   but it stays local because holdout racket recall only improved to 0.623.
 - T0007 selected `playing_retro_audio_rf_v2026_06_02_multi_window_context`
   using tight, normal, and wide real-WAV windows plus non-leaky candidate-context
-  features. It stays local until cross-session validation passes.
+  features.
+- T0008 cross-session validation passed for the selected T0007 variant on the
+  requested Tomas/Stiga dense-playing holdouts, so the next step may wire a
+  separate Review retro path. It still must not replace `studs_live`.
 - Do not use truth-derived `close_event_bucket` or `neighbor_sequence` as model
   features; they are reporting metadata only.
 

@@ -6,15 +6,15 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0008`
+`T0009`
 
 ## Branch
 
-`codex/t0008-playing-retro-audio-cross-session-validation`
+`codex/t0009-playing-retro-audio-review-integration`
 
 ## Goal
 
-Validate the T0007 `spel_retro_audio` multi-window/context candidate across dense playing sessions before any Collector app integration, so we know whether the large `audio_session_2026-05-29_002` gain generalizes or only fits one Tomas/Stiga holdout.
+Integrate the validated T0007/T0008 `spel_retro_audio` model family behind a separate post-recording Review retro path, with app-side feature extraction matching the Python tight/normal/wide/context pipeline, without changing `studs_live` or the normal Collector `audio_model.json` path.
 
 ## Dependencies
 
@@ -25,7 +25,7 @@ Validate the T0007 `spel_retro_audio` multi-window/context candidate across dens
 - T0005 trained local candidate `playing_retro_audio_rf_v2026_06_02_app_candidates_100_200` from 4,028 candidate-centered rows across 16 reviewed playing sessions.
 - T0006 selected local one-window candidate `playing_retro_audio_rf_v2026_06_02_safe_racket_weighted`, but the safe gain was too small for app integration.
 - T0007 selected local multi-window/context candidate `playing_retro_audio_rf_v2026_06_02_multi_window_context` / `multi_window_context_racket_weighted`.
-- T0007 holdout on `audio_session_2026-05-29_002` reached `0.908` accuracy, `0.896` racket recall, `0.933` table recall, and `0.833` non-target recall, versus T0006 `0.771`, `0.623`, `0.933`, and `0.625`.
+- T0008 cross-session validation passed across `audio_session_2026-05-28_002`, `audio_session_2026-05-29_001`, and `audio_session_2026-05-29_002`: selected T0007 racket recall was `0.910`, `0.939`, and `0.896`, table recall was `0.932`, `0.958`, and `0.933`, and non-target recall was `0.894`, `0.859`, and `0.833`.
 - Current audio source-of-truth lives in `PROJECT_CONTEXT.md`, `DECISIONS.md`, and `ITERATION_LOG.md`.
 - Existing audio scripts and replay behavior live under `skills/pingis-audio-classification/scripts/`.
 
@@ -33,7 +33,10 @@ Validate the T0007 `spel_retro_audio` multi-window/context candidate across dens
 
 - `skills/pingis-audio-classification/scripts/`
 - `skills/pingis-audio-classification/SKILL.md`
-- `data/audio/processed/`
+- `apps/collector/src/AudioTakeReviewScreen.tsx`
+- `apps/collector/src/audioReview.ts`
+- `apps/collector/src/types.ts`
+- New clearly named `apps/collector/src/*playingRetroAudio*` helper/model files if needed
 - `data/audio/models/evaluations/`
 - `data/audio/models/playing_retro_candidates/`
 - `PROJECT_CONTEXT.md`
@@ -47,46 +50,47 @@ Validate the T0007 `spel_retro_audio` multi-window/context candidate across dens
 
 - `apps/collector/src/models/audio_model.json`
 - `apps/collector/src/models/audio_contact_model.json`
-- APK/build artifacts
-- `studs_live` app behavior or live detector thresholds
+- Existing `studs_live` app behavior or live detector thresholds
+- APK/build artifacts unless Love explicitly asks for a build
 - Video-stroke model files
 - Raw reviewed session JSON labels, except for metadata fixes explicitly approved by Love
 
 ## Requirements
 
-- Start from the T0007 script, report, holdout prediction CSV, and selected local candidate.
-- Add deterministic cross-session validation for the same multi-window/context feature family.
-- At minimum evaluate alternate dense-playing holdouts for `audio_session_2026-05-28_002`, `audio_session_2026-05-29_001`, and `audio_session_2026-05-29_002`.
-- Compare T0007 selected behavior against T0005 and T0006 references for each holdout where reference metrics exist or can be recomputed fairly.
-- Report racket recall, table recall, non-target recall, wrong-class racket/table errors, and close-event buckets per holdout session.
-- Keep ordinary up/down bounce regression separate and clearly mark any fallback metric as advisory if exact raw timestamps are unavailable.
-- Do not export the candidate into Collector app model JSON in this ticket.
-- Do not build or install an APK in this ticket.
+- Start from the T0007/T0008 reports, prediction CSVs, and selected local candidate.
+- Define the app-side model/export shape for `spel_retro_audio` separately from normal `audio_model.json`.
+- Implement or stage feature extraction so Review retro can compute the same tight `-60/+140 ms`, normal `-100/+200 ms`, wide `-160/+320 ms`, and candidate-context features used by Python.
+- Keep truth-derived fields such as `close_event_bucket` and `neighbor_sequence` out of app inference features.
+- Add an app/local parity check where practical: the same candidate timestamp should produce the same feature names/order as the Python model expects.
+- Keep all new behavior behind a separate playing-retro path; normal Review candidates and `studs_live` must keep using their existing model/config.
+- Do not build or install an APK unless Love explicitly asks.
 
 ## Non-Goals
 
-- No Collector UI integration yet.
-- No video/FH-BH work yet.
-- No changes to ordinary `studs_live` promotion rules.
-- No app model export or APK build.
+- No `studs_live` promotion.
+- No ordinary up/down bounce model change.
+- No video/FH-BH fusion yet.
+- No broad UI redesign.
+- No app release build unless explicitly requested.
 
 ## Acceptance criteria
 
-- A deterministic command or report validates T0007-style multi-window/context features across multiple dense-playing holdout sessions.
-- The report makes clear whether `playing_retro_audio_rf_v2026_06_02_multi_window_context` is a good general candidate, a Tomas-backhand-specific candidate, or needs another feature/training change.
-- Ordinary bounce regression remains separate from dense playing metrics.
-- Candidate remains local unless a later ticket explicitly approves app export.
+- The app/review code has a clearly separate `spel_retro_audio` path or the ticket documents why a prerequisite export/parity step is still needed.
+- App-side features and Python feature order are traceable and testable.
+- Existing `audio_model.json` and `audio_contact_model.json` are unchanged.
+- The ticket leaves a deterministic command or test for feature/export parity.
 
 ## Manual verification
 
-- Inspect per-session T0008 errors for the Tomas/Stiga sessions, especially close table-to-racket and racket-to-table gaps under 120 ms.
-- Confirm T0008 does not treat ordinary up/down bounce as the same promotion bucket as Tomas/Stiga dense play.
+- Inspect a few T0008 prediction rows and confirm the app-side path would classify the same candidate timestamps, not human truth timestamps.
+- Confirm normal audio review and live bounce paths do not use the new `spel_retro_audio` model.
 
 ## Automated validation
 
-- Run the new or updated cross-session evaluation command.
+- Run targeted TypeScript validation if app code changes.
+- Run any new parity/export check.
 - Run `npm run validate` if source-of-truth workflow files changed.
-- Run a targeted Python syntax check for any changed Python script.
+- Run targeted Python syntax checks for changed Python scripts.
 
 ## Completion Report Expected
 
