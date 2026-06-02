@@ -56,6 +56,8 @@ data/audio/models/
 | `scripts/evaluate_playing_retro_audio_variants.py` | T0006 focused `spel_retro_audio` variant comparison and local safe-candidate save |
 | `scripts/evaluate_playing_retro_audio_multi_window.py` | T0007 multi-window/context `spel_retro_audio` variant comparison and local candidate save |
 | `scripts/evaluate_playing_retro_audio_cross_session.py` | T0008 cross-session validation for T0007/T0008 `spel_retro_audio` promotion decisions |
+| `scripts/export_playing_retro_audio_model_json.py` | T0009 separate Review-only `spel_retro_audio` app JSON export |
+| `scripts/validate_playing_retro_audio_app_export.py` | T0009 parity check for exported app JSON against selected joblib model |
 | `scripts/train_rf_audio.py` | Model training + evaluation |
 | `scripts/serve_api_audio.py` | Inference API (port 5001) |
 
@@ -111,6 +113,8 @@ python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py
 python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_variants.py
 python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_multi_window.py
 python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_cross_session.py
+python skills/pingis-audio-classification/scripts/export_playing_retro_audio_model_json.py
+python skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py
 python skills/pingis-audio-classification/scripts/train_rf_audio.py
 
 # Start inference API:
@@ -166,6 +170,13 @@ Current local workflow:
 - T0008 cross-session validation passed for the selected T0007 variant on the
   requested Tomas/Stiga dense-playing holdouts, so the next step may wire a
   separate Review retro path. It still must not replace `studs_live`.
+- T0009 exports the selected candidate to
+  `apps/collector/src/models/playing_retro_audio_model.json`, separate from
+  `audio_model.json`, and provides `apps/collector/src/playingRetroAudio.ts` as
+  an opt-in Review-only runtime helper.
+- Validate export parity with
+  `python skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py`
+  before any app replay, UI wiring, APK build, or device install.
 - Do not use truth-derived `close_event_bucket` or `neighbor_sequence` as model
   features; they are reporting metadata only.
 
