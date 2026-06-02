@@ -6,26 +6,26 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0007`
+`T0008`
 
 ## Branch
 
-`codex/t0007-playing-retro-audio-multi-window-context`
+`codex/t0008-playing-retro-audio-cross-session-validation`
 
 ## Goal
 
-Build the next `spel_retro_audio` improvement step around real multi-window and candidate-context features, because T0006 only produced a small safe racket-recall gain and is not enough for app integration.
+Validate the T0007 `spel_retro_audio` multi-window/context candidate across dense playing sessions before any Collector app integration, so we know whether the large `audio_session_2026-05-29_002` gain generalizes or only fits one Tomas/Stiga holdout.
 
 ## Dependencies
 
 - T0001 ticket workflow adoption is complete.
 - T0002 documentation refresh removed IMU/AirHive from active project scope.
 - T0003 cleanup removed retired IMU/AirHive workflow docs and skill scripts from the active repo workflow.
-- T0004 generated `data/audio/processed/playing_retro_candidate_peak_rows.csv`, `playing_retro_candidate_peak_summary.csv`, and `playing_retro_candidate_peak_report.md` locally.
+- T0004 generated candidate-centered playing-retro diagnostics locally from saved app candidates plus replay peaks.
 - T0005 trained local candidate `playing_retro_audio_rf_v2026_06_02_app_candidates_100_200` from 4,028 candidate-centered rows across 16 reviewed playing sessions.
-- T0005 holdout on `audio_session_2026-05-29_002` reached `0.759` accuracy versus old app prediction `0.682`, but racket recall was only `0.604`, so it is not ready for app export.
-- T0006 compared focused one-window variants and selected local candidate `playing_retro_audio_rf_v2026_06_02_safe_racket_weighted`.
-- T0006 selected variant improved holdout racket recall from `0.604` to `0.623`, table recall from `0.924` to `0.933`, and kept non-target recall at `0.625`; this is useful but too small for app integration.
+- T0006 selected local one-window candidate `playing_retro_audio_rf_v2026_06_02_safe_racket_weighted`, but the safe gain was too small for app integration.
+- T0007 selected local multi-window/context candidate `playing_retro_audio_rf_v2026_06_02_multi_window_context` / `multi_window_context_racket_weighted`.
+- T0007 holdout on `audio_session_2026-05-29_002` reached `0.908` accuracy, `0.896` racket recall, `0.933` table recall, and `0.833` non-target recall, versus T0006 `0.771`, `0.623`, `0.933`, and `0.625`.
 - Current audio source-of-truth lives in `PROJECT_CONTEXT.md`, `DECISIONS.md`, and `ITERATION_LOG.md`.
 - Existing audio scripts and replay behavior live under `skills/pingis-audio-classification/scripts/`.
 
@@ -54,11 +54,12 @@ Build the next `spel_retro_audio` improvement step around real multi-window and 
 
 ## Requirements
 
-- Start from the T0006 variant report, holdout prediction CSV, and selected local candidate.
-- Add or test multi-window feature extraction per candidate peak, at minimum tight `-60/+140 ms` plus normal `-100/+200 ms`; include a broader context window only if runtime stays practical.
-- Add non-leaky candidate-context features only if they can be computed during retro inference, such as previous/next candidate gap and candidate-sequence position. Do not use truth-derived `close_event_bucket` or `neighbor_sequence` as model features.
-- Compare multi-window/context variants against both T0005 baseline and T0006 `safe_racket_weighted`.
-- Evaluate every variant by dense bucket/session and separately against ordinary up/down bounce regression sessions.
+- Start from the T0007 script, report, holdout prediction CSV, and selected local candidate.
+- Add deterministic cross-session validation for the same multi-window/context feature family.
+- At minimum evaluate alternate dense-playing holdouts for `audio_session_2026-05-28_002`, `audio_session_2026-05-29_001`, and `audio_session_2026-05-29_002`.
+- Compare T0007 selected behavior against T0005 and T0006 references for each holdout where reference metrics exist or can be recomputed fairly.
+- Report racket recall, table recall, non-target recall, wrong-class racket/table errors, and close-event buckets per holdout session.
+- Keep ordinary up/down bounce regression separate and clearly mark any fallback metric as advisory if exact raw timestamps are unavailable.
 - Do not export the candidate into Collector app model JSON in this ticket.
 - Do not build or install an APK in this ticket.
 
@@ -71,19 +72,19 @@ Build the next `spel_retro_audio` improvement step around real multi-window and 
 
 ## Acceptance criteria
 
-- A deterministic command or report compares multi-window/context variants against T0005 and T0006 baselines.
-- Evaluation reports per-session and per-bucket racket/table recall, false positives, wrong-class table/racket errors, and close-event performance.
-- Ordinary bounce regression results are reported separately and must not be mixed into dense playing aggregate metrics.
+- A deterministic command or report validates T0007-style multi-window/context features across multiple dense-playing holdout sessions.
+- The report makes clear whether `playing_retro_audio_rf_v2026_06_02_multi_window_context` is a good general candidate, a Tomas-backhand-specific candidate, or needs another feature/training change.
+- Ordinary bounce regression remains separate from dense playing metrics.
 - Candidate remains local unless a later ticket explicitly approves app export.
 
 ## Manual verification
 
-- Inspect `audio_session_2026-05-29_002` candidate errors before and after any multi-window/context variant.
-- Confirm T0007 does not treat ordinary up/down bounce as the same promotion bucket as Tomas/Stiga dense play.
+- Inspect per-session T0008 errors for the Tomas/Stiga sessions, especially close table-to-racket and racket-to-table gaps under 120 ms.
+- Confirm T0008 does not treat ordinary up/down bounce as the same promotion bucket as Tomas/Stiga dense play.
 
 ## Automated validation
 
-- Run the new or updated error-analysis/training/evaluation command.
+- Run the new or updated cross-session evaluation command.
 - Run `npm run validate` if source-of-truth workflow files changed.
 - Run a targeted Python syntax check for any changed Python script.
 
