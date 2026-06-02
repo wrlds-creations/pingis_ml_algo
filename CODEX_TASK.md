@@ -6,15 +6,15 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0005`
+`T0006`
 
 ## Branch
 
-`codex/t0005-train-playing-retro-audio-candidates`
+`codex/t0006-improve-playing-retro-audio-candidate`
 
 ## Goal
 
-Train and evaluate the first `spel_retro_audio` candidate from T0004 candidate-centered peak rows, keeping ordinary up/down bounce protected from dense playing/Stiga Tomas regressions.
+Improve the `spel_retro_audio` candidate before any app integration by analyzing T0005 holdout errors and testing focused candidate/window/context variants that raise racket recall without making table or non-target behavior worse.
 
 ## Dependencies
 
@@ -22,6 +22,8 @@ Train and evaluate the first `spel_retro_audio` candidate from T0004 candidate-c
 - T0002 documentation refresh removed IMU/AirHive from active project scope.
 - T0003 cleanup removed retired IMU/AirHive workflow docs and skill scripts from the active repo workflow.
 - T0004 generated `data/audio/processed/playing_retro_candidate_peak_rows.csv`, `playing_retro_candidate_peak_summary.csv`, and `playing_retro_candidate_peak_report.md` locally.
+- T0005 trained local candidate `playing_retro_audio_rf_v2026_06_02_app_candidates_100_200` from 4,028 candidate-centered rows across 16 reviewed playing sessions.
+- T0005 holdout on `audio_session_2026-05-29_002` reached `0.759` accuracy versus old app prediction `0.682`, but racket recall was only `0.604`, so it is not ready for app export.
 - Current audio source-of-truth lives in `PROJECT_CONTEXT.md`, `DECISIONS.md`, and `ITERATION_LOG.md`.
 - Existing audio scripts and replay behavior live under `skills/pingis-audio-classification/scripts/`.
 
@@ -50,10 +52,12 @@ Train and evaluate the first `spel_retro_audio` candidate from T0004 candidate-c
 
 ## Requirements
 
-- Use T0004 row-level candidate peaks as the primary training/evaluation input.
-- Decide and document whether T0005 trains from all matchable candidate peaks or only review-relevant/accepted peaks.
-- Train at least one `spel_retro_audio`-specific candidate that can classify racket contact, table bounce, and non-target/noise from candidate-centered windows.
-- Evaluate by dense bucket/session and separately against ordinary up/down bounce regression sessions.
+- Use the T0005 candidate dataset and evaluation report as the baseline.
+- Keep the T0005 training choice fixed unless the error analysis proves that a different row policy is necessary.
+- Start from the T0005 dataset, evaluation CSV, and local model report.
+- Inspect holdout errors by `source_rule`, close-event bucket, and confusion class, especially `wrong_class_racket_as_table`, `manual_missed_marker`, and sub-120 ms gaps.
+- Try focused candidate variants only when the error analysis points to a concrete hypothesis.
+- Evaluate every variant by dense bucket/session and separately against ordinary up/down bounce regression sessions.
 - Do not export the candidate into Collector app model JSON in this ticket.
 - Do not build or install an APK in this ticket.
 
@@ -66,19 +70,19 @@ Train and evaluate the first `spel_retro_audio` candidate from T0004 candidate-c
 
 ## Acceptance criteria
 
-- A deterministic command trains the candidate from T0004 candidate rows or a derived dataset.
+- A deterministic command or report identifies the largest T0005 error causes and compares any tested variants against the T0005 baseline.
 - Evaluation reports per-session and per-bucket racket/table recall, false positives, wrong-class table/racket errors, and close-event performance.
 - Ordinary bounce regression results are reported separately and must not be mixed into dense playing aggregate metrics.
 - Candidate remains local unless a later ticket explicitly approves app export.
 
 ## Manual verification
 
-- Inspect `audio_session_2026-05-29_002` candidate errors before and after training.
-- Confirm T0005 does not treat ordinary up/down bounce as the same promotion bucket as Tomas/Stiga dense play.
+- Inspect `audio_session_2026-05-29_002` candidate errors before and after any variant.
+- Confirm T0006 does not treat ordinary up/down bounce as the same promotion bucket as Tomas/Stiga dense play.
 
 ## Automated validation
 
-- Run the new or updated training/evaluation command.
+- Run the new or updated error-analysis/training/evaluation command.
 - Run `npm run validate` if source-of-truth workflow files changed.
 - Run a targeted Python syntax check for any changed Python script.
 

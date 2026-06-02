@@ -52,6 +52,7 @@ data/audio/models/
 | `apps/collector/src/types.ts` | AudioLabel, AudioEvent, AudioSessionFile types |
 | `scripts/preprocess_audio.py` | Feature extraction (35 features per clip) |
 | `scripts/build_playing_retro_candidate_report.py` | Candidate-centered `spel_retro_audio` peak report before training |
+| `scripts/train_playing_retro_audio.py` | Local `spel_retro_audio` candidate training/evaluation, separate from app export |
 | `scripts/train_rf_audio.py` | Model training + evaluation |
 | `scripts/serve_api_audio.py` | Inference API (port 5001) |
 
@@ -103,6 +104,7 @@ pip install -r skills/pingis-audio-classification/requirements.txt
 # After collecting sessions with the app:
 python skills/pingis-audio-classification/scripts/preprocess_audio.py
 python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py
+python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py
 python skills/pingis-audio-classification/scripts/train_rf_audio.py
 
 # Start inference API:
@@ -133,6 +135,23 @@ Training rules:
 - Report metrics by bucket, not only aggregate accuracy or macro F1.
 - Promotion requires no unacceptable regression on ordinary bounce, even when a
   Stiga/Tomas or dense-playing bucket improves.
+
+## Playing Retro Audio
+
+`spel_retro_audio` is a separate post-recording playing-mode audio path. It is
+not the live `studs_live` model and must not be exported into Collector app JSON
+without a dedicated ticket.
+
+Current local workflow:
+- `build_playing_retro_candidate_report.py` matches saved app candidates and
+  replay peaks against reviewed racket/table truth for diagnostics.
+- `train_playing_retro_audio.py` trains a local RandomForest candidate from all
+  matchable saved app candidate peaks plus manually reviewed missed markers.
+- Unmatched app candidates become `non_target` rows with lower sample weight.
+- Replay-generated peaks stay diagnostic in T0005 and are not multiplied into
+  training rows by timing config.
+- Ordinary up/down bounce is evaluated as a separate regression slice; it is not
+  mixed into dense playing metrics.
 
 ## Collecting Data
 
