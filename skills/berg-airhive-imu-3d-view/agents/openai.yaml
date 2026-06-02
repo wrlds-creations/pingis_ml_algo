@@ -1,4 +1,0 @@
-interface:
-  display_name: "BERG AirHive IMU 3D View"
-  short_description: "Integrate BERG AirHive IMUs into 3D apps"
-  default_prompt: "Use $berg-airhive-imu-3d-view to integrate a BERG AirHive sensor, parse its BLE IMU stream, reproduce the skatingbergs baseline orientation behavior, and drive my own 3D object from the resulting quaternion."

@@ -78,7 +78,6 @@ SCENARIO_BREAKDOWN_IDS = [
     "racket_other_bounces",
     "racket_fast",
     "playing_dense_audio",
-    "playing_dense_imu",
     "table_bounce",
     "table_noisy",
     "floor_bounce",

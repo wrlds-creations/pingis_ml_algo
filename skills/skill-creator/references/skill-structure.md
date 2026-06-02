@@ -11,7 +11,7 @@ Use progressive disclosure:
 ## Good Skill Names
 
 - `aws-project-infrastructure`
-- `berg-airhive-ble-imu`
+- `pingis-audio-classification`
 - `github-ci-fix`
 - `react-native-ui-system`
 

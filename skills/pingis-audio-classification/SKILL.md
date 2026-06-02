@@ -107,6 +107,31 @@ python skills/pingis-audio-classification/scripts/train_rf_audio.py
 python skills/pingis-audio-classification/scripts/serve_api_audio.py
 ```
 
+## New Audio Training Intake
+
+Before pulling or training on a new audio file/session, ask Love for missing
+metadata instead of guessing. Do not treat a new file as broadly trainable until
+the answers are clear enough to tag and evaluate it correctly.
+
+Required questions:
+- Is this session trainable ground truth, diagnostic-only, or holdout/replay-only?
+- Which bucket should it evaluate: ordinary vertical racket bounce, dense
+  racket+table playing, Stiga-office/Tomas-style hard stroke sounds, table,
+  floor, noise/speech/music, or another bucket?
+- Was the impact style ordinary up/down bounce, normal play, hard stroke-like
+  contact, fast dense sequence, or mixed?
+- What environment/background applies: room, table/surface, background noise,
+  phone/mic placement, device, and recorder/player when known?
+- Should this session be allowed to influence the ordinary bounce detector, or
+  only the domain-specific bucket until it passes cross-bucket replay?
+
+Training rules:
+- Tag sessions with explicit scenario/domain metadata before preprocessing.
+- Keep diagnostic and unfinished review sessions excluded from training.
+- Report metrics by bucket, not only aggregate accuracy or macro F1.
+- Promotion requires no unacceptable regression on ordinary bounce, even when a
+  Stiga/Tomas or dense-playing bucket improves.
+
 ## Collecting Data
 
 Aim for **30+ clips per class**. Recording tips:

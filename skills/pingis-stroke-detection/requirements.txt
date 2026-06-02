@@ -1,30 +1,13 @@
-# Pingis Stroke Detection — Python Dependencies
+# Pingis Video Stroke Detection - Python Dependencies
 #
-# Install everything:
+# Install:
 #   pip install -r skills/pingis-stroke-detection/requirements.txt
-#
-# Phase 1 (data collection + Random Forest):
-#   pip install bleak pynput numpy pandas scikit-learn matplotlib scipy joblib flask
-#
-# Phase 2 (1D CNN + TFLite export):
-#   pip install tensorflow
 
-# ── BLE data collection ───────────────────────────────────────────────────────
-bleak>=0.21.0          # Cross-platform BLE for Python (Windows/Mac/Linux)
-pynput>=1.7.6          # Keyboard listener for real-time labeling
-
-# ── Core ML stack ─────────────────────────────────────────────────────────────
 numpy>=1.24.0
 pandas>=2.0.0
 scikit-learn>=1.3.0
 scipy>=1.11.0
-joblib>=1.3.0          # Model serialization (included with sklearn but explicit is safer)
-
-# ── Visualization ─────────────────────────────────────────────────────────────
+joblib>=1.3.0
 matplotlib>=3.7.0
-
-# ── Inference API ─────────────────────────────────────────────────────────────
-flask>=3.0.0
-
-# ── Phase 2: CNN + TFLite (install separately when ready) ────────────────────
-# tensorflow>=2.15.0
+opencv-python>=4.9.0
+mediapipe>=0.10.14
