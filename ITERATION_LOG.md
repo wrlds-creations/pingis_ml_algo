@@ -204,6 +204,8 @@ Current binary training strategy:
 | 2026-05-12 | `audio candidate with high-music racket` | Added `audio_session_2026-05-12_004`, retrained both audio models, and compared against the already-exported 05-12 pair | No | Candidate trained locally but not exported because overall 4-class and binary macro-F1 were lower than the active app artifacts |
 | 2026-05-12 | `audio candidate with sessions 005/006` | Added high-music racket, noisy floor/noise, clap/noise, and imported iPhone racket audio, then retrained 4-class and binary contact candidates | No | Candidate trained locally but not exported because it improves some class metrics while weakening overall validation balance |
 
+| 2026-06-02 | T0012 | Built and installed Review-only `spel_retro_audio` APK | Built from clean commit `52cfbb8` in short worktree `C:\st12` so older unstaged local changes were not bundled. The APK includes the T0011 manual `Spel-retro audio` Review panel and still leaves `audio_model.json`, `audio_contact_model.json`, and `studs_live` unchanged. | `npm ci`, `npx tsc --noEmit`, root `npm run validate`, forced `:app:createBundleReleaseJsAndAssets --rerun-tasks`, Gradle `assembleRelease`, bundle string verification, `adb install -r`, app launch, and `pidof` passed. Motorola `ZY22L6NDHV` last update time `2026-06-02 15:27:29`; APK SHA256 `3422CC2A34A0DAF31BDF03F89FF9CDE4BC2B0CDA7C972C0579D46B5B6C0D5A50`. | Device-test a playing-mode Review: press `Kör retro`, inspect separate retro counts/pins, and confirm Save truth is unchanged. T0013 should add generated candidate surfacing for the 15 missed Tomas/Stiga markers. |
+
 ## Data Collection History
 
 | Date | Round | Data type | Count | Notes |
