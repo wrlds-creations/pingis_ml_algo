@@ -51,6 +51,7 @@ data/audio/models/
 | `apps/collector/src/AudioCollectionScreen.tsx` | Android recording UI |
 | `apps/collector/src/types.ts` | AudioLabel, AudioEvent, AudioSessionFile types |
 | `scripts/preprocess_audio.py` | Feature extraction (35 features per clip) |
+| `scripts/build_playing_retro_candidate_report.py` | Candidate-centered `spel_retro_audio` peak report before training |
 | `scripts/train_rf_audio.py` | Model training + evaluation |
 | `scripts/serve_api_audio.py` | Inference API (port 5001) |
 
@@ -101,6 +102,7 @@ pip install -r skills/pingis-audio-classification/requirements.txt
 
 # After collecting sessions with the app:
 python skills/pingis-audio-classification/scripts/preprocess_audio.py
+python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py
 python skills/pingis-audio-classification/scripts/train_rf_audio.py
 
 # Start inference API:

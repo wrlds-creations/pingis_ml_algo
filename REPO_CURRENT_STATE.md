@@ -7,10 +7,10 @@ Use this file as the living snapshot of what actually exists in the repository. 
 - Date: `2026-06-02`
 - Current branch: `codex/video-stroke-test`
 - Current phase: `Audio/video stabilization with playing-retro audio next`
-- Current status: `Retired IMU/AirHive workflow files removed; next active ticket is candidate-centered playing-retro audio reporting`
-- Current ticket: `T0004`
-- Last completed ticket: `T0003`
-- Recommended next ticket: `T0004-build-playing-retro-candidate-peaks`
+- Current status: `T0004 candidate-centered playing-retro audio report built; next active ticket is training/evaluating from those rows`
+- Current ticket: `T0005`
+- Last completed ticket: `T0004`
+- Recommended next ticket: `T0005-train-playing-retro-audio-candidates`
 
 ## Current Structure
 
@@ -32,8 +32,9 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 | Command | Purpose | Last Known Result |
 |---|---|---|
-| `npm run validate` | Root WRLDS template, skill, and AWS metadata validation | `Passed 2026-06-02 after T0003 cleanup` |
+| `npm run validate` | Root WRLDS template, skill, and AWS metadata validation | `Passed 2026-06-02 after T0004 report` |
 | `cd apps/collector && npx tsc --noEmit` | Collector TypeScript validation | `Passed 2026-06-01 after review pin cleanup` |
+| `python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py` | T0004 candidate-centered playing-retro audio report | `Passed 2026-06-02 on Tomas 05-28/05-29 sessions` |
 | `python -m py_compile <script>` | Targeted Python syntax check for changed scripts | `Run per ticket when Python changes` |
 
 ## Completed Tickets
@@ -43,18 +44,18 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 | `T0001` | Adopt stricter WRLDS ticket workflow for this repo | `2026-06-02` | Added `REPO_CURRENT_STATE.md` and `FOLLOWUPS.md`, upgraded `CODEX_TASK.md`, and updated root workflow instructions |
 | `T0002` | Refresh docs for audio/video-only scope | `2026-06-02` | Removed IMU/AirHive from active project context and marked sensor specs/workflows as legacy |
 | `T0003` | Remove retired IMU/AirHive workflow files | `2026-06-02` | Deleted obsolete AirHive skills/specs and converted stroke skill to video-only workflow |
+| `T0004` | Build candidate-centered `spel_retro_audio` report/dataset step | `2026-06-02` | Added deterministic report script and generated local row/summary outputs from saved app candidates plus replay peaks |
 
 ## Current Ticket
 
 | Ticket | Goal | Status | Notes |
 |---|---|---|---|
-| `T0004` | Build candidate-centered `spel_retro_audio` report/dataset step | `Ready` | No model training, app export, APK build, or video work in this ticket |
+| `T0005` | Train and evaluate `spel_retro_audio` candidates from candidate-centered rows | `Ready` | Use T0004 row/summary outputs; no app export or APK until replay gates are explicitly accepted |
 
 ## Confirmed Next Tickets
 
 | Ticket | Goal | Notes |
 |---|---|---|
-| `T0005` | Train and evaluate `spel_retro_audio` candidates from candidate-centered rows | Requires T0004 report/dataset output |
 | `T0006` | Integrate `spel_retro_audio` behind a separate Review retro path | Only after T0005 passes replay gates |
 | `T0007` | Revisit video-assisted FH/BH fusion after audio retro is stable | Keep video paused until audio is useful |
 
@@ -69,10 +70,10 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 ## Validation Status
 
-- Build: `Not run for T0003; no app build needed`
-- Tests: `npm run validate` passed for T0003 on 2026-06-02
-- Lint: `git diff --check` passed for T0003 cleanup on 2026-06-02
-- Manual verification: `Active docs searched for retired IMU/AirHive references; remaining active references are retired/not-active notes or the open app cleanup follow-up`
+- Build: `Not run for T0004; no app build needed`
+- Tests: `npm run validate`, T0004 full report command, and targeted Python syntax checks passed on 2026-06-02
+- Lint: `git diff --check` passed for T0004 on 2026-06-02
+- Manual verification: `T0004 report generated 4317 row-level records and 21 summary rows; audio_session_2026-05-29_002 has close-event rows across under-80 ms, 80-119 ms, 120-179 ms, and 180-300 ms buckets`
 
 ## Known Issues Summary
 
@@ -80,6 +81,7 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 - `studs_live`, `spel_retro_audio`, and `video_stroke_retro` need separate ticket scopes to avoid model/config bleed.
 - IMU/AirHive workflow docs and skill scripts were removed from active scope; remaining app labels/code paths should be treated as legacy unless a ticket explicitly removes or renames them.
 - `audio_session_2026-05-29_002` improves dense Tomas backhand replay with a local candidate but is not safe to promote to ordinary bounce.
+- T0004 app-saved candidate rows count all saved model candidates, including hidden analysis-only candidates, so T0005 must decide whether training rows use all matchable peaks or only review-relevant/accepted peaks.
 
 ## Open Questions
 
