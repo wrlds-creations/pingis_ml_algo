@@ -5,12 +5,12 @@ Use this file as the living snapshot of what actually exists in the repository. 
 ## Snapshot
 
 - Date: `2026-06-02`
-- Current branch: `codex/t0010-playing-retro-audio-review-replay-ui`
+- Current branch: `codex/t0011-playing-retro-audio-review-ui-apk`
 - Current phase: `Audio-first playing-retro Review integration`
-- Current status: `T0010 app-export replay passed on saved Tomas/Stiga Review candidates; next step is visible Review candidate surfacing/generation before APK`
-- Current ticket: `T0011`
-- Last completed ticket: `T0010`
-- Recommended next ticket: `T0011-playing-retro-audio-review-ui-apk`
+- Current status: `T0011 adds a visible manual spel-retro Review panel for saved-candidate reclassification; APK build/install is ready only after Love approves`
+- Current ticket: `T0012`
+- Last completed ticket: `T0011`
+- Recommended next ticket: `T0012-playing-retro-audio-review-apk-install`
 
 ## Current Structure
 
@@ -33,7 +33,7 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 | Command | Purpose | Last Known Result |
 |---|---|---|
 | `npm run validate` | Root WRLDS template, skill, and AWS metadata validation | `Passed 2026-06-02 after T0007 documentation update` |
-| `cd apps/collector && npx tsc --noEmit` | Collector TypeScript validation | `Passed 2026-06-02 after T0009 playing-retro helper` |
+| `cd apps/collector && npx tsc --noEmit` | Collector TypeScript validation | `Passed 2026-06-02 after T0011 playing-retro Review panel` |
 | `python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py` | T0004 candidate-centered playing-retro audio report | `Passed 2026-06-02 on Tomas 05-28/05-29 sessions` |
 | `python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py` | T0005 local `spel_retro_audio` candidate train/eval | `Passed 2026-06-02; 4,028 rows, holdout accuracy 0.759` |
 | `python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_variants.py` | T0006 focused variant comparison | `Passed 2026-06-02; selected safe one-window candidate, holdout racket recall 0.623` |
@@ -58,19 +58,21 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 | `T0008` | Cross-session validate T0007 `spel_retro_audio` candidate | `2026-06-02` | Selected T0007 variant passed requested Tomas/Stiga holdouts: racket recall 0.910 / 0.939 / 0.896 and no table/non-target regression versus T0006; no app export/APK |
 | `T0009` | Export and stage separate Review-only `spel_retro_audio` app path | `2026-06-02` | Added `playing_retro_audio_model.json`, app helper `playingRetroAudio.ts`, export/parity scripts, and validation; normal `audio_model.json`, `audio_contact_model.json`, `studs_live`, and APK artifacts unchanged |
 | `T0010` | Replay separate app export on saved Tomas/Stiga Review candidates | `2026-06-02` | Added deterministic replay script using `playing_retro_audio_model.json`: 643 saved candidates scored 0.978 accuracy, but 15 reviewed missed markers remain unclassifiable without candidate surfacing/generation |
+| `T0011` | Add visible manual `spel_retro_audio` Review panel | `2026-06-02` | Review now has a separate `Spel-retro audio` button for playing-mode reviews. It reclassifies current saved candidates, shows racket/table/non-target counts, and draws separate retro pins without changing markers, save truth, `studs_live`, `audio_model.json`, or APK artifacts |
 
 ## Current Ticket
 
 | Ticket | Goal | Status | Notes |
 |---|---|---|---|
-| `T0011` | Wire visible Review path and APK gate for `spel_retro_audio` | `Ready` | T0010 shows reclassification is strong on saved candidates. Next step is Review UI/candidate surfacing so missed markers can be addressed before a Motorola APK test |
+| `T0012` | Build and install Review-only `spel_retro_audio` APK | `Awaiting Love approval` | T0011 is app-ready for a Motorola Review-only test. APK should be built/installed only after Love says to proceed |
 
 ## Confirmed Next Tickets
 
 | Ticket | Goal | Notes |
 |---|---|---|
-| `T0011` | Wire visible Review path and APK gate for `spel_retro_audio` | Keep separate from live/studs; decide whether to reclassify saved candidates only or add retro candidate generation for missed markers |
-| `T0012` | Revisit video-assisted FH/BH fusion after audio retro is stable | Keep video paused until audio is useful |
+| `T0012` | Build and install Review-only `spel_retro_audio` APK | Do not change `audio_model.json` or `studs_live`; test only the manual Review panel |
+| `T0013` | Add playing-retro candidate generation/surfacing for missed markers | Separate from reclassification; target the 15 missed Tomas/Stiga markers without flooding false positives |
+| `T0014` | Revisit video-assisted FH/BH fusion after audio retro is stable | Keep video paused until audio is useful |
 
 ## Dependencies
 
@@ -83,22 +85,22 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 ## Validation Status
 
-- Build: `Not run for T0010; no APK requested`
-- Tests: `python .../validate_playing_retro_audio_app_export.py`, `python .../replay_playing_retro_audio_app_export.py`, targeted `py_compile`, and root `npm run validate` passed on 2026-06-02
-- Lint: `git diff --check` passed for T0010 on 2026-06-02
-- Manual verification: `T0010 replay loads apps/collector/src/models/playing_retro_audio_model.json, not joblib or audio_model.json. It evaluates saved app candidate timestamps and reports truth-derived close_event_bucket/neighbor_sequence only as metadata.`
+- Build: `Not run for T0011; APK install requires Love approval`
+- Tests: `cd apps/collector && npx tsc --noEmit`, `python .../validate_playing_retro_audio_app_export.py`, `python .../replay_playing_retro_audio_app_export.py`, and root `npm run validate` passed on 2026-06-02
+- Lint: `git diff --check` passed for T0011 on 2026-06-02
+- Manual verification: `T0011 Review panel calls only the separate playingRetroAudio helper and does not mutate markers or saved model candidates. rfInference.ts still imports audio_model.json for normal audio.`
 
 ## Known Issues Summary
 
 - Current working tree already contains many pre-existing app/model/video changes from earlier work; ticket work must avoid staging or reverting unrelated files.
 - `studs_live`, `spel_retro_audio`, and `video_stroke_retro` need separate ticket scopes to avoid model/config bleed.
 - IMU/AirHive workflow docs and skill scripts were removed from active scope; remaining app labels/code paths should be treated as legacy unless a ticket explicitly removes or renames them.
-- `spel_retro_audio` now has a separate app JSON export, opt-in helper, and deterministic replay script, but it is not wired into a visible Review UI or APK yet.
+- `spel_retro_audio` now has a separate app JSON export, opt-in helper, deterministic replay script, and visible manual Review panel, but it is not APK-installed yet.
 - T0005 trains from all matchable saved app candidates plus manually missed reviewed markers; replay-generated T0004 candidates remain diagnostic, not training rows.
 - Ordinary up/down bounce regression for T0007 is advisory only because the old ordinary rows do not preserve exact multi-window event timestamps; do not use it as promotion evidence for `studs_live`.
 
 ## Open Questions
 
 - Should future ticket branches be created from current dirty `codex/video-stroke-test` or from a cleaned approved base?
-- Should T0011 install a Review-only reclassification APK first, or add retro candidate generation so the 15 missed Tomas/Stiga markers can also be surfaced?
+- Should T0012 build/install the Review-only reclassification panel now, or should T0013 candidate generation happen before Motorola testing?
 - Should legacy IMU app surfaces be removed immediately or left as hidden/internal historical code until the next UI cleanup?

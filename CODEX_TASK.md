@@ -6,33 +6,29 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0011`
+`T0012`
 
 ## Branch
 
-`codex/t0011-playing-retro-audio-review-ui-apk`
+`codex/t0012-playing-retro-audio-review-apk-install`
 
 ## Goal
 
-Wire the T0009/T0010 `spel_retro_audio` path into a visible, separate post-recording Review flow and decide/build the first APK only after the Review behavior is useful enough to test on Motorola.
+Build and install a Motorola test APK for the T0011 manual `Spel-retro audio` Review panel only after Love explicitly approves the APK step.
 
 ## Dependencies
 
 - T0009 exported separate app model `apps/collector/src/models/playing_retro_audio_model.json`.
-- T0009 added opt-in app helper `apps/collector/src/playingRetroAudio.ts`.
 - T0010 replay passed on saved Tomas/Stiga Review candidates: 643 saved candidates, accuracy `0.978`, racket recall `0.987`, table recall `0.988`, non-target recall `0.948`.
-- T0010 also showed 15 reviewed missed markers in the target sessions are not classifiable by saved-candidate replay because no saved app candidate exists at those timestamps.
+- T0011 added a visible, manual `Spel-retro audio` Review panel that reclassifies current saved candidates and draws separate retro pins without mutating marker truth.
+- T0011 TypeScript, export parity, replay, and root validation passed.
 - Existing live/current app audio still uses `apps/collector/src/models/audio_model.json` through the existing normal path.
 
 ## Allowed Areas
 
-- `apps/collector/src/playingRetroAudio.ts`
-- `apps/collector/src/AudioTakeReviewScreen.tsx`
-- `apps/collector/src/audioReview.ts`
-- `apps/collector/src/types.ts`
-- New clearly named `apps/collector/src/*playingRetroAudio*` helper files
-- New clearly named local replay/check scripts under `skills/pingis-audio-classification/scripts/`
-- Android APK/build files only if Love explicitly asks to build after the Review path is ready
+- Android build commands and build outputs needed for release APK
+- APK verification commands
+- Device install commands only after Love approves
 - `PROJECT_CONTEXT.md`
 - `DECISIONS.md`
 - `ITERATION_LOG.md`
@@ -46,46 +42,44 @@ Wire the T0009/T0010 `spel_retro_audio` path into a visible, separate post-recor
 - `apps/collector/src/models/audio_contact_model.json`
 - Existing `studs_live` app behavior or live detector thresholds
 - Video-stroke model files
-- Raw reviewed session JSON labels, except for metadata fixes explicitly approved by Love
+- Raw reviewed session JSON labels
 
 ## Requirements
 
-- Keep `spel_retro_audio` visibly separate from normal Review candidates and live bounce.
-- Decide whether the first APK should only reclassify saved candidates or also generate/surface additional retro candidates for missed markers.
-- If adding candidate generation, keep it post-recording only and report how many new candidates it surfaces near reviewed missed markers.
-- Preserve normal Review behavior unless the separate retro path is explicitly invoked.
-- Keep candidate context based on app candidate timestamps or explicitly documented generated retro candidate timestamps, never human truth timestamps.
-- Keep truth-derived fields such as `close_event_bucket` and `neighbor_sequence` out of inference features.
-- Do not build or install an APK until Love gives explicit go-ahead after the Review behavior is implemented and validated.
+- Ask/confirm with Love before building or installing if approval is not already explicit in the latest message.
+- Build a release APK that includes the T0011 manual `Spel-retro audio` Review panel.
+- Verify the APK bundle still contains `playing_retro_audio_model.json`.
+- Verify normal `audio_model.json` and `audio_contact_model.json` are not changed by this ticket.
+- Install on Motorola only after Love explicitly approves installation.
+- Do not promote `spel_retro_audio` into `studs_live`.
 
 ## Non-Goals
 
-- No `studs_live` promotion.
+- No candidate generation/surfacing for missed markers in this ticket.
 - No ordinary up/down bounce model change.
-- No video/FH-BH fusion yet.
+- No video/FH-BH fusion.
 - No broad UI redesign.
 
 ## Acceptance Criteria
 
-- Review has a clearly separate way to run or show `spel_retro_audio` output.
-- Normal Review and live bounce paths still use their existing models/configs by default.
-- The path can be tested against the T0010 Tomas/Stiga sessions before APK build.
-- Validation includes TypeScript and T0010 replay/parity commands.
-- APK build/install is either completed with Love's explicit approval or intentionally deferred with a clear reason.
+- Release APK builds successfully, or build is intentionally deferred because Love has not approved.
+- If installed, Motorola receives the APK and launches.
+- APK verification confirms the separate `playing_retro_audio_model.json` is present.
+- Docs record build/install status and APK hash if built.
 
 ## Manual Verification
 
-- Confirm normal Review candidates still render as before when the new retro path is not invoked.
-- Confirm `rfInference.ts` still imports only `audio_model.json` for normal audio.
-- Confirm the retro path does not modify reviewed marker truth automatically.
+- In Review for a playing-mode audio take, press `Kör retro` and confirm separate retro counts/pins appear.
+- Confirm saving without pressing `Kör retro` behaves as normal.
+- Confirm pressing `Kör retro` does not automatically create confirmed training markers.
 
 ## Automated Validation
 
+- Run `cd apps/collector && npx tsc --noEmit`.
 - Run `python skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py`.
 - Run `python skills/pingis-audio-classification/scripts/replay_playing_retro_audio_app_export.py`.
-- Run targeted Python syntax checks for changed Python scripts.
-- Run `cd apps/collector && npx tsc --noEmit` if app code changes.
-- Run `npm run validate` if source-of-truth workflow files changed.
+- Run root `npm run validate` if source-of-truth workflow files changed.
+- Run the existing Gradle release build/verification commands if APK build is approved.
 
 ## Completion Report Expected
 
@@ -94,10 +88,9 @@ Codex should report:
 - Summary of changes
 - Files changed
 - Commands run
-- Replay/session metrics generated
 - Validation results
-- Manual verification performed or still needed
+- APK hash and install status if built
+- Manual verification still needed on Motorola
 - Docs updated or still needed
-- APK build/install status
 - Risks or unresolved questions
 - Follow-up tickets for out-of-scope work
