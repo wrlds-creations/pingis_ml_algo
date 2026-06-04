@@ -7,7 +7,7 @@ Use this file for known issues, deferred improvements, and out-of-scope findings
 | ID | Source Ticket | Type | Description | Priority | Owner | Status |
 |---|---|---|---|---|---|---|
 | `F0001` | `T0001` | `Workflow` | Decide whether to create future ticket branches from the current dirty `codex/video-stroke-test` branch or first establish a clean approved base. | `Medium` | `Love + Codex` | `Open` |
-| `F0013` | `T0025` | `Model/Training` | Complete the 2026-06-04 playing-retro improvement sequence: T0027 replay/tune, T0028 export/build/install if safe, and T0029 candidate/peak recovery only if true candidate-generation gaps remain material. T0025 audit found classification/threshold misses, and T0026 trained the local 06-04 candidate. | `High` | `Codex` | `T0027 next` |
+| `F0013` | `T0025` | `Model/Training` | Complete the 2026-06-04 playing-retro improvement sequence: T0028 export/build/install after T0027 selected T0026 safely, and T0029 candidate/peak recovery only if later reviewed clips show true candidate-generation gaps remain material. T0025 audit found classification/threshold misses, T0026 trained the local 06-04 candidate, and T0027 replay selected racket threshold `0.0`, table threshold `0.45`, and 80 ms same-label dedupe. | `High` | `Codex` | `T0028 next` |
 
 ## Resolved Followups
 
