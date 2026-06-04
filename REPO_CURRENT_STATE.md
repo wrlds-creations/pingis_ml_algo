@@ -5,12 +5,12 @@ Use this file as the living snapshot of what actually exists in the repository. 
 ## Snapshot
 
 - Date: `2026-06-04`
-- Current branch: `codex/t0027-playing-retro-replay-tune-2026-06-04`
+- Current branch: `codex/t0028-playing-retro-export-build-install-2026-06-04`
 - Current phase: `Per-video playing-retro audio release loop`
-- Current status: `T0027 replay/tune of T0026 spel_retro_audio candidate completed`
-- Current ticket: `T0027`
-- Last completed ticket: `T0027`
-- Recommended next ticket: `T0028-export-build-install-playing-retro-2026-06-04`
+- Current status: `T0028 exported, built, and installed improved spel_retro_audio APK`
+- Current ticket: `T0028`
+- Last completed ticket: `T0028`
+- Recommended next ticket: `T0029-audit-next-T0028-reviewed-playing-session`
 
 ## Current Structure
 
@@ -32,15 +32,15 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 | Command | Purpose | Last Known Result |
 |---|---|---|
-| `npm run validate` | Root WRLDS template, skill, and AWS metadata validation | `Passed 2026-06-04 for T0027` |
-| `cd apps/collector && npx tsc --noEmit` | Collector TypeScript validation | `Passed 2026-06-04 with T0024 retrained playing-retro export` |
+| `npm run validate` | Root WRLDS template, skill, and AWS metadata validation | `Passed 2026-06-04 for T0028` |
+| `cd apps/collector && npx tsc --noEmit` | Collector TypeScript validation | `Passed 2026-06-04 with T0028 improved playing-retro export` |
 | `python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py` | T0004 candidate-centered playing-retro audio report | `Passed 2026-06-02 on Tomas 05-28/05-29 sessions` |
 | `python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py` | T0005 local `spel_retro_audio` candidate train/eval | `Passed 2026-06-02; 4,028 rows, holdout accuracy 0.759` |
 | `python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_variants.py` | T0006 focused variant comparison | `Passed 2026-06-02; selected safe one-window candidate, holdout racket recall 0.623` |
 | `python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_multi_window.py` | T0007 multi-window/context variant comparison | `Passed 2026-06-02; selected multi-window/context candidate, holdout racket recall 0.896` |
 | `python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_cross_session.py` | T0008 cross-session validation | `Passed 2026-06-02; selected T0007 variant passes requested Tomas/Stiga holdouts` |
-| `python skills/pingis-audio-classification/scripts/export_playing_retro_audio_model_json.py` | Separate app JSON export for Review-only `spel_retro_audio` | `Passed 2026-06-04; exported T0022 197-feature / 450-tree playing-retro model to apps/collector/src/models/playing_retro_audio_model.json` |
-| `python skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py` | Export parity check against selected joblib model | `Passed 2026-06-04; feature order, labels, windows, model version, and review thresholds passed` |
+| `python skills/pingis-audio-classification/scripts/export_playing_retro_audio_model_json.py` | Separate app JSON export for Review-only `spel_retro_audio` | `Passed 2026-06-04; exported T0026 197-feature / 450-tree / 164120-node playing-retro model with T0027 thresholds to apps/collector/src/models/playing_retro_audio_model.json` |
+| `python skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py` | Export parity check against selected joblib model | `Passed 2026-06-04; feature order, labels, windows, T0026 model version, and thresholds racket 0.0 / table 0.45 / dedupe 80 passed` |
 | `python skills/pingis-audio-classification/scripts/replay_playing_retro_audio_app_export.py` | T0010 controlled replay of app export on saved Review candidates | `Passed 2026-06-02; 643 saved Tomas/Stiga candidates, acc 0.978, racket 0.987, table 0.988, non-target 0.948` |
 | `python skills/pingis-audio-classification/scripts/replay_playing_retro_recovery_candidates.py` | T0014 conservative dense recovery replay on Tomas/Stiga target sessions | `Passed 2026-06-03; baseline missed 15, visible recovery 6, recovered 6, wrong class 0, duplicate 0, visible FP 0` |
 | `python skills/pingis-audio-classification/scripts/tune_playing_retro_recovery_thresholds.py` | T0015 threshold/gate sweep for T0016 APK readiness | `Passed 2026-06-03; swept 1,764 gates, selected current T0014 gate, recovered 6, wrong class 0, duplicate 0, visible FP 0` |
@@ -49,8 +49,8 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 | `python skills/pingis-audio-classification/scripts/train_playing_retro_audio_t0022.py` | T0022 retrain local `spel_retro_audio` candidate with 2026-06-03 data | `Passed 2026-06-03; trained playing_retro_audio_rf_v2026_06_03_t0022_multi_window_context from 4,324 rows across 17 sessions` |
 | `python skills/pingis-audio-classification/scripts/replay_playing_retro_audio_t0023.py` | T0023 replay/tune T0022 candidate versus T0020 baseline | `Passed 2026-06-03; selected racket threshold 0.0, table threshold 0.5, marker replay TP/wrong/FP/missed 576/22/24/118 -> 687/1/8/28` |
 | `python skills/pingis-audio-classification/scripts/train_playing_retro_audio_t0026.py` | T0026 retrain local `spel_retro_audio` candidate with 2026-06-04 data | `Passed 2026-06-04; trained playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context from 4,598 rows across 18 sessions` |
-| `cd apps/collector/android && .\gradlew.bat :app:createBundleReleaseJsAndAssets --rerun-tasks` | Forced React Native release bundle regeneration | `Passed 2026-06-04 for T0024` |
-| `cd apps/collector/android && .\gradlew.bat assembleRelease` | Android release APK build | `Passed 2026-06-04 for T0024; APK SHA256 5C03823425158A88A22A1CD4433C1B1ADE179B58E9B1E6634C966BCDC2C9DF61` |
+| `cd apps/collector/android && .\gradlew.bat :app:createBundleReleaseJsAndAssets --rerun-tasks` | Forced React Native release bundle regeneration | `Passed 2026-06-04 for T0028` |
+| `cd apps/collector/android && .\gradlew.bat assembleRelease` | Android release APK build | `Passed 2026-06-04 for T0028; APK SHA256 7AC97A6C4AA83A939941DD52E16F4C2C3627AD5AAA06666878F381290BB1D2AA` |
 | `python skills/pingis-audio-classification/scripts/audit_playing_retro_review_session_t0025.py` | T0025 audit of first T0024-reviewed 2026-06-04 playing session | `Passed 2026-06-04; 165 markers, 35 manual additions, manual buckets 21 non_target / 7 wrong-class / 6 table-threshold / 1 timing, 0 material candidate-generation gaps` |
 | `python skills/pingis-audio-classification/scripts/replay_playing_retro_audio_t0027.py` | T0027 replay/tune T0026 candidate versus installed T0024 baseline | `Passed 2026-06-04; selected T0026 with racket threshold 0.0, table threshold 0.45, marker replay TP/wrong/FP/missed 706/22/26/153 -> 844/1/9/36` |
 | `python -m py_compile <script>` | Targeted Python syntax check for changed scripts | `Run per ticket when Python changes` |
@@ -88,20 +88,21 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 | `T0025` | Audit first T0024-reviewed 2026-06-04 playing session | `2026-06-04` | Pulled `audio_session_2026-06-04_001` and generated T0025 audit reports. Final truth is 165 markers (80 racket, 85 table), with 130 auto and 35 manual additions. Manual additions are mostly classification/threshold misses, not peak-generation gaps: 21 `non_target`, 7 wrong racket/table class, 6 table predictions below threshold, and 1 timing/dense case. No retrain/export/APK/`studs_live` change |
 | `T0026` | Retrain `spel_retro_audio` with 2026-06-04 data | `2026-06-04` | Added `train_playing_retro_audio_t0026.py` and trained local candidate `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context` from 4,598 rows across 18 playing sessions. 06-04 contributes 274 rows; final in-sample focus corrects 26/30 baseline target rows called `non_target` and 6/6 manual-missed rows. No app JSON/APK/`studs_live` change |
 | `T0027` | Replay/tune T0026 against installed T0024 baseline | `2026-06-04` | Added `replay_playing_retro_audio_t0027.py`; selected T0026 model with racket threshold `0.0`, table threshold `0.45`, and 80 ms same-label dedupe after replay improved marker TP/wrong/FP/missed from `706/22/26/153` to `844/1/9/36`. On 06-04 it improved `130/0/2/35` to `154/0/0/11`. No app JSON/APK/`studs_live` change |
+| `T0028` | Export, build, and install improved playing-retro APK | `2026-06-04` | Exported T0026 `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context` into `playing_retro_audio_model.json`, applied racket threshold `0.0`, table threshold `0.45`, and 80 ms same-label dedupe metadata, built release APK, and installed SHA256 `7AC97A6C4AA83A939941DD52E16F4C2C3627AD5AAA06666878F381290BB1D2AA` on Motorola `ZY22L6NDHV` |
 
 ## Current Ticket
 
 | Ticket | Goal | Status | Notes |
 |---|---|---|---|
-| `T0028` | Export, build, and install improved playing-retro APK | `Recommended Next` | Export T0026 candidate selected by T0027, apply racket threshold `0.0`, table threshold `0.45`, validate parity/build, and install on Motorola if clean |
+| `T0028` | Export, build, and install improved playing-retro APK | `Completed` | T0026 candidate selected by T0027 is exported, parity-checked, built into release APK, installed on Motorola, and ready for the next reviewed playing clip |
 
 ## Confirmed Next Tickets
 
 | Ticket | Goal | Notes |
 |---|---|---|
-| `T0028` | Export, build, and install improved playing-retro APK | Export T0026 candidate `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context`, apply T0027 thresholds racket `0.0` / table `0.45`, validate app parity, build release APK, and install on Motorola |
-| `T0029` | Revisit playing-retro candidate/peak recovery | Open only if T0025/T0027 show true candidate-generation gaps remain material after retraining |
-| `T0030` | Revisit video-assisted FH/BH fusion after audio retro is stable | Keep video paused until audio review workload and dense hit recovery are good enough |
+| `T0029` | Audit next T0028-reviewed playing session | Love should review and save one new `Ljud + video ML` playing clip on the installed T0028 APK; Codex then pulls the session and audits misses, duplicates, relabels, timing nudges, and candidate-generation gaps before retraining |
+| `T0030` | Revisit playing-retro candidate/peak recovery | Open only if T0029 or later audits show true candidate-generation gaps remain material after the T0028 model/settings |
+| `T0031` | Revisit video-assisted FH/BH fusion after audio retro is stable | Keep video paused until audio review workload and dense hit recovery are good enough |
 
 ## Dependencies
 
@@ -114,20 +115,20 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 ## Validation Status
 
-- Build: `T0024 APK installed on Motorola ZY22L6NDHV at 2026-06-04 09:24:18; SHA256 5C03823425158A88A22A1CD4433C1B1ADE179B58E9B1E6634C966BCDC2C9DF61; app pid 4564`
-- Tests: T0027 Python py_compile passed for `replay_playing_retro_audio_t0027.py`; T0027 replay command passed; root `npm run validate` passed. T0026 Python py_compile passed for `train_playing_retro_audio_t0026.py`; T0026 training command passed. T0025 Python py_compile passed for `audit_playing_retro_review_session_t0025.py`; T0025 audit command passed. T0024 export, app export parity, Collector TypeScript, forced release bundle, and Gradle `assembleRelease` passed on 2026-06-04.
-- Lint: `git diff --check` passed on 2026-06-04 for T0027 touched docs/scripts.
-- Manual verification: `Bundle string verification passed: T0022 model version, spel_retro_audio_review_only, Ljud + video ML, and Video FH/BH were present; Ljudinsamling and Audio plus IMU were absent.`
+- Build: `T0028 APK installed on Motorola ZY22L6NDHV at 2026-06-04 11:30:23; SHA256 7AC97A6C4AA83A939941DD52E16F4C2C3627AD5AAA06666878F381290BB1D2AA; app pid 17665`
+- Tests: T0028 Python py_compile passed for export/parity scripts; export passed; app export parity passed; `cd apps/collector && npx tsc --noEmit` passed; root `npm run validate` passed; forced release bundle and Gradle `assembleRelease` passed. T0027 replay, T0026 training, and T0025 audit commands also passed on 2026-06-04.
+- Lint: `git diff --check` passed on 2026-06-04 for T0028 scoped files.
+- Manual verification: `Bundle string verification passed: T0026 model version, spel_retro_audio_review_only, Ljud + video ML, and Video FH/BH were present; Ljudinsamling and Audio plus IMU were absent.`
 
 ## Known Issues Summary
 
 - Current working tree already contains many pre-existing app/model/video changes from earlier work; ticket work must avoid staging or reverting unrelated files.
 - `studs_live`, `spel_retro_audio`, and `video_stroke_retro` need separate ticket scopes to avoid model/config bleed.
 - IMU/AirHive workflow docs and skill scripts were removed from active scope; remaining app labels/code paths should be treated as legacy unless a ticket explicitly removes or renames them.
-- `spel_retro_audio` now has a separate app JSON export, app helper, deterministic replay scripts, primary Review integration, conservative dense recovery, T0015 replay gates, T0019 single-step loading UX, T0020 same-label 80 ms dedupe plus blue-outline explanation, and the T0024 installed T0022 model/settings. It still does not replace `studs_live`.
+- `spel_retro_audio` now has a separate app JSON export, app helper, deterministic replay scripts, primary Review integration, conservative dense recovery, T0015 replay gates, T0019 single-step loading UX, T0020 same-label 80 ms dedupe plus blue-outline explanation, and the T0028 installed T0026 model/settings. It still does not replace `studs_live`.
 - T0021 showed that most remaining misses on `audio_session_2026-06-03_005` were model `non_target` calls near real events, not raw candidate absence. T0022 retrained a stronger model, T0023 replay selected thresholds, and T0024 installed that selected path.
 - T0025 completed the next per-video audit with `audio_session_2026-06-04_001`: 165 audio markers, 80 racket, 85 table, 130 auto, 35 manual, and 268 model candidates. T0025 found 0 material true candidate-generation gaps; manual additions were mainly model `non_target`, wrong racket/table class, or table-threshold misses, so T0026 should prioritize retraining/classification and T0027 threshold replay before candidate/peak recovery work.
-- T0026 trained local candidate `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context` from 4,598 rows across 18 sessions, adding `audio_session_2026-06-04_001` as playing-retro-only data. T0027 replay selected it over the installed T0024 baseline with racket threshold `0.0`, table threshold `0.45`, and 80 ms same-label dedupe: marker TP/wrong/FP/missed improved `706/22/26/153 -> 844/1/9/36`. It is still not exported; T0028 must export/build/install before Motorola review.
+- T0026 trained local candidate `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context` from 4,598 rows across 18 sessions, adding `audio_session_2026-06-04_001` as playing-retro-only data. T0027 replay selected it over the installed T0024 baseline with racket threshold `0.0`, table threshold `0.45`, and 80 ms same-label dedupe: marker TP/wrong/FP/missed improved `706/22/26/153 -> 844/1/9/36`. T0028 exported/built/installed it; next evaluation should come from one fresh reviewed playing clip on that APK.
 - T0005 trains from all matchable saved app candidates plus manually missed reviewed markers; replay-generated T0004 candidates remain diagnostic, not training rows.
 - Ordinary up/down bounce regression for T0007 is advisory only because the old ordinary rows do not preserve exact multi-window event timestamps; do not use it as promotion evidence for `studs_live`.
 

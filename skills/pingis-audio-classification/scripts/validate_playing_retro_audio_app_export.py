@@ -20,7 +20,7 @@ DEFAULT_MODEL_DIR = (
     / "audio"
     / "models"
     / "playing_retro_candidates"
-    / "playing_retro_audio_rf_v2026_06_02_multi_window_context"
+    / "playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context"
 )
 DEFAULT_APP_MODEL = (
     ROOT_DIR
@@ -51,6 +51,13 @@ REQUIRED_CONTEXT_FEATURES = [
     "ctx_density_600ms",
 ]
 
+EXPECTED_MODEL_VERSION = "playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context"
+REQUIRED_REVIEW_THRESHOLDS = {
+    "racket_contact": 0.0,
+    "table_bounce": 0.45,
+    "same_label_dedupe_ms": 80,
+}
+
 FORBIDDEN_FEATURE_FRAGMENTS = [
     "close_event_bucket",
     "neighbor_sequence",
@@ -65,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Validate playing-retro app model export.")
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
     parser.add_argument("--app-model", default=str(DEFAULT_APP_MODEL))
+    parser.add_argument("--expected-model-version", default=EXPECTED_MODEL_VERSION)
     return parser.parse_args()
 
 
@@ -98,6 +106,17 @@ def main() -> None:
         raise AssertionError("playing-retro export must be marked review-only")
     if metadata.get("normal_audio_model_unchanged") is not True:
         raise AssertionError("export metadata must state normal audio model is unchanged")
+    if metadata.get("model_version") != args.expected_model_version:
+        raise AssertionError(
+            f"Model version mismatch: expected {args.expected_model_version}, "
+            f"got {metadata.get('model_version')}"
+        )
+
+    review_thresholds = metadata.get("review_thresholds", {})
+    for key, expected in REQUIRED_REVIEW_THRESHOLDS.items():
+        actual = review_thresholds.get(key)
+        if actual != expected:
+            raise AssertionError(f"Review threshold mismatch for {key}: expected {expected}, got {actual}")
 
     windows = {item["name"]: item for item in metadata.get("windows", [])}
     for name, expected in REQUIRED_WINDOWS.items():

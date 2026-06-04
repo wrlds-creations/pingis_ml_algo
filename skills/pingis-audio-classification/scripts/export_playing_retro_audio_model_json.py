@@ -26,7 +26,7 @@ DEFAULT_MODEL_DIR = (
     / "audio"
     / "models"
     / "playing_retro_candidates"
-    / "playing_retro_audio_rf_v2026_06_02_multi_window_context"
+    / "playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context"
 )
 DEFAULT_OUT_PATH = (
     ROOT_DIR
@@ -56,6 +56,13 @@ CONTEXT_FEATURE_NAMES = [
     "ctx_density_300ms",
     "ctx_density_600ms",
 ]
+
+REVIEW_THRESHOLDS = {
+    "racket_contact": 0.0,
+    "table_bounce": 0.45,
+    "same_label_dedupe_ms": 80,
+    "source_ticket": "T0027",
+}
 
 TRUTH_DERIVED_FORBIDDEN_PREFIXES = (
     "truth_",
@@ -114,6 +121,7 @@ def build_model_json(model_dir: Path, model_version: str, train_dataset: str) ->
             "total_nodes": total_nodes,
             "windows": WINDOWS,
             "context_feature_names": CONTEXT_FEATURE_NAMES,
+            "review_thresholds": REVIEW_THRESHOLDS,
             "sample_rate_hz": 22050,
             "normal_audio_model_unchanged": True,
         },
@@ -131,11 +139,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-path", default=str(DEFAULT_OUT_PATH))
     parser.add_argument(
         "--model-version",
-        default="playing_retro_audio_rf_v2026_06_02_multi_window_context",
+        default="playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context",
     )
     parser.add_argument(
         "--train-dataset",
-        default="T0007/T0008 app-candidate playing-retro rows, 16 reviewed playing sessions",
+        default=(
+            "T0026 multi-window/context rows from 18 reviewed playing sessions, "
+            "including audio_session_2026-06-03_005 and audio_session_2026-06-04_001"
+        ),
     )
     return parser.parse_args()
 

@@ -7,7 +7,6 @@ Use this file for known issues, deferred improvements, and out-of-scope findings
 | ID | Source Ticket | Type | Description | Priority | Owner | Status |
 |---|---|---|---|---|---|---|
 | `F0001` | `T0001` | `Workflow` | Decide whether to create future ticket branches from the current dirty `codex/video-stroke-test` branch or first establish a clean approved base. | `Medium` | `Love + Codex` | `Open` |
-| `F0013` | `T0025` | `Model/Training` | Complete the 2026-06-04 playing-retro improvement sequence: T0028 export/build/install after T0027 selected T0026 safely, and T0029 candidate/peak recovery only if later reviewed clips show true candidate-generation gaps remain material. T0025 audit found classification/threshold misses, T0026 trained the local 06-04 candidate, and T0027 replay selected racket threshold `0.0`, table threshold `0.45`, and 80 ms same-label dedupe. | `High` | `Codex` | `T0028 next` |
 
 ## Resolved Followups
 
@@ -24,3 +23,4 @@ Use this file for known issues, deferred improvements, and out-of-scope findings
 | `F0010` | `T0020` | T0020 confirmed the blue outline is the linked audio/motion marker state, not a deleted or locked marker, and added that explanation to the playing-retro model info dialog in the installed APK. | `2026-06-03` |
 | `F0011` | `T0021` | T0021 produced a row-level miss/correction analysis for `audio_session_2026-06-03_005`: 13/20 manual additions were near candidates classified as `non_target`, 2 were wrong-class, 2 were true candidate-generation gaps, 1 was hidden by recovery gate, 1 was timing/dense sequence, and 1 was visible but unlinked/deleted. | `2026-06-03` |
 | `F0012` | `T0024` | T0022 retrained `spel_retro_audio` from `audio_session_2026-06-03_005` plus historical playing-dense data, T0023 replay selected racket threshold `0.0` and table threshold `0.5`, and T0024 exported/built/installed the improved review-only model without changing `studs_live`, `audio_model.json`, or `audio_contact_model.json`. | `2026-06-04` |
+| `F0013` | `T0028` | T0025-T0028 completed the 2026-06-04 playing-retro improvement sequence: T0025 audited the reviewed clip, T0026 retrained the local model, T0027 selected racket threshold `0.0` and table threshold `0.45`, and T0028 exported/built/installed the improved model. Candidate/peak recovery remains a later ticket only if fresh reviewed clips show material true candidate-generation gaps. | `2026-06-04` |
