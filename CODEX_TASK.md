@@ -6,37 +6,36 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0028`
+`T0029`
 
 ## Branch
 
-`codex/t0028-playing-retro-export-build-install-2026-06-04`
+`codex/t0029-playing-retro-review-start-profiling`
 
 ## Status
 
-`Completed`
+`Active`
 
 ## Goal
 
-Export the T0026 `spel_retro_audio` candidate selected by T0027 into the separate Collector app JSON, apply the T0027 review thresholds, validate parity/build, and install a release APK on Motorola.
+Profile why fresh `Ljud + video ML` playing imports take too long before the audio waveform/review markers appear, without changing model quality, marker output, training data, or app review semantics.
 
-This ticket promotes only the Review-only playing-retro audio path. It must not retrain, alter ordinary `studs_live`, replace `audio_model.json`, change `audio_contact_model.json`, or work on video models.
+This ticket exists because Love reported that even a one-minute clip takes too long before review can start. Cache is explicitly out of scope because the same imported video is rarely reopened; the goal is to identify the real first-run bottleneck and produce a timing table that tells us which optimization ticket to do next.
 
 ## Dependencies
 
-- T0027 is completed and merged to `main`.
-- T0027 selected `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context`.
-- T0027 selected racket threshold `0.0`, table threshold `0.45`, and same-label dedupe `80 ms`.
-- T0027 replay improved marker TP/wrong/FP/missed from `706/22/26/153` to `844/1/9/36`.
-- T0026 local candidate artifacts exist under `data/audio/models/playing_retro_candidates/playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context/`.
-- Motorola `ZY22L6NDHV` should be connected by USB for install.
+- T0028 is completed, merged to `main`, and installed on Motorola `ZY22L6NDHV`.
+- The installed app uses `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context` with racket threshold `0.0`, table threshold `0.45`, and 80 ms same-label dedupe.
+- Fresh playing imports currently hide the waveform while loading audio/video, generating peak candidates, running `spel_retro_audio`, and creating editable racket/table markers.
+- Whole-video pose can start in the background after audio load and may add CPU pressure, but T0029 must measure before changing that behavior.
 
 ## Allowed Areas
 
-- `apps/collector/src/models/playing_retro_audio_model.json`
-- `apps/collector/src/playingRetroAudio.ts` only if needed for threshold metadata compatibility
-- `skills/pingis-audio-classification/scripts/export_playing_retro_audio_model_json.py`
-- `skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py`
+- `apps/collector/src/AudioCollectionScreen.tsx`
+- `apps/collector/src/AudioTakeReviewScreen.tsx`
+- `apps/collector/src/playingRetroAudio.ts`
+- `apps/collector/src/audioReview.ts`
+- `apps/collector/src/types.ts` only if a typed timing/debug shape is needed
 - `PROJECT_CONTEXT.md`
 - `DECISIONS.md`
 - `FOLLOWUPS.md`
@@ -47,122 +46,85 @@ This ticket promotes only the Review-only playing-retro audio path. It must not 
 
 - `apps/collector/src/models/audio_model.json`
 - `apps/collector/src/models/audio_contact_model.json`
-- `studs_live` behavior or live detector thresholds
-- Ordinary up/down bounce training/export paths
-- Video-stroke model files
-- Raw reviewed labels
-- T0026 training artifacts
-- T0027 replay artifacts
-- Review UX except the already existing playing-retro model metadata consumption
+- `apps/collector/src/models/playing_retro_audio_model.json`
+- `apps/collector/src/models/video_stroke_model.json`
+- Training scripts or generated model artifacts
+- Raw reviewed labels or pulled session JSON
+- `studs_live` behavior, thresholds, or ordinary bounce flows
+- Cache implementation
+- Model thresholds, recovery gates, candidate dedupe, or marker promotion logic
 
 ## Requirements
 
-- Update the playing-retro export script defaults to the T0026 model ID and T0027 thresholds.
-- Update the playing-retro app export parity script to require the T0026 model ID and T0027 thresholds.
-- Export `apps/collector/src/models/playing_retro_audio_model.json` from `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context`.
-- Ensure exported metadata states app role `spel_retro_audio_review_only`, racket threshold `0.0`, table threshold `0.45`, same-label dedupe `80 ms`, and normal audio model unchanged.
-- Validate exported app JSON against the local T0026 joblib model.
-- Run Collector TypeScript validation.
-- Run root validation.
-- Force-regenerate the release Metro bundle.
-- Build Android release APK.
-- Verify the built bundle/APK contains the T0026 model/version and still contains `Ljud + video ML` and `Video FH/BH`.
-- Install the release APK on connected Motorola and launch the app.
-- Record APK SHA256, install time, and validation results in docs.
+- Add low-overhead timing instrumentation for the fresh `Ljud + video ML` import/review-start path.
+- Time these phases separately when available:
+  - video import/copy
+  - audio extraction to WAV
+  - WAV decode/load
+  - waveform/review-data generation
+  - saved peak candidate generation/load
+  - recovery candidate generation
+  - `spel_retro_audio` feature extraction
+  - `spel_retro_audio` RandomForest prediction
+  - marker creation/merge
+  - first waveform-ready render
+  - pose analysis start/end if it starts before audio review is complete
+- Surface or log the timing table in a way Love/Codex can capture from device testing.
+- Preserve exact existing audio marker output for the same input/model/settings.
+- Do not add caching in T0029.
+- Do not optimize yet unless a change is needed only to measure safely.
+- Document the measured bottleneck and confirm whether T0030, T0031, or T0032 should be next.
 
 ## Non-Goals
 
 - No retraining.
-- No new replay/tuning.
-- No ordinary bounce or `studs_live` changes.
-- No `audio_model.json` or `audio_contact_model.json` changes.
-- No video-stroke changes.
-- No Review UX redesign.
-- No push/merge of T0028 unless Love asks after completion.
+- No threshold tuning.
+- No candidate/recovery behavior change.
+- No new APK model export.
+- No cache.
+- No video model changes.
+- No UX redesign beyond timing/debug visibility.
+- No data pull/audit of a newly reviewed clip.
 
 ## Acceptance Criteria
 
-- `playing_retro_audio_model.json` contains T0026 model metadata and T0027 thresholds.
-- Export parity validation passes against the T0026 joblib artifacts.
-- Collector TypeScript validation passes.
-- Root validation passes.
-- Release APK builds successfully.
-- APK installs on Motorola and app launches.
-- Docs record exact artifact IDs, SHA256, install time, and next recommended ticket.
+- A T0029 build can report timing for the full path from import selection to waveform-ready audio review.
+- The report separates audio extraction/load, candidate generation, retro feature/RF work, marker creation, and pose work.
+- A one-minute playing clip produces a concrete timing table.
+- The same clip produces the same audio review markers before and after T0029 instrumentation.
+- Docs identify the next optimization ticket:
+  - T0030 if pose/background work delays audio start or makes the phone sluggish.
+  - T0031 if JS `spel_retro_audio` feature/RF/recovery work dominates.
+  - T0032 if JS optimization is insufficient and native/background execution is needed.
 
-## Completion Notes
+## Planned Follow-Up Tickets
 
-- Updated `skills/pingis-audio-classification/scripts/export_playing_retro_audio_model_json.py` to default to T0026 model `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context`.
-- Updated `skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py` to require T0026 model metadata and T0027 thresholds.
-- Exported `apps/collector/src/models/playing_retro_audio_model.json` from T0026.
-- Exported metadata:
-  - model version `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context`
-  - app role `spel_retro_audio_review_only`
-  - racket threshold `0.0`
-  - table threshold `0.45`
-  - same-label dedupe `80 ms`
-  - source ticket `T0027`
-  - `normal_audio_model_unchanged=true`
-- Export size: 4,365 KB.
-- Exported model shape: 197 features, 450 trees, 164,120 total nodes, labels `non_target`, `racket_contact`, `table_bounce`.
-- Release bundle verification passed:
-  - contained `playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context`
-  - contained `spel_retro_audio_review_only`
-  - contained `Ljud + video ML`
-  - contained `Video FH/BH`
-  - did not contain `Ljudinsamling`
-  - did not contain `Audio plus IMU`
-- Built APK: `apps/collector/android/app/build/outputs/apk/release/app-release.apk`
-- APK SHA256: `7AC97A6C4AA83A939941DD52E16F4C2C3627AD5AAA06666878F381290BB1D2AA`
-- APK size: 164,665,426 bytes.
-- Installed on Motorola `ZY22L6NDHV` via `adb install -r`.
-- Install result: `Success`.
-- App launch result: `pidof com.collectorapp` returned `17665`.
-- Device package metadata: `versionCode=1`, `versionName=1.0`, `lastUpdateTime=2026-06-04 11:30:23`.
-- No retraining, no `studs_live`, no ordinary bounce, no `audio_model.json`, no `audio_contact_model.json`, and no video model work was intentionally done in this ticket.
+| Ticket | Goal | Gate |
+|---|---|---|
+| `T0030` | Defer whole-video pose until after audio review starts or until motion review is opened | Do if T0029 shows pose starts too early or competes with audio start |
+| `T0031` | Optimize JS `spel_retro_audio` while preserving exact output | Do if T0029 shows feature extraction/RF/recovery is the main bottleneck |
+| `T0032` | Move heavy audio retro work to native/background execution if needed | Do only if T0031 cannot hit acceptable review-start speed |
+| `T0033` | Resume one-reviewed-video model loop | Do when Love has a newly reviewed T0028/T0029+ clip ready for audit/retrain |
 
 ## Manual Verification
 
-Love should open the installed app and review the next `Ljud + video ML` playing clip. Expected behavior:
-
-- The app should look like the existing T0024/T0027 playing-retro flow.
-- Fresh playing audio review should use the T0026 `spel_retro_audio` model.
-- Racket/table markers should be normal editable review markers.
-- Ordinary `Studsdetektor` behavior should be unchanged by this ticket.
+- Import a representative one-minute `Ljud + video ML` playing video on Motorola.
+- Capture the timing table.
+- Confirm the audio waveform appears with normal editable racket/table markers.
+- Confirm marker counts are unchanged versus the same build path without instrumentation, or document the comparison blocker.
 
 ## Automated Validation
 
-- `python -m py_compile` for changed Python export/parity scripts.
-- `python skills\pingis-audio-classification\scripts\export_playing_retro_audio_model_json.py`
-- `python skills\pingis-audio-classification\scripts\validate_playing_retro_audio_app_export.py`
 - `cd apps\collector && npx tsc --noEmit`
 - `npm run validate`
-- `cd apps\collector\android && .\gradlew.bat :app:createBundleReleaseJsAndAssets --rerun-tasks`
-- `cd apps\collector\android && .\gradlew.bat assembleRelease`
-
-Validation passed:
-
-- `python -m py_compile skills\pingis-audio-classification\scripts\export_playing_retro_audio_model_json.py skills\pingis-audio-classification\scripts\validate_playing_retro_audio_app_export.py`
-- `python skills\pingis-audio-classification\scripts\export_playing_retro_audio_model_json.py`
-- `python skills\pingis-audio-classification\scripts\validate_playing_retro_audio_app_export.py`
-- `cd apps\collector && npx tsc --noEmit`
-- `npm run validate`
-- `git diff --check` for T0028 scoped files
-- `cd apps\collector\android && .\gradlew.bat :app:createBundleReleaseJsAndAssets --rerun-tasks`
-- `cd apps\collector\android && .\gradlew.bat assembleRelease`
-- Bundle string verification
-- `adb devices`
-- `adb install -r apps\collector\android\app\build\outputs\apk\release\app-release.apk`
-- `adb shell monkey -p com.collectorapp -c android.intent.category.LAUNCHER 1`
-- `adb shell pidof com.collectorapp`
+- `git diff --check` for T0029 scoped files
 
 ## Completion Report Expected
 
 Codex should report:
 
-- Model ID exported
-- Review thresholds exported
-- APK path and SHA256
-- Motorola install result
-- Validation commands run
-- Confirmation that ordinary `studs_live`, `audio_model.json`, `audio_contact_model.json`, and video model artifacts were not intentionally changed
+- Timing table for the tested clip
+- Largest bottleneck
+- Whether pose started before audio review was usable
+- Confirmation that no model/training/cache behavior changed
+- Recommended next ticket

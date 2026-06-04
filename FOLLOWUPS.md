@@ -7,6 +7,7 @@ Use this file for known issues, deferred improvements, and out-of-scope findings
 | ID | Source Ticket | Type | Description | Priority | Owner | Status |
 |---|---|---|---|---|---|---|
 | `F0001` | `T0001` | `Workflow` | Decide whether to create future ticket branches from the current dirty `codex/video-stroke-test` branch or first establish a clean approved base. | `Medium` | `Love + Codex` | `Open` |
+| `F0014` | `T0029` | `Performance` | Complete the first-run playing-retro review-start performance sequence: T0029 profiling first, T0030 pose defer if needed, T0031 exact-output JS optimization if needed, T0032 native/background only if needed, then T0033 resumes the reviewed-data model loop. Cache is intentionally out of scope unless reopening the same video becomes a real customer path. | `High` | `Codex` | `T0029 active` |
 
 ## Resolved Followups
 

@@ -5,12 +5,12 @@ Use this file as the living snapshot of what actually exists in the repository. 
 ## Snapshot
 
 - Date: `2026-06-04`
-- Current branch: `codex/t0028-playing-retro-export-build-install-2026-06-04`
+- Current branch: `codex/t0029-playing-retro-review-start-profiling`
 - Current phase: `Per-video playing-retro audio release loop`
-- Current status: `T0028 exported, built, and installed improved spel_retro_audio APK`
-- Current ticket: `T0028`
+- Current status: `T0029 active: profile fresh playing-retro review-start latency before optimizing`
+- Current ticket: `T0029`
 - Last completed ticket: `T0028`
-- Recommended next ticket: `T0029-audit-next-T0028-reviewed-playing-session`
+- Recommended next ticket: `T0029-playing-retro-review-start-profiling`
 
 ## Current Structure
 
@@ -32,7 +32,7 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 | Command | Purpose | Last Known Result |
 |---|---|---|
-| `npm run validate` | Root WRLDS template, skill, and AWS metadata validation | `Passed 2026-06-04 for T0028` |
+| `npm run validate` | Root WRLDS template, skill, and AWS metadata validation | `Passed 2026-06-04 for T0029 planning/docs start` |
 | `cd apps/collector && npx tsc --noEmit` | Collector TypeScript validation | `Passed 2026-06-04 with T0028 improved playing-retro export` |
 | `python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py` | T0004 candidate-centered playing-retro audio report | `Passed 2026-06-02 on Tomas 05-28/05-29 sessions` |
 | `python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py` | T0005 local `spel_retro_audio` candidate train/eval | `Passed 2026-06-02; 4,028 rows, holdout accuracy 0.759` |
@@ -94,15 +94,17 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 | Ticket | Goal | Status | Notes |
 |---|---|---|---|
-| `T0028` | Export, build, and install improved playing-retro APK | `Completed` | T0026 candidate selected by T0027 is exported, parity-checked, built into release APK, installed on Motorola, and ready for the next reviewed playing clip |
+| `T0029` | Profile fresh playing-retro review-start latency | `Active` | Measure first-run import-to-waveform timing without cache, model changes, threshold changes, or marker-output changes. Use the timing table to choose T0030/T0031/T0032 before asking Love to review more data |
 
 ## Confirmed Next Tickets
 
 | Ticket | Goal | Notes |
 |---|---|---|
-| `T0029` | Audit next T0028-reviewed playing session | Love should review and save one new `Ljud + video ML` playing clip on the installed T0028 APK; Codex then pulls the session and audits misses, duplicates, relabels, timing nudges, and candidate-generation gaps before retraining |
-| `T0030` | Revisit playing-retro candidate/peak recovery | Open only if T0029 or later audits show true candidate-generation gaps remain material after the T0028 model/settings |
-| `T0031` | Revisit video-assisted FH/BH fusion after audio retro is stable | Keep video paused until audio review workload and dense hit recovery are good enough |
+| `T0030` | Defer whole-video pose until after audio review starts | Do if T0029 shows pose starts too early or competes with the audio review-start path |
+| `T0031` | Optimize JS `spel_retro_audio` with exact output parity | Do if T0029 shows feature extraction, RandomForest prediction, or recovery candidate work dominates |
+| `T0032` | Move heavy retro work native/background if needed | Do only if T0031 cannot make first-run review start acceptable while preserving quality |
+| `T0033` | Audit next reviewed T0028/T0029+ playing session | Resume the one-video model improvement loop when Love has a newly reviewed clip; pull/audit misses before retrain |
+| `T0034` | Revisit video-assisted FH/BH fusion after audio retro is stable | Keep video paused until audio review workload and dense hit recovery are good enough |
 
 ## Dependencies
 
@@ -116,14 +118,15 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 ## Validation Status
 
 - Build: `T0028 APK installed on Motorola ZY22L6NDHV at 2026-06-04 11:30:23; SHA256 7AC97A6C4AA83A939941DD52E16F4C2C3627AD5AAA06666878F381290BB1D2AA; app pid 17665`
-- Tests: T0028 Python py_compile passed for export/parity scripts; export passed; app export parity passed; `cd apps/collector && npx tsc --noEmit` passed; root `npm run validate` passed; forced release bundle and Gradle `assembleRelease` passed. T0027 replay, T0026 training, and T0025 audit commands also passed on 2026-06-04.
-- Lint: `git diff --check` passed on 2026-06-04 for T0028 scoped files.
+- Tests: T0028 Python py_compile passed for export/parity scripts; export passed; app export parity passed; `cd apps/collector && npx tsc --noEmit` passed; forced release bundle and Gradle `assembleRelease` passed. T0029 planning/docs start reran root `npm run validate`; no app code, model, training, APK, or runtime behavior changed.
+- Lint: `git diff --check` passed on 2026-06-04 for T0029 scoped docs.
 - Manual verification: `Bundle string verification passed: T0026 model version, spel_retro_audio_review_only, Ljud + video ML, and Video FH/BH were present; Ljudinsamling and Audio plus IMU were absent.`
 
 ## Known Issues Summary
 
 - Current working tree already contains many pre-existing app/model/video changes from earlier work; ticket work must avoid staging or reverting unrelated files.
 - `studs_live`, `spel_retro_audio`, and `video_stroke_retro` need separate ticket scopes to avoid model/config bleed.
+- Fresh `Ljud + video ML` playing imports can take too long before Love sees the waveform. T0029 should measure first-run import/audio/retro/pose phase durations before any optimization; cache is intentionally out of scope because reopening the same video is not the common customer path.
 - IMU/AirHive workflow docs and skill scripts were removed from active scope; remaining app labels/code paths should be treated as legacy unless a ticket explicitly removes or renames them.
 - `spel_retro_audio` now has a separate app JSON export, app helper, deterministic replay scripts, primary Review integration, conservative dense recovery, T0015 replay gates, T0019 single-step loading UX, T0020 same-label 80 ms dedupe plus blue-outline explanation, and the T0028 installed T0026 model/settings. It still does not replace `studs_live`.
 - T0021 showed that most remaining misses on `audio_session_2026-06-03_005` were model `non_target` calls near real events, not raw candidate absence. T0022 retrained a stronger model, T0023 replay selected thresholds, and T0024 installed that selected path.
