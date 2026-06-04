@@ -51,6 +51,14 @@ data/audio/models/
 | `apps/collector/src/AudioCollectionScreen.tsx` | Android recording UI |
 | `apps/collector/src/types.ts` | AudioLabel, AudioEvent, AudioSessionFile types |
 | `scripts/preprocess_audio.py` | Feature extraction (35 features per clip) |
+| `scripts/build_playing_retro_candidate_report.py` | Candidate-centered `spel_retro_audio` peak report before training |
+| `scripts/train_playing_retro_audio.py` | Local `spel_retro_audio` candidate training/evaluation, separate from app export |
+| `scripts/evaluate_playing_retro_audio_variants.py` | T0006 focused `spel_retro_audio` variant comparison and local safe-candidate save |
+| `scripts/evaluate_playing_retro_audio_multi_window.py` | T0007 multi-window/context `spel_retro_audio` variant comparison and local candidate save |
+| `scripts/evaluate_playing_retro_audio_cross_session.py` | T0008 cross-session validation for T0007/T0008 `spel_retro_audio` promotion decisions |
+| `scripts/export_playing_retro_audio_model_json.py` | T0009 separate Review-only `spel_retro_audio` app JSON export |
+| `scripts/validate_playing_retro_audio_app_export.py` | T0009 parity check for exported app JSON against selected joblib model |
+| `scripts/replay_playing_retro_audio_app_export.py` | T0010 controlled replay of the separate app export on saved Review candidates |
 | `scripts/train_rf_audio.py` | Model training + evaluation |
 | `scripts/serve_api_audio.py` | Inference API (port 5001) |
 
@@ -101,11 +109,85 @@ pip install -r skills/pingis-audio-classification/requirements.txt
 
 # After collecting sessions with the app:
 python skills/pingis-audio-classification/scripts/preprocess_audio.py
+python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py
+python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py
+python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_variants.py
+python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_multi_window.py
+python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_cross_session.py
+python skills/pingis-audio-classification/scripts/export_playing_retro_audio_model_json.py
+python skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py
+python skills/pingis-audio-classification/scripts/replay_playing_retro_audio_app_export.py
 python skills/pingis-audio-classification/scripts/train_rf_audio.py
 
 # Start inference API:
 python skills/pingis-audio-classification/scripts/serve_api_audio.py
 ```
+
+## New Audio Training Intake
+
+Before pulling or training on a new audio file/session, ask Love for missing
+metadata instead of guessing. Do not treat a new file as broadly trainable until
+the answers are clear enough to tag and evaluate it correctly.
+
+Required questions:
+- Is this session trainable ground truth, diagnostic-only, or holdout/replay-only?
+- Which bucket should it evaluate: ordinary vertical racket bounce, dense
+  racket+table playing, Stiga-office/Tomas-style hard stroke sounds, table,
+  floor, noise/speech/music, or another bucket?
+- Was the impact style ordinary up/down bounce, normal play, hard stroke-like
+  contact, fast dense sequence, or mixed?
+- What environment/background applies: room, table/surface, background noise,
+  phone/mic placement, device, and recorder/player when known?
+- Should this session be allowed to influence the ordinary bounce detector, or
+  only the domain-specific bucket until it passes cross-bucket replay?
+
+Training rules:
+- Tag sessions with explicit scenario/domain metadata before preprocessing.
+- Keep diagnostic and unfinished review sessions excluded from training.
+- Report metrics by bucket, not only aggregate accuracy or macro F1.
+- Promotion requires no unacceptable regression on ordinary bounce, even when a
+  Stiga/Tomas or dense-playing bucket improves.
+
+## Playing Retro Audio
+
+`spel_retro_audio` is a separate post-recording playing-mode audio path. It is
+not the live `studs_live` model and must not be exported into Collector app JSON
+without a dedicated ticket.
+
+Current local workflow:
+- `build_playing_retro_candidate_report.py` matches saved app candidates and
+  replay peaks against reviewed racket/table truth for diagnostics.
+- `train_playing_retro_audio.py` trains a local RandomForest candidate from all
+  matchable saved app candidate peaks plus manually reviewed missed markers.
+- Unmatched app candidates become `non_target` rows with lower sample weight.
+- Replay-generated peaks stay diagnostic in T0005 and are not multiplied into
+  training rows by timing config.
+- Ordinary up/down bounce is evaluated as a separate regression slice; it is not
+  mixed into dense playing metrics.
+- T0006 selected `playing_retro_audio_rf_v2026_06_02_safe_racket_weighted`,
+  but it stays local because holdout racket recall only improved to 0.623.
+- T0007 selected `playing_retro_audio_rf_v2026_06_02_multi_window_context`
+  using tight, normal, and wide real-WAV windows plus non-leaky candidate-context
+  features.
+- T0008 cross-session validation passed for the selected T0007 variant on the
+  requested Tomas/Stiga dense-playing holdouts, so the next step may wire a
+  separate Review retro path. It still must not replace `studs_live`.
+- T0009 exports the selected candidate to
+  `apps/collector/src/models/playing_retro_audio_model.json`, separate from
+  `audio_model.json`, and provides `apps/collector/src/playingRetroAudio.ts` as
+  an opt-in Review-only runtime helper.
+- Validate export parity with
+  `python skills/pingis-audio-classification/scripts/validate_playing_retro_audio_app_export.py`
+  before any app replay, UI wiring, APK build, or device install.
+- T0010 controlled replay uses
+  `python skills/pingis-audio-classification/scripts/replay_playing_retro_audio_app_export.py`
+  to run the separate app JSON on saved Review candidates for
+  `audio_session_2026-05-28_002`, `audio_session_2026-05-29_001`, and
+  `audio_session_2026-05-29_002`. The replay reached 0.978 candidate-level
+  accuracy across 643 saved candidates, but it cannot recover 15 missed markers
+  that had no saved app candidate.
+- Do not use truth-derived `close_event_bucket` or `neighbor_sequence` as model
+  features; they are reporting metadata only.
 
 ## Collecting Data
 

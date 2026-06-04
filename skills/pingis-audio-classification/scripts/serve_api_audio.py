@@ -2,7 +2,7 @@
 serve_api_audio.py
 
 Flask-API för att klassificera pingisbollsstudsar från ljuddata.
-Kör på port 5001 (IMU-API kör på 5000).
+Kör på port 5001.
 
 Start: python skills/pingis-audio-classification/scripts/serve_api_audio.py
 

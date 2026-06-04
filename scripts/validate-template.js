@@ -10,6 +10,9 @@ const coreFiles = [
   'AGENTS.md',
   'PROJECT_CONTEXT.md',
   'DECISIONS.md',
+  'CODEX_TASK.md',
+  'REPO_CURRENT_STATE.md',
+  'FOLLOWUPS.md',
   'AWS_RESOURCES.md',
   'references/aws-tagging-standard.md',
   'references/aws-resource-naming-standard.md',
@@ -22,7 +25,6 @@ const coreFiles = [
 
 const optionalFiles = [
   'TEST_PLAN.md',
-  'CODEX_TASK.md',
   '.github/pull_request_template.md',
   'references/project-intake-questions.md',
   'references/ui-library-selection.md',
@@ -40,7 +42,6 @@ const coreSkills = [
 const optionalSkills = [
   'react-native-ui-system',
   'react-native-amplify',
-  'berg-airhive-ble-imu',
   'github-ci-fix',
   'github-pr-review',
   'release-notes',
@@ -109,6 +110,8 @@ if (fs.existsSync(agentsPath)) {
   for (const requiredPhrase of [
     'PROJECT_CONTEXT.md',
     'DECISIONS.md',
+    'REPO_CURRENT_STATE.md',
+    'CODEX_TASK.md',
     'AWS_RESOURCES.md',
     'aws-project-infrastructure',
     'Do not push directly to `main`',

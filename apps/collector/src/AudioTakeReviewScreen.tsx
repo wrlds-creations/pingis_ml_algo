@@ -34,6 +34,11 @@ import {
   getAudioDetectionConfig,
   getDefaultAudioDetectionConfigSnapshot,
 } from './audioDetectionConfig';
+import {
+  analyzePlayingRetroAudioCandidates,
+  getPlayingRetroAudioModelMetadata,
+  type PlayingRetroAudioAnalysisResult,
+} from './playingRetroAudio';
 import { ReviewOrientation } from './ReviewOrientation';
 import type {
   AudioContactKind,
@@ -765,6 +770,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const [overviewBins, setOverviewBins] = useState<number[]>([]);
   const [markers, setMarkers] = useState<AudioReviewMarker[]>(event.review?.markers ?? []);
   const [modelCandidates, setModelCandidates] = useState<AudioModelCandidate[]>(event.model_candidates ?? []);
+  const [playingRetroAnalysis, setPlayingRetroAnalysis] = useState<PlayingRetroAudioAnalysisResult | null>(null);
+  const [playingRetroRunning, setPlayingRetroRunning] = useState(false);
+  const [playingRetroStatus, setPlayingRetroStatus] = useState<string | null>(null);
   const [detectionConfigSnapshot, setDetectionConfigSnapshot] = useState<AudioDetectionConfigSnapshot>(
     event.detection_config_snapshot ?? getDefaultAudioDetectionConfigSnapshot(),
   );
@@ -841,6 +849,8 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     const decoded = decodedRef.current;
     setDetectionConfigSnapshot(nextConfig);
     setQuickLabelPrompt(null);
+    setPlayingRetroAnalysis(null);
+    setPlayingRetroStatus(null);
 
     if (!decoded) {
       setModelCandidates([]);
@@ -878,10 +888,58 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
         : mergedMarkers[0]?.id ?? null
     ));
   }, [event.scenario_id, markers, modelCandidates]);
+  const handleRunPlayingRetroAudio = useCallback(() => {
+    const decoded = decodedRef.current;
+    if (!decoded) {
+      Alert.alert('Spel-retro audio', 'Waveform \u00e4r inte laddad \u00e4n.');
+      return;
+    }
+    if (modelCandidates.length === 0) {
+      Alert.alert('Spel-retro audio', 'Det finns inga sparade ljudkandidater att reklassificera.');
+      return;
+    }
+
+    setPlayingRetroRunning(true);
+    setPlayingRetroStatus('Analyserar sparade kandidater...');
+    setTimeout(() => {
+      try {
+        const analysis = analyzePlayingRetroAudioCandidates(
+          decoded.samples,
+          decoded.sampleRate,
+          modelCandidates,
+        );
+        const racket = analysis.candidates.filter(candidate => candidate.playing_retro_prediction.label === 'racket_contact').length;
+        const table = analysis.candidates.filter(candidate => candidate.playing_retro_prediction.label === 'table_bounce').length;
+        const nonTarget = analysis.candidates.length - racket - table;
+        setPlayingRetroAnalysis(analysis);
+        setPlayingRetroStatus(`Klart: ${racket} racket, ${table} bord, ${nonTarget} ej target.`);
+      } catch (error) {
+        setPlayingRetroStatus('Kunde inte k\u00f6ra spel-retro.');
+        Alert.alert('Spel-retro audio', String(error));
+      } finally {
+        setPlayingRetroRunning(false);
+      }
+    }, 0);
+  }, [modelCandidates]);
   const activePlayingConfidenceFilter = useMemo(
     () => PLAYING_CONFIDENCE_FILTERS.find(filter => filter.id === playingConfidenceFilter) ?? PLAYING_CONFIDENCE_FILTERS[2],
     [playingConfidenceFilter],
   );
+  const playingRetroModelMetadata = useMemo(() => getPlayingRetroAudioModelMetadata(), []);
+  const playingRetroSummary = useMemo(() => {
+    const candidates = playingRetroAnalysis?.candidates ?? [];
+    const racket = candidates.filter(candidate => candidate.playing_retro_prediction.label === 'racket_contact').length;
+    const table = candidates.filter(candidate => candidate.playing_retro_prediction.label === 'table_bounce').length;
+    const nonTarget = candidates.filter(candidate => candidate.playing_retro_prediction.label === 'non_target').length;
+    const targets = racket + table;
+    return {
+      total: candidates.length,
+      racket,
+      table,
+      nonTarget,
+      targets,
+    };
+  }, [playingRetroAnalysis]);
   const orderedMarkers = useMemo(() => {
     const nonDeletedMarkers = allOrderedMarkers.filter(marker => {
       const status = marker.review_status ?? 'pending';
@@ -2744,6 +2802,30 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   />
                 );
               })}
+              {isPlayingReview && playingRetroAnalysis?.candidates.filter(candidate => (
+                candidate.review_relevant &&
+                isTimestampVisible(candidate.timestamp_ms, safeTimelineWindowStartMs, timelineWindowEndMs)
+              )).map(candidate => {
+                const left = ratioToLeft(
+                  candidate.timestamp_ms,
+                  safeTimelineWindowStartMs,
+                  timelineWindowEndMs,
+                  overviewWidth,
+                );
+                return (
+                  <View
+                    key={`playing-retro-pin-${candidate.id}`}
+                    style={[
+                      styles.playingRetroCandidatePin,
+                      {
+                        left: Math.max(0, left - 6),
+                        backgroundColor: candidateColor(candidate),
+                        opacity: Math.max(0.46, candidate.playing_retro_prediction.confidence),
+                      },
+                    ]}
+                  />
+                );
+              })}
               {orderedMarkers.filter(marker => isTimestampVisible(
                 marker.timestamp_ms,
                 safeTimelineWindowStartMs,
@@ -3057,6 +3139,54 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
             <Text style={styles.algorithmSaveHint}>
               Save tränar på {reviewTruthSummary.approved} mänskligt godkända/ändrade markers. Kandidater sparas bara för analys.
             </Text>
+            {isPlayingReview && (
+              <View style={styles.playingRetroPanel}>
+                <View style={styles.playingRetroHeaderRow}>
+                  <View style={styles.playingRetroTitleBlock}>
+                    <Text style={styles.playingRetroTitle}>Spel-retro audio</Text>
+                    <Text style={styles.playingRetroMeta}>
+                      {`${playingRetroModelMetadata.selected_variant} - ${playingRetroModelMetadata.windows.length} f\u00f6nster`}
+                    </Text>
+                  </View>
+                  <TouchableOpacity
+                    style={[
+                      styles.playingRetroRunBtn,
+                      (playingRetroRunning || loading || modelCandidates.length === 0) && styles.playingRetroRunBtnDisabled,
+                    ]}
+                    onPress={handleRunPlayingRetroAudio}
+                    disabled={playingRetroRunning || loading || modelCandidates.length === 0}
+                  >
+                    <Text style={styles.playingRetroRunTxt}>
+                      {playingRetroRunning ? 'K\u00f6r...' : 'K\u00f6r retro'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+                <Text style={styles.playingRetroHint}>
+                  {'Separat post-review test. Skapar inte markers och p\u00e5verkar inte Save.'}
+                </Text>
+                <View style={styles.playingRetroStatsRow}>
+                  <View style={styles.playingRetroStat}>
+                    <Text style={styles.playingRetroStatNumber}>{playingRetroSummary.racket}</Text>
+                    <Text style={styles.playingRetroStatLabel}>Racket</Text>
+                  </View>
+                  <View style={styles.playingRetroStat}>
+                    <Text style={styles.playingRetroStatNumber}>{playingRetroSummary.table}</Text>
+                    <Text style={styles.playingRetroStatLabel}>Bord</Text>
+                  </View>
+                  <View style={styles.playingRetroStat}>
+                    <Text style={styles.playingRetroStatNumber}>{playingRetroSummary.nonTarget}</Text>
+                    <Text style={styles.playingRetroStatLabel}>Ej target</Text>
+                  </View>
+                  <View style={styles.playingRetroStat}>
+                    <Text style={styles.playingRetroStatNumber}>{playingRetroSummary.total || modelCandidates.length}</Text>
+                    <Text style={styles.playingRetroStatLabel}>Kandidater</Text>
+                  </View>
+                </View>
+                <Text style={styles.playingRetroStatus}>
+                  {playingRetroStatus ?? 'K\u00f6r f\u00f6r att visa retro-racket/bord som extra pinnar ovanf\u00f6r waveformen.'}
+                </Text>
+              </View>
+            )}
             <Text style={styles.algorithmLabel}>Känslighet</Text>
             <View style={styles.algorithmOptionRow}>
               {REVIEW_SENSITIVITY_OPTIONS.map(option => {
@@ -3436,6 +3566,48 @@ const styles = StyleSheet.create({
   algorithmTitle: { color: '#2ee678', fontSize: 12, fontWeight: '900' },
   algorithmMeta: { color: '#aeb4be', fontSize: 11, fontWeight: '700' },
   algorithmSaveHint: { color: '#7f8993', fontSize: 10, lineHeight: 14, fontWeight: '700' },
+  playingRetroPanel: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#2a4a5f',
+    backgroundColor: '#0d1720',
+    padding: 9,
+    gap: 7,
+  },
+  playingRetroHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  playingRetroTitleBlock: { flex: 1, gap: 2 },
+  playingRetroTitle: { color: '#cfeeff', fontSize: 12, fontWeight: '900' },
+  playingRetroMeta: { color: '#8fb4c8', fontSize: 10, fontWeight: '800' },
+  playingRetroRunBtn: {
+    minHeight: 30,
+    borderRadius: 9,
+    backgroundColor: '#194d64',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  playingRetroRunBtnDisabled: { opacity: 0.45 },
+  playingRetroRunTxt: { color: '#e8f8ff', fontSize: 11, fontWeight: '900' },
+  playingRetroHint: { color: '#9db4c0', fontSize: 10, lineHeight: 14, fontWeight: '700' },
+  playingRetroStatsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  playingRetroStat: {
+    flexGrow: 1,
+    minWidth: 70,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: '#244355',
+    backgroundColor: '#101f29',
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  playingRetroStatNumber: { color: '#fff', fontSize: 15, fontWeight: '900' },
+  playingRetroStatLabel: { color: '#9db4c0', fontSize: 10, fontWeight: '800' },
+  playingRetroStatus: { color: '#cfeeff', fontSize: 10, lineHeight: 14, fontWeight: '800' },
   algorithmLabel: {
     color: '#727b86',
     fontSize: 10,
@@ -3573,6 +3745,14 @@ const styles = StyleSheet.create({
     height: 10,
     borderRadius: 5,
     zIndex: 2,
+  },
+  playingRetroCandidatePin: {
+    position: 'absolute',
+    top: 8,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    zIndex: 3,
   },
   fullMarkerPin: {
     width: 10,

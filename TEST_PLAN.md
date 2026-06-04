@@ -1,4 +1,4 @@
-# Test Plan: Audio Review, Binary Contact, and Synced Bounce Audio + IMU
+# Test Plan: Audio Review, Playing Retro Audio, and Video Stroke
 
 Date:
 Tester:
@@ -9,7 +9,7 @@ Round:
 
 ## How This File Is Used
 
-1. Record one take at a time in `Ljud-insamling` or `Studs audio + IMU`.
+1. Record or import one take at a time in `Ljudinsamling`, `Ljud + video ML`, or `Video FH/BH`.
 2. Use the reviewed protocol presets: `racket_bounce_fh`, `racket_bounce_bh`, `racket_bounce_mixed`, `table_bounce`, `floor_bounce`, `catch_after_sound`, and `speech_music_noise`.
 3. Every training-relevant preset must open review directly after recording.
 4. Handle every auto-marker with `Confirm`, label edit, `Ignore`, or `Delete` before saving.
@@ -20,7 +20,7 @@ Round:
 9. Fill in each testcase before moving on.
 10. Use `Studsdetektor` and `Studs fritt` only with `B0`.
 11. `Studs vaxla sida` is a regression check after contact count is acceptable.
-12. In `Studs audio + IMU`, keep roughly `0.5-1.0 s` between bounces. Do not collect fast double contacts in this round.
+12. Do not collect or validate IMU/AirHive flows in current rounds; they are retired from active product scope.
 
 ## Round Summary
 
@@ -32,86 +32,142 @@ Nasta sak att testa:
 
 ## Collector Review Tests
 
-## Synced Audio + IMU Collector Tests
+## Ljud + Video ML Staged Review
 
-### AI-01
-Mode: `bounce_audio_imu_collection`
-Preset: `n/a`
-Kalibrering: `table_only`
-Forvantat utfall: Mode startar via kalibrering, visar samma scenarios som `Ljud-insamling`, och blockerar inte record om sensorn ar korrekt ansluten.
+### AVP-01
+Mode: `Ljud + video ML`
+Input: Direkt inspelning i appen
+Forvantat utfall: Appen sparar en hel WAV + MP4 som en reviewtagning, utan synliga 30s-delar. Review 1 visar vanlig ljudvag och later Love markera `Rackettraff`, `Bordsstuds`, och `Ignorera`.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
-### AI-02
-Mode: `bounce_audio_imu_collection`
-Preset: `n/a`
-Kalibrering: `table_only`
-Forvantat utfall: En `30 s` take i `racket_bounce_fh` auto-stoppar inom ungefaar `30.0-30.5 s`, fryser inte pa slutet, och review-skarmen oppnas direkt, precis som i audio-only-laget.
+### AVP-02
+Mode: `Ljud + video ML`
+Input: `Importera video` fran Downloads/Drive
+Forvantat utfall: Android picker later Love valja en MP4 med ljudspar, appen kopierar videon, extraherar ljud till WAV, och oppnar samma Review 1 som direkt inspelning.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
-### AI-03
-Mode: `bounce_audio_imu_collection`
-Preset: `n/a`
-Kalibrering: `table_only`
-Forvantat utfall: Collectorn visar tydligt att den kor synced IMU, visar faktisk mottagen sample rate, och anger `150 Hz` som raw target dar datan sparas.
+### AVP-03
+Mode: `Ljud + video ML`
+Input: Efter sparad ljudreview
+Forvantat utfall: `Klar med ljud` sparar ljudmarkers, byter till Review 2, kor pose over hela videon, och visar separata motion markers for `Forehand`, `Backhand`, eller `Oklart`.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
-### AI-04
-Mode: `bounce_audio_imu_collection`
-Preset: `n/a`
-Kalibrering: `table_only`
-Forvantat utfall: Efter sparad take innehaller session-JSON vanlig audio-eventdata och `imu_recording` med `target_hz: 150`, `sample_count`, `sample_hz_estimate`, intervallmetadata, `quality_flag`, `partial`, `disconnected`, samt samples med `sensor_ts`, `received_at_ms` och `take_ts_ms`.
+### AVP-04
+Mode: `Ljud + video ML`
+Input: Slutlig save
+Forvantat utfall: JSON sparar ljudmarkers och motion markers som separata rader; motion rows har `event_type: motion` och `source_audio_marker_id` nar de skapats fran en rackettraff.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
-### AI-05
-Mode: `bounce_audio_imu_collection`
-Preset: `n/a`
-Kalibrering: `table_only`
-Forvantat utfall: Review-flodet fungerar oforandrat pa synced takes: save och discard fungerar, och `Review pending` visar bara aktuell sessions pending takes.
+## Video Stroke Test
+
+### VS-01
+Mode: `Video stroke test`
+Kamera: `Front`
+Forvantat utfall: En video-only take eller importerad MP4 sparas som `.mp4`, och review-vyn oppnas utan IMU-krav.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
-### AI-06
-Mode: `bounce_audio_imu_collection`
-Preset: `racket_bounce_fh`
-Kalibrering: `table_only`
-Forvantat utfall: Om faktisk IMU-rate ar lag eller ojamn markeras taket med quality-warning (`below_target`, `unstable`, eller `partial`) utan att kallas syncfel.
+### VS-02
+Mode: `Video stroke test`
+Kamera: `Front snett framifran`
+Forvantat utfall: Det gar att scrubba/spela videon, lagga minst 10 `Forehand` och 10 `Backhand` markers, ta bort en marker, och spara session JSON under `pingis_video_stroke_sessions`.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
+
+### VS-03
+Mode: `Video stroke test`
+Kamera: `Front`
+Forvantat utfall: `Analysera markerade slag` kraschar inte nar `video_stroke_model.json` ar otranad, utan visar `Ingen videomodell exporterad an` per marker.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### VS-04
+Mode: `Video stroke test`
+Kamera: `Front`
+Forvantat utfall: Efter att `video_stroke_model.json` exporterats visar appen `Forehand`, `Backhand`, eller `Oklart` per marker med confidence.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### VS-05
+Mode: `Video stroke test`
+Kamera: `Back/front snett framifran`
+Forvantat utfall: `Auto-hitta slagforslag` analyserar hela videon och lagger modellforslag pa tidslinjen utan att markera dem som traningsfacit.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### VS-06
+Mode: `Video stroke test`
+Kamera: `Back/front snett framifran`
+Forvantat utfall: Det gar att bekrafta ett autoforslag som `FH` eller `BH`, korrigera fel forslag, ta bort forslag, och bara bekraftade markers anvands i nasta preprocess.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### VS-07
+Mode: `Videoinsamling FH/BH`
+Kamera: `Back/front snett framifran`
+Forvantat utfall: Toggeln `Spela in utan stopp` spelar in en lang kallvideo tills Love stoppar manuellt, native-delar den till cirka `30 s` MP4-reviewdelar, och alla delar gar att spela upp och bladdra mellan utan att blanda markers.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### VS-08
+Mode: `Videoinsamling FH/BH`
+Kamera: `Back/front snett framifran`
+Forvantat utfall: Lagt visas under `DATA`, inte `TEST MODES`, och review liknar audio-review med toppbar, stor videospelare, progress, `0.25x`, `0.5x`, och `1x` utan att playhead/markers tappar sync.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+### VS-09
+Mode: `Videoinsamling FH/BH`
+Kamera: `n/a`
+Forvantat utfall: `Ateruppta senaste` oppnar den senaste sparade videosessionen med befintliga 30s-delar, och `Importera video` later Love valja en MP4/MOV fran telefonen, kopierar den till video-stroke-sessionen och delar den till reviewbara 30s-delar.
+Faktiskt utfall:
+PASS / FAIL:
+Kommentar:
+
+## Retired Audio + IMU Collector Tests
+
+The AirHive/IMU path is no longer active product scope. Do not run or expand synced sensor test cases unless Love explicitly reopens that direction with a new ticket and decision.
 
 ## Playing Review Tests
 
 ### PR-01
-Mode: `Audio plus IMU`
-Scenario: `Playing`
-Kalibrering: `table_only` eller `partial`
+Mode: `Ljud + video ML`
+Scenario: `Playing / racket + bord`
+Kalibrering: `n/a`
 Forvantat utfall: Review visar bara tre labelval: `Rackettraff forehand`, `Rackettraff backhand`, och `Bordsstuds`. Generisk rackettraff, golv, brus, ignore och other visas inte som Playing-labels.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
 ### PR-02
-Mode: `Audio plus IMU`
-Scenario: `Playing`
-Kalibrering: `table_only` eller `partial`
+Mode: `Ljud + video ML`
+Scenario: `Playing / racket + bord`
+Kalibrering: `n/a`
 Forvantat utfall: Auto-markers visar sakerhet/confidence och filtret `Alla / Medium / Sakra` uppdaterar direkt hur manga auto-detekterade markers som visas utan att manuella eller bekraftade markers forsvinner.
 Faktiskt utfall:
 PASS / FAIL:
 Kommentar:
 
 ### PR-03
-Mode: `Audio plus IMU`
-Scenario: `Playing`
-Kalibrering: `table_only` eller `partial`
+Mode: `Ljud + video ML`
+Scenario: `Playing / racket + bord`
+Kalibrering: `n/a`
 Forvantat utfall: En lang video startar snabbare vid `1x` playback, syncpanelen faller ihop efter `Synka har`, och `12x/16x` zoom gar att dra med playhead och edge-autoscroll.
 Faktiskt utfall:
 PASS / FAIL:
