@@ -58,6 +58,8 @@ interface FableDebugEvent {
   model_label?: string;
   model_confidence?: number;
   model_probabilities?: Record<string, number>;
+  bg_mode?: string;
+  bg_rms_db?: number;
   counted: boolean;
   reject_reason: string;
   feature_ms?: number;
@@ -87,7 +89,10 @@ export function FableLiveScreen({ setup, onDone }: Props) {
   const [isListening, setIsListening] = useState(false);
   const [hitCount, setHitCount] = useState(0);
   const [eventCount, setEventCount] = useState(0);
-  const [lastResult, setLastResult] = useState<{ label: string; conf: number; reason: string; probs: Record<string, number> } | null>(null);
+  const [staleCount, setStaleCount] = useState(0);
+  const [lastHeight, setLastHeight] = useState<{ heightM: number; gapMs: number; avgM: number } | null>(null);
+  const heightsRef = useRef<number[]>([]);
+  const [lastResult, setLastResult] = useState<{ label: string; conf: number; reason: string; probs: Record<string, number>; bgMode?: string } | null>(null);
   const [recentEvents, setRecentEvents] = useState<FableEventRow[]>([]);
   const [latencyMs, setLatencyMs] = useState<{ p50: number; max: number } | null>(null);
   const [savedDebugPath, setSavedDebugPath] = useState<string | null>(null);
@@ -143,6 +148,9 @@ export function FableLiveScreen({ setup, onDone }: Props) {
     startedAtRef.current = new Date().toISOString();
     setHitCount(0);
     setEventCount(0);
+    setStaleCount(0);
+    setLastHeight(null);
+    heightsRef.current = [];
     setLastResult(null);
     setRecentEvents([]);
     setSavedDebugPath(null);
@@ -182,29 +190,40 @@ export function FableLiveScreen({ setup, onDone }: Props) {
         const onsetTimeMs = nativeDebug?.onset_time_ms ?? receivedAtMs;
         const frameRms = nativeDebug?.rms ?? 0;
         const pcm = decodeBase64PCM(audioB64);
-        const result: FableDetectionResult = counterRef.current.process(pcm, onsetTimeMs, frameRms);
+        const result: FableDetectionResult = counterRef.current.process(pcm, onsetTimeMs, frameRms, receivedAtMs);
 
-        latenciesRef.current.push(result.featureMs + result.predictMs);
-        if (latenciesRef.current.length % 5 === 0) {
-          const sorted = [...latenciesRef.current].sort((a, b) => a - b);
-          setLatencyMs({
-            p50: sorted[Math.floor(sorted.length / 2)],
-            max: sorted[sorted.length - 1],
-          });
+        if (result.prediction) {
+          latenciesRef.current.push(result.featureMs + result.predictMs);
+          if (latenciesRef.current.length % 5 === 0) {
+            const sorted = [...latenciesRef.current].sort((a, b) => a - b);
+            setLatencyMs({
+              p50: sorted[Math.floor(sorted.length / 2)],
+              max: sorted[sorted.length - 1],
+            });
+          }
         }
+        if (result.rejectReason === 'stale_backlog') setStaleCount(n => n + 1);
 
         const reason = result.counted ? 'räknad' : (result.rejectReason ?? 'okänd');
         if (result.counted) setHitCount(n => n + 1);
-        setLastResult({
-          label: result.prediction.label,
-          conf: result.prediction.confidence,
-          reason,
-          probs: result.prediction.probabilities,
-        });
+        if (result.counted && result.bounceHeightM !== undefined && result.bounceGapMs !== undefined) {
+          heightsRef.current.push(result.bounceHeightM);
+          const avg = heightsRef.current.reduce((a, b) => a + b, 0) / heightsRef.current.length;
+          setLastHeight({ heightM: result.bounceHeightM, gapMs: result.bounceGapMs, avgM: avg });
+        }
+        if (result.prediction) {
+          setLastResult({
+            label: result.prediction.label,
+            conf: result.prediction.confidence,
+            reason,
+            probs: result.prediction.probabilities,
+            bgMode: result.bgMode,
+          });
+        }
         setRecentEvents(prev => [{
           ts,
-          label: result.prediction.label,
-          confidence: result.prediction.confidence,
+          label: result.prediction?.label ?? '-',
+          confidence: result.prediction?.confidence ?? 0,
           counted: result.counted,
           reason,
         }, ...prev.slice(0, 24)]);
@@ -214,9 +233,11 @@ export function FableLiveScreen({ setup, onDone }: Props) {
           native_onset_time_ms: nativeDebug?.onset_time_ms,
           native_rms: nativeDebug?.rms,
           native_background_rms: nativeDebug?.background_rms,
-          model_label: result.prediction.label,
-          model_confidence: result.prediction.confidence,
-          model_probabilities: result.prediction.probabilities,
+          model_label: result.prediction?.label,
+          model_confidence: result.prediction?.confidence,
+          model_probabilities: result.prediction?.probabilities,
+          bg_mode: result.bgMode,
+          bg_rms_db: result.bgRmsDb,
           counted: result.counted,
           reject_reason: result.counted ? '' : (result.rejectReason ?? 'unknown'),
           feature_ms: result.featureMs,
@@ -253,10 +274,17 @@ export function FableLiveScreen({ setup, onDone }: Props) {
       <View style={styles.counterBox}>
         <Text style={styles.counterValue}>{hitCount}</Text>
         <Text style={styles.counterLabel}>räknade racketstudsar</Text>
-        <Text style={styles.eventMeta}>{eventCount} kandidater från gaten</Text>
+        <Text style={styles.eventMeta}>
+          {eventCount} kandidater från gaten{staleCount > 0 ? ` · ${staleCount} släppta (kö)` : ''}
+        </Text>
         {latencyMs ? (
           <Text style={styles.eventMeta}>
             JS-latens p50 {latencyMs.p50.toFixed(0)} ms / max {latencyMs.max.toFixed(0)} ms
+          </Text>
+        ) : null}
+        {lastHeight ? (
+          <Text style={styles.heightText}>
+            studshöjd {(lastHeight.heightM * 100).toFixed(0)} cm ({lastHeight.gapMs.toFixed(0)} ms) · snitt {(lastHeight.avgM * 100).toFixed(0)} cm
           </Text>
         ) : null}
       </View>
@@ -265,6 +293,7 @@ export function FableLiveScreen({ setup, onDone }: Props) {
         <View style={styles.lastBox}>
           <Text style={[styles.lastLabel, lastResult.label === 'racket_bounce' ? styles.lastRacket : styles.lastOther]}>
             {labelName(lastResult.label)} {(lastResult.conf * 100).toFixed(0)}% — {lastResult.reason}
+            {lastResult.bgMode ? (lastResult.bgMode === 'loud' ? ' · LJUDLIG MILJÖ' : ' · tyst') : ''}
           </Text>
           <Text style={styles.probRow}>
             R {(probs.racket_bounce ?? 0).toFixed(2)}  B {(probs.table_bounce ?? 0).toFixed(2)}  G {(probs.floor_bounce ?? 0).toFixed(2)}  N {(probs.noise ?? 0).toFixed(2)}
@@ -278,7 +307,7 @@ export function FableLiveScreen({ setup, onDone }: Props) {
 
       <Text style={styles.configLine}>
         Gate: bandpass 1.5–7 kHz · ingen spektralgate · retrigger 120 ms{'\n'}
-        Modell: HistGB 83 features · konfidens ≥ 0.5 · eko-gate 300 ms/0.6
+        Modell: HistGB 83 features · adaptiv konfidens 0.65 tyst / 0.90 ljudligt · eko-gate 300 ms/0.6
       </Text>
 
       {savedDebugPath ? <Text style={styles.savedPath}>Debug: {savedDebugPath}</Text> : null}
@@ -306,6 +335,7 @@ const styles = StyleSheet.create({
   counterValue: { color: '#2ecc71', fontSize: 72, fontWeight: '800' },
   counterLabel: { color: '#aaa', fontSize: 14 },
   eventMeta: { color: '#555', fontSize: 12, marginTop: 2 },
+  heightText: { color: '#f1c40f', fontSize: 15, fontWeight: '700', marginTop: 4 },
   lastBox: { alignItems: 'center', paddingVertical: 6 },
   lastLabel: { fontSize: 18, fontWeight: '700' },
   lastRacket: { color: '#2ecc71' },

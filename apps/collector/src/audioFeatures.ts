@@ -79,6 +79,27 @@ const MEL_FB = (() => {
   return fb;
 })();
 
+// Sparse intervall per mel-band: varje Slaney-filter är nollskilt bara i ett
+// smalt bin-intervall. Att hoppa över nollorna ger identisk summa (x + 0 = x)
+// men ~50x färre multiplikationer i mel-loopen — Hermes saknar JIT och
+// feature-extraktionen mättes till 365 ms/kandidat på Motorola innan detta.
+const MEL_RANGES = (() => {
+  const ranges = new Int32Array(N_MELS * 2);
+  for (let m = 0; m < N_MELS; m++) {
+    let start = -1;
+    let end = -1;
+    for (let k = 0; k < N_BINS; k++) {
+      if (MEL_FB[m * N_BINS + k] !== 0) {
+        if (start < 0) start = k;
+        end = k + 1;
+      }
+    }
+    ranges[m * 2] = start < 0 ? 0 : start;
+    ranges[m * 2 + 1] = end < 0 ? 0 : end;
+  }
+  return ranges;
+})();
+
 // ── FFT (iterativ Cooley-Tukey radix-2, in-place) ─────────────────────────────
 // Delade buffrar – inte thread-safe men JS är single-threaded.
 
@@ -165,6 +186,31 @@ const SC_EDGES: number[] = [];
   for (let i = 0; i <= 6; i++) SC_EDGES.push(fmin * Math.pow(2, i));
   SC_EDGES[SC_EDGES.length - 1] = Math.min(SC_EDGES[SC_EDGES.length - 1], SR / 2);
 }
+
+// Förberäknade bin-intervall per kontrastband (FFT_FREQS är monotont ökande,
+// så f >= lo && f < hi är ett sammanhängande intervall). Identiskt urval som
+// den gamla per-bin-jämförelsen, utan 1025 jämförelser per band och frame.
+const SC_RANGES = (() => {
+  const ranges = new Int32Array(SC_N_BANDS * 2);
+  for (let b = 0; b < SC_N_BANDS; b++) {
+    const loHz = b < SC_EDGES.length ? SC_EDGES[b] : 0;
+    const hiHz = b + 1 < SC_EDGES.length ? SC_EDGES[b + 1] : SR / 2;
+    let start = -1;
+    let end = -1;
+    for (let k = 0; k < N_BINS; k++) {
+      if (FFT_FREQS[k] >= loHz && FFT_FREQS[k] < hiHz) {
+        if (start < 0) start = k;
+        end = k + 1;
+      }
+    }
+    ranges[b * 2] = start < 0 ? 0 : start;
+    ranges[b * 2 + 1] = end < 0 ? 0 : end;
+  }
+  return ranges;
+})();
+
+// Återanvänd buffert för bandmagnituder (största bandet ryms).
+const _scBuf = new Float64Array(N_BINS);
 
 // ── Sub-band energi: band-gränser ────────────────────────────────────────────
 const SUB_BANDS: [string, number, number][] = [
@@ -373,10 +419,14 @@ export function extractFeatures(pcm: Float32Array): Record<string, number> {
     }
 
     // ── Mel-spektrogram (power) + log ────────────────────────────────────────
+    // Sparse: bara det nollskilda bin-intervallet per mel-band (exakt samma
+    // summa som full loop eftersom övriga termer är exakt 0).
     for (let m = 0; m < N_MELS; m++) {
       let s = 0;
       const off = m * N_BINS;
-      for (let k = 0; k < N_BINS; k++) s += MEL_FB[off + k] * (magFrame[k] * magFrame[k]);
+      const kStart = MEL_RANGES[m * 2];
+      const kEnd = MEL_RANGES[m * 2 + 1];
+      for (let k = kStart; k < kEnd; k++) s += MEL_FB[off + k] * (magFrame[k] * magFrame[k]);
       melFrame[m] = s;
       curLogMel[m] = 10 * Math.log10(Math.max(melFrame[m], LOG_EPS));
     }
@@ -442,21 +492,20 @@ export function extractFeatures(pcm: Float32Array): Record<string, number> {
     // ── Spectral contrast (per oktavband) ────────────────────────────────────
     // librosa: för varje band, sortera magnitude-bins, kontrast = mean(topp) - mean(botten)
     for (let b = 0; b < SC_N_BANDS; b++) {
-      const loHz = b < SC_EDGES.length ? SC_EDGES[b] : 0;
-      const hiHz = b + 1 < SC_EDGES.length ? SC_EDGES[b + 1] : SR / 2;
-      const bandMags: number[] = [];
-      for (let k = 0; k < N_BINS; k++) {
-        if (FFT_FREQS[k] >= loHz && FFT_FREQS[k] < hiHz) {
-          bandMags.push(magFrame[k] * magFrame[k]); // power
+      const kStart = SC_RANGES[b * 2];
+      const kEnd = SC_RANGES[b * 2 + 1];
+      const len = kEnd - kStart;
+      if (len > 0) {
+        for (let k = kStart; k < kEnd; k++) {
+          _scBuf[k - kStart] = magFrame[k] * magFrame[k]; // power
         }
-      }
-      if (bandMags.length > 0) {
-        bandMags.sort((a, b2) => a - b2);
-        const nPeek = Math.max(1, Math.floor(bandMags.length * 0.2));
+        const bandMags = _scBuf.subarray(0, len);
+        bandMags.sort();
+        const nPeek = Math.max(1, Math.floor(len * 0.2));
         let topSum = 0, botSum = 0;
         for (let i = 0; i < nPeek; i++) {
           botSum += bandMags[i];
-          topSum += bandMags[bandMags.length - 1 - i];
+          topSum += bandMags[len - 1 - i];
         }
         const topMean = topSum / nPeek + LOG_EPS;
         const botMean = botSum / nPeek + LOG_EPS;

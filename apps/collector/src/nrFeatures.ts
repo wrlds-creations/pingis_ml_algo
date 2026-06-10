@@ -216,6 +216,25 @@ const MEL40_FB = (() => {
   return fb;
 })();
 
+// Sparse nollskilda intervall per mel-band (samma optimering som i
+// audioFeatures.ts — identisk summa, mycket färre multiplikationer).
+const MEL40_RANGES = (() => {
+  const ranges = new Int32Array(N_MELS_PCEN * 2);
+  for (let m = 0; m < N_MELS_PCEN; m++) {
+    let start = -1;
+    let end = -1;
+    for (let k = 0; k < N_BINS; k++) {
+      if (MEL40_FB[m * N_BINS + k] !== 0) {
+        if (start < 0) start = k;
+        end = k + 1;
+      }
+    }
+    ranges[m * 2] = start < 0 ? 0 : start;
+    ranges[m * 2 + 1] = end < 0 ? 0 : end;
+  }
+  return ranges;
+})();
+
 // PCEN-konstanter (librosa defaults: gain=0.98, bias=2, power=0.5,
 // time_constant=0.4, eps=1e-6, S skalad med 2^31).
 const PCEN_GAIN = 0.98;
@@ -249,11 +268,13 @@ export function extractNrFeatures(clipIn: Float32Array): Record<string, number> 
     for (let k = 0; k < N_BINS; k++) {
       S[off + k] = _re512[k] * _re512[k] + _im512[k] * _im512[k];
     }
-    // Mel (power) för PCEN
+    // Mel (power) för PCEN — sparse intervall, exakt samma summa.
     for (let m = 0; m < N_MELS_PCEN; m++) {
       let s = 0;
       const fOff = m * N_BINS;
-      for (let k = 0; k < N_BINS; k++) s += MEL40_FB[fOff + k] * S[off + k];
+      const kStart = MEL40_RANGES[m * 2];
+      const kEnd = MEL40_RANGES[m * 2 + 1];
+      for (let k = kStart; k < kEnd; k++) s += MEL40_FB[fOff + k] * S[off + k];
       mel[t * N_MELS_PCEN + m] = s;
     }
   }
