@@ -467,6 +467,16 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=nr_config.RNG_SEED, help="Random seed.")
     parser.add_argument("--model-version", default=DEFAULT_MODEL_VERSION, help="model_version stored in JSON metadata.")
     parser.add_argument("--feature-version", default=DEFAULT_FEATURE_VERSION, help="feature_version stored in JSON metadata.")
+    parser.add_argument(
+        "--extra-train-csv",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Repeatable: path to an extra training-rows CSV (e.g. nr_train_mined.csv) "
+            "appended to the nr_train.csv dataframe after schema validation."
+        ),
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -489,6 +499,20 @@ def main() -> None:
 
     train_df = load_split_csv(data_dir / "nr_train.csv")
     val_df = load_split_csv(data_dir / "nr_val.csv")
+
+    extra_train_csvs: list[dict] = []
+    for extra_arg in args.extra_train_csv:
+        extra_path = Path(extra_arg)
+        if not extra_path.exists():
+            raise FileNotFoundError(f"--extra-train-csv not found: {extra_path}")
+        extra_df = pd.read_csv(extra_path)
+        if list(extra_df.columns) != list(train_df.columns):
+            raise ValueError(
+                f"--extra-train-csv {extra_path} columns do not match nr_train.csv columns."
+            )
+        train_df = pd.concat([train_df, extra_df], ignore_index=True)
+        extra_train_csvs.append({"path": str(extra_path), "rows": int(len(extra_df))})
+        print(f"Extra train rows appended from {extra_path}: {len(extra_df)} (train total now {len(train_df)})")
 
     missing_meta = [col for col in META_COLS if col not in train_df.columns]
     if missing_meta:
@@ -628,6 +652,7 @@ def main() -> None:
         "data_dir": str(data_dir),
         "out_dir": str(out_dir),
         "train_rows": int(len(train_df)),
+        "extra_train_csvs": extra_train_csvs,
         "val_rows": int(len(val_df)),
         "val_eval_rows": int(len(val_clean)),
         "train_label_counts": {str(k): int(v) for k, v in train_df["label"].value_counts().to_dict().items()},

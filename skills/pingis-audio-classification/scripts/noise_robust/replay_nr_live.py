@@ -44,7 +44,9 @@ from preprocess_audio import (  # noqa: E402
     contact_kind_for,
     extract_features,
     is_trainable_racket_marker,
+    is_trainable_review_marker,
     load_audio,
+    not_racket_kind_for,
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[4]
@@ -145,6 +147,36 @@ def score_matches(detections_ms: list[float], truth_ms: list[int], tolerance_ms:
     }
 
 
+def score_matches_detailed(
+    detections_ms: list[float], truth_ms: list[int], tolerance_ms: int
+) -> list[tuple[float, str, int | None]]:
+    """Per-detection version of score_matches (same greedy algorithm).
+
+    Returns a list of (detection_ms, match_kind, matched_truth_ms) where
+    match_kind is 'tp' / 'fp' / 'dup' (dup keeps the truth ts it duplicated).
+    Used only by --dump-detections; score_matches stays the scoring source
+    of truth for the summary outputs.
+    """
+    matched: set[int] = set()
+    out: list[tuple[float, str, int | None]] = []
+    for detection in sorted(detections_ms):
+        nearest_idx: int | None = None
+        nearest_delta = tolerance_ms + 1
+        for idx, truth in enumerate(truth_ms):
+            delta = abs(detection - truth)
+            if delta <= tolerance_ms and delta < nearest_delta:
+                nearest_idx = idx
+                nearest_delta = delta
+        if nearest_idx is None:
+            out.append((detection, "fp", None))
+        elif nearest_idx in matched:
+            out.append((detection, "dup", truth_ms[nearest_idx]))
+        else:
+            matched.add(nearest_idx)
+            out.append((detection, "tp", truth_ms[nearest_idx]))
+    return out
+
+
 def truth_gate_hits(truth_ms: list[int], trigger_ms: list[float], tolerance_ms: int) -> int:
     """Number of truth markers with at least one trigger within tolerance."""
     return sum(
@@ -171,6 +203,41 @@ def apply_count_logic(
         last_counted_ms = event_ms
         group_start_ms = event_ms
     return counted, rejects
+
+
+def apply_count_logic_detailed(
+    decision_ms: list[float], merge_ms: int, group_ms: int
+) -> list[tuple[float, str]]:
+    """Per-event version of apply_count_logic (same algorithm).
+
+    Returns (event_ms, status) per decision event in sorted order; status is
+    'counted' / 'rejected_merge' / 'rejected_group'. Used only by
+    --dump-detections; apply_count_logic stays the counting source of truth.
+    """
+    statuses: list[tuple[float, str]] = []
+    last_counted_ms: float | None = None
+    group_start_ms: float | None = None
+    for event_ms in sorted(decision_ms):
+        if last_counted_ms is not None and event_ms - last_counted_ms <= merge_ms:
+            statuses.append((event_ms, "rejected_merge"))
+            continue
+        if group_start_ms is not None and event_ms - group_start_ms <= group_ms:
+            statuses.append((event_ms, "rejected_group"))
+            continue
+        statuses.append((event_ms, "counted"))
+        last_counted_ms = event_ms
+        group_start_ms = event_ms
+    return statuses
+
+
+def trainable_marker_kind(marker: dict, event_label: str, scenario_id: str) -> str:
+    """Fine-grained kind for a trainable review marker (keeps voice_music_noise,
+    other_impact etc. distinct instead of collapsing to 'noise')."""
+    final_label = str(marker.get("final_label") or "")
+    if final_label == "racket_contact":
+        return str(marker.get("contact_kind") or contact_kind_for(event_label, scenario_id) or "racket_bounce")
+    kind = str(marker.get("not_racket_kind") or not_racket_kind_for(event_label, scenario_id) or "")
+    return kind or "noise"
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +493,7 @@ def replay_event_wav(
 
     decision_ms: list[float] = []
     event_latencies: list[float] = []
+    detections: list[dict[str, Any]] = []
     for trigger in passed:
         clip = nr_mod.extract_live_clip(y, int(trigger["onset_sample"]))
         started = time.perf_counter()
@@ -448,6 +516,13 @@ def replay_event_wav(
             qualifies = p_racket >= args.confidence
         if qualifies:
             decision_ms.append(float(trigger["onset_ms"]))
+        detections.append({
+            "onset_ms": float(trigger["onset_ms"]),
+            "predicted_label": classes[best_idx],
+            "confidence": confidence,
+            "probs": {label: float(prob) for label, prob in zip(classes, probs)},
+            "qualifies": bool(qualifies),
+        })
 
     counted_ms, count_rejects = apply_count_logic(decision_ms, args.merge_ms, args.group_ms)
     return {
@@ -458,6 +533,7 @@ def replay_event_wav(
         "count_rejects": count_rejects,
         "n_classified": len(passed),
         "mean_feature_predict_ms": float(np.mean(event_latencies)) if event_latencies else None,
+        "detections": detections,
     }
 
 
@@ -629,6 +705,91 @@ EVENT_CSV_FIELDS = [
     "mean_feature_predict_ms",
 ]
 
+DETECTION_CSV_FIELDS = [
+    "session_id",
+    "split",
+    "wav_filename",
+    "bucket",
+    "onset_ms",
+    "decision",
+    "predicted_label",
+    "confidence",
+    "p_racket",
+    "p_table",
+    "p_floor",
+    "p_noise",
+    "matched_truth",
+    "match_kind",
+    "nearest_truth_label",
+    "nearest_truth_gap_ms",
+]
+
+PROB_COLUMN_BY_CLASS = {
+    "racket_bounce": "p_racket",
+    "table_bounce": "p_table",
+    "floor_bounce": "p_floor",
+    "noise": "p_noise",
+}
+
+
+def detection_rows_for_event(
+    replay: dict[str, Any],
+    *,
+    session_id: str,
+    split: str,
+    wav_filename: str,
+    bucket: str,
+    truth_for_scoring: list[int],
+    trainable_markers: list[tuple[int, str]],
+    merge_ms: int,
+    group_ms: int,
+    tolerance_ms: int,
+) -> list[dict[str, Any]]:
+    """One dump row per classified trigger (--dump-detections only)."""
+    status_map = dict(apply_count_logic_detailed(replay["decision_ms"], merge_ms, group_ms))
+    match_map = {
+        ms: (kind, matched)
+        for ms, kind, matched in score_matches_detailed(replay["counted_ms"], truth_for_scoring, tolerance_ms)
+    }
+    rows: list[dict[str, Any]] = []
+    for det in replay["detections"]:
+        onset_ms = det["onset_ms"]
+        if det["qualifies"]:
+            decision = status_map.get(onset_ms, "counted")
+        elif det["predicted_label"] == "racket_bounce":
+            decision = "rejected_conf"
+        else:
+            decision = "not_racket"
+        match_kind, matched_truth = ("", None)
+        if decision == "counted":
+            match_kind, matched_truth = match_map.get(onset_ms, ("", None))
+        nearest_truth_label = ""
+        nearest_truth_gap_ms: float | str = ""
+        if trainable_markers:
+            nearest_ts, nearest_truth_label = min(
+                trainable_markers, key=lambda item: abs(onset_ms - item[0])
+            )
+            nearest_truth_gap_ms = round(onset_ms - nearest_ts, 1)
+        row: dict[str, Any] = {
+            "session_id": session_id,
+            "split": split,
+            "wav_filename": wav_filename,
+            "bucket": bucket,
+            "onset_ms": round(onset_ms, 3),
+            "decision": decision,
+            "predicted_label": det["predicted_label"],
+            "confidence": round(det["confidence"], 6),
+            "matched_truth": "" if matched_truth is None else matched_truth,
+            "match_kind": match_kind,
+            "nearest_truth_label": nearest_truth_label,
+            "nearest_truth_gap_ms": nearest_truth_gap_ms,
+        }
+        for label, column in PROB_COLUMN_BY_CLASS.items():
+            prob = det["probs"].get(label)
+            row[column] = "" if prob is None else round(float(prob), 6)
+        rows.append(row)
+    return rows
+
 
 # ---------------------------------------------------------------------------
 # Main replay loop
@@ -657,6 +818,7 @@ def run_replay(args: argparse.Namespace) -> None:
     print(f"Selected {len(selected)} session(s): {[record['session_id'] for record, _ in selected]}")
 
     rows: list[dict[str, Any]] = []
+    detection_rows: list[dict[str, Any]] = []
     latencies_ms: list[float] = []
     skipped = {
         "missing_wav": 0,
@@ -712,6 +874,28 @@ def run_replay(args: argparse.Namespace) -> None:
             y, _sr = load_audio(str(wav_path))
             duration_s = len(y) / float(TARGET_SR)
             replay = replay_event_wav(y, nr_mod, robust_fn, model, args, abs_min_rms, latencies_ms)
+
+            if args.dump_detections:
+                trainable_markers = sorted(
+                    (
+                        int(round(float(m.get("timestamp_ms") or 0))),
+                        trainable_marker_kind(m, label, scenario_id),
+                    )
+                    for m in markers
+                    if is_trainable_review_marker(m)
+                )
+                detection_rows.extend(detection_rows_for_event(
+                    replay,
+                    session_id=session_id,
+                    split=split,
+                    wav_filename=wav_filename,
+                    bucket=bucket_for_event(session_id, event.get("background_condition")),
+                    truth_for_scoring=[] if is_fp_bed else truth,
+                    trainable_markers=trainable_markers,
+                    merge_ms=args.merge_ms,
+                    group_ms=args.group_ms,
+                    tolerance_ms=tolerance_ms,
+                ))
 
             if is_fp_bed:
                 metrics = {
@@ -802,6 +986,15 @@ def run_replay(args: argparse.Namespace) -> None:
         for row in rows:
             writer.writerow({key: ("" if row.get(key) is None else row.get(key)) for key in EVENT_CSV_FIELDS})
 
+    detections_csv: Path | None = None
+    if args.dump_detections:
+        detections_csv = Path(f"{out_prefix}_detections.csv")
+        with detections_csv.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=DETECTION_CSV_FIELDS)
+            writer.writeheader()
+            for row in detection_rows:
+                writer.writerow({key: ("" if row.get(key) is None else row.get(key)) for key in DETECTION_CSV_FIELDS})
+
     per_bucket_out = {bucket: derived_metrics(acc) for bucket, acc in per_bucket.items()}
     per_split_out = {split: derived_metrics(acc) for split, acc in per_split.items()}
     overall_out = derived_metrics(overall)
@@ -851,6 +1044,8 @@ def run_replay(args: argparse.Namespace) -> None:
     print(markdown)
     print(f"Skipped: {skipped}")
     print(f"Wrote {events_csv}")
+    if detections_csv is not None:
+        print(f"Wrote {detections_csv} ({len(detection_rows)} detections)")
     print(f"Wrote {summary_json}")
     print(f"Wrote {summary_md}")
 
@@ -937,6 +1132,12 @@ def parse_args() -> argparse.Namespace:
         "or <model-dir>/scaler_<feature-set>.joblib.",
     )
     parser.add_argument("--match-tolerance-ms", type=int, default=nr_config.MATCH_TOLERANCE_MS)
+    parser.add_argument(
+        "--dump-detections",
+        action="store_true",
+        help="Also write <out-prefix>_detections.csv with one row per classified "
+        "trigger (decision, per-class probabilities, truth matching).",
+    )
     parser.add_argument(
         "--allow-unscaled",
         action="store_true",
