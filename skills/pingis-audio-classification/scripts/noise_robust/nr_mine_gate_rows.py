@@ -133,6 +133,12 @@ def main() -> None:
     )
     parser.add_argument("--seed", type=int, default=nr_config.RNG_SEED, help="RNG seed.")
     parser.add_argument(
+        "--bed-cap",
+        type=int,
+        default=BED_TRIGGER_CAP,
+        help="Max gate-mined noise rows per bed take (even subsampling above this).",
+    )
+    parser.add_argument(
         "--limit-sessions",
         default="",
         help=(
@@ -380,9 +386,9 @@ def main() -> None:
         n_before = len(triggers)
         triggers = [t for t in triggers if t["onset_sample"] >= nr_config.CLIP_PRE_SAMPLES]
         skipped["bed_triggers_early_dropped"] += n_before - len(triggers)
-        if len(triggers) > BED_TRIGGER_CAP:
-            skipped["bed_triggers_capped"] += len(triggers) - BED_TRIGGER_CAP
-            keep = np.linspace(0, len(triggers) - 1, BED_TRIGGER_CAP).astype(int)
+        if len(triggers) > args.bed_cap:
+            skipped["bed_triggers_capped"] += len(triggers) - args.bed_cap
+            keep = np.linspace(0, len(triggers) - 1, args.bed_cap).astype(int)
             selected = [(int(i), triggers[int(i)]) for i in keep]
         else:
             selected = list(enumerate(triggers))
