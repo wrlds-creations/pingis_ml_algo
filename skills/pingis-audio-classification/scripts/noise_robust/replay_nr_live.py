@@ -185,47 +185,76 @@ def truth_gate_hits(truth_ms: list[int], trigger_ms: list[float], tolerance_ms: 
 
 
 def apply_count_logic(
-    decision_ms: list[float], merge_ms: int, group_ms: int
+    decision_events: list[tuple[float, float]],
+    merge_ms: int,
+    group_ms: int,
+    echo_ms: int = 0,
+    echo_ratio: float = 0.6,
 ) -> tuple[list[float], dict[str, int]]:
-    """Merge window (vs last counted) then group window (vs group start)."""
+    """Merge window (vs last counted), group window (vs group start), then an
+    optional echo gate: a detection in (merge_ms, echo_ms] after the last
+    counted event is dropped when its onset-frame RMS is at most
+    `echo_ratio` x the counted event's RMS (racket rattle/decay re-trigger,
+    not a new bounce). Events are (onset_ms, frame_rms)."""
     counted: list[float] = []
-    rejects = {"merge_window": 0, "group_window": 0}
-    last_counted_ms: float | None = None
+    rejects = {"merge_window": 0, "group_window": 0, "echo_window": 0}
+    last_counted: tuple[float, float] | None = None
     group_start_ms: float | None = None
-    for event_ms in sorted(decision_ms):
-        if last_counted_ms is not None and event_ms - last_counted_ms <= merge_ms:
+    for event_ms, event_rms in sorted(decision_events):
+        if last_counted is not None and event_ms - last_counted[0] <= merge_ms:
             rejects["merge_window"] += 1
             continue
         if group_start_ms is not None and event_ms - group_start_ms <= group_ms:
             rejects["group_window"] += 1
             continue
+        if (
+            echo_ms > merge_ms
+            and last_counted is not None
+            and event_ms - last_counted[0] <= echo_ms
+            and event_rms <= echo_ratio * last_counted[1]
+        ):
+            rejects["echo_window"] += 1
+            continue
         counted.append(event_ms)
-        last_counted_ms = event_ms
+        last_counted = (event_ms, event_rms)
         group_start_ms = event_ms
     return counted, rejects
 
 
 def apply_count_logic_detailed(
-    decision_ms: list[float], merge_ms: int, group_ms: int
+    decision_events: list[tuple[float, float]],
+    merge_ms: int,
+    group_ms: int,
+    echo_ms: int = 0,
+    echo_ratio: float = 0.6,
 ) -> list[tuple[float, str]]:
     """Per-event version of apply_count_logic (same algorithm).
 
     Returns (event_ms, status) per decision event in sorted order; status is
-    'counted' / 'rejected_merge' / 'rejected_group'. Used only by
-    --dump-detections; apply_count_logic stays the counting source of truth.
+    'counted' / 'rejected_merge' / 'rejected_group' / 'rejected_echo'. Used
+    only by --dump-detections; apply_count_logic stays the counting source
+    of truth.
     """
     statuses: list[tuple[float, str]] = []
-    last_counted_ms: float | None = None
+    last_counted: tuple[float, float] | None = None
     group_start_ms: float | None = None
-    for event_ms in sorted(decision_ms):
-        if last_counted_ms is not None and event_ms - last_counted_ms <= merge_ms:
+    for event_ms, event_rms in sorted(decision_events):
+        if last_counted is not None and event_ms - last_counted[0] <= merge_ms:
             statuses.append((event_ms, "rejected_merge"))
             continue
         if group_start_ms is not None and event_ms - group_start_ms <= group_ms:
             statuses.append((event_ms, "rejected_group"))
             continue
+        if (
+            echo_ms > merge_ms
+            and last_counted is not None
+            and event_ms - last_counted[0] <= echo_ms
+            and event_rms <= echo_ratio * last_counted[1]
+        ):
+            statuses.append((event_ms, "rejected_echo"))
+            continue
         statuses.append((event_ms, "counted"))
-        last_counted_ms = event_ms
+        last_counted = (event_ms, event_rms)
         group_start_ms = event_ms
     return statuses
 
@@ -491,7 +520,7 @@ def replay_event_wav(
     passed = [t for t in triggers if bool(t.get("passed_spectral", True))]
     passed_ms = [float(t["onset_ms"]) for t in passed]
 
-    decision_ms: list[float] = []
+    decision_events: list[tuple[float, float]] = []
     event_latencies: list[float] = []
     detections: list[dict[str, Any]] = []
     for trigger in passed:
@@ -515,7 +544,7 @@ def replay_event_wav(
         else:
             qualifies = p_racket >= args.confidence
         if qualifies:
-            decision_ms.append(float(trigger["onset_ms"]))
+            decision_events.append((float(trigger["onset_ms"]), float(trigger.get("frame_rms", 0.0))))
         detections.append({
             "onset_ms": float(trigger["onset_ms"]),
             "predicted_label": classes[best_idx],
@@ -524,11 +553,14 @@ def replay_event_wav(
             "qualifies": bool(qualifies),
         })
 
-    counted_ms, count_rejects = apply_count_logic(decision_ms, args.merge_ms, args.group_ms)
+    counted_ms, count_rejects = apply_count_logic(
+        decision_events, args.merge_ms, args.group_ms, args.echo_ms, args.echo_ratio
+    )
     return {
         "raw_ms": raw_ms,
         "passed_ms": passed_ms,
-        "decision_ms": decision_ms,
+        "decision_ms": [ms for ms, _ in decision_events],
+        "decision_events": decision_events,
         "counted_ms": counted_ms,
         "count_rejects": count_rejects,
         "n_classified": len(passed),
@@ -744,9 +776,13 @@ def detection_rows_for_event(
     merge_ms: int,
     group_ms: int,
     tolerance_ms: int,
+    echo_ms: int = 0,
+    echo_ratio: float = 0.6,
 ) -> list[dict[str, Any]]:
     """One dump row per classified trigger (--dump-detections only)."""
-    status_map = dict(apply_count_logic_detailed(replay["decision_ms"], merge_ms, group_ms))
+    status_map = dict(
+        apply_count_logic_detailed(replay["decision_events"], merge_ms, group_ms, echo_ms, echo_ratio)
+    )
     match_map = {
         ms: (kind, matched)
         for ms, kind, matched in score_matches_detailed(replay["counted_ms"], truth_for_scoring, tolerance_ms)
@@ -895,6 +931,8 @@ def run_replay(args: argparse.Namespace) -> None:
                     merge_ms=args.merge_ms,
                     group_ms=args.group_ms,
                     tolerance_ms=tolerance_ms,
+                    echo_ms=args.echo_ms,
+                    echo_ratio=args.echo_ratio,
                 ))
 
             if is_fp_bed:
@@ -1016,6 +1054,8 @@ def run_replay(args: argparse.Namespace) -> None:
         "retrigger_ms": args.retrigger_ms,
         "merge_ms": args.merge_ms,
         "group_ms": args.group_ms,
+        "echo_ms": args.echo_ms,
+        "echo_ratio": args.echo_ratio,
         "match_tolerance_ms": tolerance_ms,
     }
     summary = {
@@ -1067,11 +1107,26 @@ def run_self_test() -> None:
     expected = {"true_positive": 1, "false_positive": 0, "duplicates": 1, "missed": 2}
     assert result == expected, f"scorer case 3 (duplicate, multi-truth) failed: {result} != {expected}"
 
-    counted, rejects = apply_count_logic([1000.0, 1100.0, 1500.0], 220, 80)
+    counted, rejects = apply_count_logic([(1000.0, 0.1), (1100.0, 0.1), (1500.0, 0.1)], 220, 80)
     assert counted == [1000.0, 1500.0], f"count logic counted wrong: {counted}"
-    assert rejects == {"merge_window": 1, "group_window": 0}, f"count logic rejects wrong: {rejects}"
+    assert rejects == {"merge_window": 1, "group_window": 0, "echo_window": 0}, (
+        f"count logic rejects wrong: {rejects}"
+    )
 
-    print("self-test OK: greedy scorer and merge/group count logic behave as specified")
+    # Echo gate: weak re-trigger 250 ms after a counted bounce is dropped,
+    # an equally strong one is counted, and beyond echo_ms everything counts.
+    counted, rejects = apply_count_logic(
+        [(1000.0, 0.10), (1250.0, 0.04), (1600.0, 0.09), (2000.0, 0.02)],
+        120, 80, echo_ms=300, echo_ratio=0.6,
+    )
+    assert counted == [1000.0, 1600.0, 2000.0], f"echo logic counted wrong: {counted}"
+    assert rejects["echo_window"] == 1, f"echo rejects wrong: {rejects}"
+    counted, _ = apply_count_logic(
+        [(1000.0, 0.10), (1250.0, 0.09)], 120, 80, echo_ms=300, echo_ratio=0.6,
+    )
+    assert counted == [1000.0, 1250.0], f"strong second bounce must count: {counted}"
+
+    print("self-test OK: greedy scorer and merge/group/echo count logic behave as specified")
 
 
 # ---------------------------------------------------------------------------
@@ -1117,6 +1172,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--retrigger-ms", type=int, default=220)
     parser.add_argument("--merge-ms", type=int, default=220)
+    parser.add_argument(
+        "--echo-ms", type=int, default=0,
+        help="Echo gate window in ms (0 = off): a detection within (merge_ms, echo_ms] "
+        "of the last counted event is dropped if its onset-frame RMS is <= echo-ratio "
+        "x the counted event's RMS.",
+    )
+    parser.add_argument("--echo-ratio", type=float, default=0.6)
     parser.add_argument("--group-ms", type=int, default=80)
     parser.add_argument("--out-prefix", default=str(DEFAULT_OUT_PREFIX))
     parser.add_argument(
