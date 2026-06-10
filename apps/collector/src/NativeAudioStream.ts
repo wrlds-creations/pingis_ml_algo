@@ -6,11 +6,38 @@ interface AudioStreamInterface {
   stopStreaming(): Promise<string>;
   setThreshold(threshold: number): Promise<string>;
   setRetriggerMs(ms: number): Promise<string>;
+  /**
+   * Fable-läget: gate-RMS-läge ('broadband' | 'bandpass' 1.5–7 kHz),
+   * hård spektralgate på/av, absolut RMS-golv. Återställs till
+   * broadband/true/0.003 vid varje startStreaming — anropa EFTER start.
+   */
+  setGateConfig(mode: 'broadband' | 'bandpass', spectralGate: boolean, absMinRms: number): Promise<string>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }
 
 export const AudioStream: AudioStreamInterface = NativeModules.AudioStream;
 
-/** Emitter för händelsen "onBounceDetected" → payload: base64-sträng med 22050 Int16 LE samples */
+export interface NativeAudioOnsetDebug {
+  onset_time_ms?: number;
+  onset_pos?: number;
+  rms?: number;
+  background_rms?: number;
+  adaptive_threshold?: number;
+  onset_ratio?: number;
+  retrigger_ms?: number;
+  spectral_passed?: boolean;
+  ball_ratio?: number;
+  flatness?: number;
+  native_reject_reason?: string | null;
+}
+
+export interface NativeAudioBouncePayload {
+  audio_b64?: string | null;
+  native_debug?: NativeAudioOnsetDebug;
+}
+
+export type NativeAudioBounceEvent = string | NativeAudioBouncePayload;
+
+/** Emitter for "onBounceDetected"; payload can be a legacy base64 string or a debug object. */
 export const AudioStreamEmitter = new NativeEventEmitter(NativeModules.AudioStream);
