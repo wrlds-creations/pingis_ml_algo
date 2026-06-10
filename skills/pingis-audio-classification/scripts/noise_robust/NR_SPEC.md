@@ -56,7 +56,14 @@ Replicates the native onset detector frame-exactly:
   256-pt FFT with Hann (pad frame to 256): ball-band (200–6000 Hz, DC excl.)
   power ratio must be >= 0.55 and spectral flatness (geo/arith mean of power
   spectrum) <= 0.6. Rejected triggers are still returned with
-  `passed_spectral=False` (and still cause retrigger + bg reset, like native).
+  `passed_spectral=False`, but — matching AudioStreamModule.kt exactly — a
+  REJECTED trigger does NOT start the retrigger cooldown and does NOT reset
+  the background buffer; its frame RMS is appended to the background buffer
+  and scanning continues. Only ACCEPTED triggers set the cooldown and reset
+  the background to `[bg_mean * 2.0] * 30`. Empty background buffer falls
+  back to the current frame RMS (Kotlin `?: rms`), so the first frame of a
+  file cannot trigger. (Amended 2026-06-10 after a parity audit against the
+  Kotlin source; the original spec text mis-stated native behavior.)
 - Return: list of dicts `{onset_sample, onset_ms, frame_rms, bg_rms,
   passed_spectral, ball_ratio, flatness}`.
 
@@ -104,6 +111,10 @@ features prefixed `nr_`. eps = 1e-10. Implement exactly:
     `P = librosa.pcen(M * (2**31), sr=sr, hop_length=128)`;
     `t = P.mean(axis=0)` (per-frame mean over mel bins):
     `nr_pcen_max = t.max()`, `nr_pcen_mean = t.mean()`, `nr_pcen_std = t.std()`.
+
+  - `nr_bp_peak_db` = `20*log10(env_peak + eps)` (band-passed envelope peak
+    level in dB; added as the 21st feature 2026-06-10 — the original list
+    enumerated only 20 names while stating a 21-feature total).
 
   Total: 21 features. Return plain dict, stable key order as listed.
 
@@ -198,9 +209,12 @@ CLI: `--data-dir`, `--out-dir data/audio/models/noise_robust_v1`, `--seed`.
   `0.6*racket_recall + 0.4*racket_precision` subject to
   `racket_precision >= 0.90` on val (if none passes, report best anyway).
 - NO refit on val/test. The shipped model is the train-only fit.
-- Save: joblib artifacts, `training_log.json` (all configs, CV results, val
-  metrics, durations, library versions, hyperparams), and for the best RF an
-  app-format JSON export `nr_audio_model.json`: `{metadata:{model_version:
+- Save: joblib artifacts (`nr_rf_<set>.pkl`, `nr_histgb_<set>.pkl`,
+  `nr_scaler_<set>.pkl`, `nr_feature_cols_<set>.pkl`, `nr_label_encoder.pkl`
+  — replay_nr_live.py resolves these names by default), `training_log.json`
+  (all configs, CV results, val metrics, durations, library versions,
+  hyperparams), and for the best RF an app-format JSON export
+  `nr_audio_model.json`: `{metadata:{model_version:
   'nr_bounce_v1_2026_06_10', feature_version:'nr_features_83_v1', classes,
   tree_count}, labels (LabelEncoder alphabetical), feature_names (training
   column order), scaler_mean, scaler_std (8 dp), trees: flat node arrays —

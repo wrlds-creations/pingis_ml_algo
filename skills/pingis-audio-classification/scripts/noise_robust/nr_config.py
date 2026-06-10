@@ -1,8 +1,8 @@
 """Noise-robust racket bounce detector: split definition and shared constants.
 
 This file is the single source of truth for the session-level train/val/test
-split. The split is by SESSION (not take/group) so that no recording room,
-background bed, or reviewed take can appear on both sides of a boundary.
+split. The split is by SESSION (not take/group): no reviewed take or
+augmentation bed appears on both sides of a boundary.
 
 Rules enforced here:
 - TEST sessions are never used for training rows, augmentation beds, or
@@ -11,6 +11,17 @@ Rules enforced here:
 - Augmentation noise beds are partitioned: TRAIN_BEDS may only be mixed into
   train rows; TEST_FP_BEDS are only used to measure false-positive rates.
 - Diagnostic sessions are excluded everywhere.
+
+Known limitations (documented, not silently ignored):
+- Many test/val sessions share recording days/rooms/device with train
+  sessions (e.g. 05-12, 05-13 series). Test metrics measure robustness to
+  background conditions and unseen recordings, NOT new-room/new-device
+  generalization.
+- The crowd FP bed (04-09_005) is a sibling recording of the train crowd
+  beds (04-09_003/_004): same recording series, same environment. The crowd
+  FP/min number is therefore partially in-domain and should be read as
+  optimistic; the music/speech buckets are the true out-of-domain noise
+  tests (test music/speech audio is never used as a train bed).
 """
 
 from __future__ import annotations
