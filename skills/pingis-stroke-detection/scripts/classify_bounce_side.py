@@ -43,13 +43,67 @@ OUT_DIR = ROOT_DIR / "data" / "video" / "models" / "bounce_side_v1"
 NR_DIR = ROOT_DIR / "skills" / "pingis-audio-classification" / "scripts" / "noise_robust"
 NR_MODEL_DIR = ROOT_DIR / "data" / "audio" / "models" / "noise_robust_v3"
 
-TRAIN_SESSIONS = ["video_bounce_side_session_2026-06-09_001",
-                  "video_bounce_side_session_2026-06-09_002",
+# _001 är medvetet EXKLUDERAD ur träningen: den är block-labelad
+# feasibility-data (PROJECT_CONTEXT/T0038) och att ta med den sänker
+# holdout-accuracyn från 0.92 till 0.68 (reproducerat ur T0040:s artefakter).
+TRAIN_SESSIONS = ["video_bounce_side_session_2026-06-09_002",
                   "video_bounce_side_session_2026-06-09_003"]
 HOLDOUT_SESSION = "video_bounce_side_session_2026-06-09_004"
 
 GRID = 4
 SEED = 20260610
+POSE_MODEL_PATH = ROOT_DIR / "data" / "video" / "models" / "pose_landmarker_lite.task"
+R_WRIST, R_ELBOW, L_WRIST, L_ELBOW = 16, 14, 15, 13
+
+_POSE_LANDMARKER = None
+
+
+def get_pose_landmarker():
+    """Lazy MediaPipe pose landmarker (IMAGE mode) för handleds-ankrad ROI."""
+    global _POSE_LANDMARKER
+    if _POSE_LANDMARKER is None:
+        import mediapipe as mp  # noqa: PLC0415
+        from mediapipe.tasks.python.core import base_options as bo  # noqa: PLC0415
+        from mediapipe.tasks.python.vision import pose_landmarker as plm  # noqa: PLC0415
+        from mediapipe.tasks.python.vision.core import vision_task_running_mode as rm  # noqa: PLC0415
+        options = plm.PoseLandmarkerOptions(
+            base_options=bo.BaseOptions(model_asset_path=str(POSE_MODEL_PATH)),
+            running_mode=rm.VisionTaskRunningMode.IMAGE,
+        )
+        _POSE_LANDMARKER = plm.PoseLandmarker.create_from_options(options)
+    return _POSE_LANDMARKER
+
+
+def wrist_anchored_roi(frame_bgr: np.ndarray) -> np.ndarray | None:
+    """Sido-agnostisk racket-ROI: kvadrat centrerad bortom handleden längs
+    underarmsriktningen (racketen sitter i handen oavsett vilken gummisida
+    som är mot kameran - till skillnad från röd-blob-ankaret som är
+    systematiskt FH-biaserat). Bäst i utvärderingen: 0.72 markör-accuracy
+    på blandade _004 vs 0.64-0.68 för röd-ankare-varianterna."""
+    import cv2 as _cv2  # noqa: PLC0415
+    import mediapipe as mp  # noqa: PLC0415
+    h, w = frame_bgr.shape[:2]
+    image = mp.Image(image_format=mp.ImageFormat.SRGB,
+                     data=_cv2.cvtColor(frame_bgr, _cv2.COLOR_BGR2RGB))
+    result = get_pose_landmarker().detect(image)
+    if not result.pose_landmarks:
+        return None
+    lm = result.pose_landmarks[0]
+    cands = []
+    for wi, ei in ((R_WRIST, R_ELBOW), (L_WRIST, L_ELBOW)):
+        cands.append((lm[wi].visibility, lm[wi], lm[ei]))
+    cands.sort(key=lambda c: -c[0])
+    _, wl, el = cands[0]
+    wx, wy, ex, ey = wl.x * w, wl.y * h, el.x * w, el.y * h
+    fx, fy = wx - ex, wy - ey
+    flen = max(np.hypot(fx, fy), 1.0)
+    cx, cy = wx + 0.8 * fx, wy + 0.8 * fy
+    half = 1.3 * flen
+    x0, y0 = int(max(0, cx - half)), int(max(0, cy - half))
+    x1, y1 = int(min(w, cx + half)), int(min(h, cy + half))
+    if x1 - x0 < 24 or y1 - y0 < 24:
+        return None
+    return frame_bgr[y0:y1, x0:x1]
 
 
 # ── Racket-ROI via röd-gummi-segmentering ────────────────────────────────────
@@ -82,11 +136,24 @@ def find_racket_roi(frame_bgr: np.ndarray) -> tuple[np.ndarray | None, str]:
         return frame_bgr[ch:2 * ch, cw:2 * cw], "center_fallback"
     x, y = stats[best, cv2.CC_STAT_LEFT], stats[best, cv2.CC_STAT_TOP]
     bw, bh = stats[best, cv2.CC_STAT_WIDTH], stats[best, cv2.CC_STAT_HEIGHT]
-    # Expandera 35 %: vid BH-studs syns bara en röd kant - ta med gummit runtom.
-    ex, ey = int(bw * 0.35), int(bh * 0.35)
+    # Tight crop med liten marginal (T0040: tight red-anchor ROI var den
+    # enda strategi som fungerade; bred expansion späder ut sidosignalen).
+    ex, ey = int(bw * 0.1), int(bh * 0.1)
     x0, y0 = max(0, x - ex), max(0, y - ey)
     x1, y1 = min(w, x + bw + ex), min(h, y + bh + ey)
     return frame_bgr[y0:y1, x0:x1], "red_anchor"
+
+
+def roi_pixel_features(roi_bgr: np.ndarray) -> np.ndarray:
+    """T0040-stil: råa nedskalade pixlar (48x48x3) + 128-bins hue-histogram
+    (deras feature-vektor var 7040 = 6912 + 128)."""
+    roi = cv2.resize(roi_bgr, (48, 48), interpolation=cv2.INTER_AREA)
+    rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB).astype(np.float64) / 255.0
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    hist, _ = np.histogram(hsv[:, :, 0].ravel(), bins=128, range=(0, 180),
+                           weights=(hsv[:, :, 1].ravel().astype(np.float64) / 255.0))
+    hist = hist / (hist.sum() + 1e-9)
+    return np.concatenate([rgb.ravel(), hist])
 
 
 def roi_features(roi_bgr: np.ndarray, source: str) -> dict[str, float]:
@@ -126,6 +193,32 @@ def frame_at_ms(capture: cv2.VideoCapture, ts_ms: float) -> np.ndarray | None:
     return frame if ok else None
 
 
+def red_area(frame_bgr: np.ndarray) -> float:
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    return float(red_mask(hsv).sum())
+
+
+def frames_in_window(capture: cv2.VideoCapture, ts_ms: float, pre_ms: float = 80, post_ms: float = 80) -> list[np.ndarray]:
+    """Alla frames i snapshotfönstret ±80 ms (samma fönster som appens
+    bounce-side-snapshots). En enskild frame kan vara rörelseoskarp eller
+    visa racketen mitt i rotation - klassificering sker per frame och
+    aggregeras med röstning, vilket undviker att framvalet i sig biaserar
+    mot den röda (FH-)sidan."""
+    capture.set(cv2.CAP_PROP_POS_MSEC, max(0.0, ts_ms - pre_ms))
+    frames: list[np.ndarray] = []
+    while True:
+        ok, frame = capture.read()
+        if not ok:
+            break
+        pos = capture.get(cv2.CAP_PROP_POS_MSEC)
+        if pos > ts_ms + post_ms:
+            break
+        frames.append(frame.copy())
+        if len(frames) >= 12:
+            break
+    return frames
+
+
 # ── Dataset från granskade bounce-side-sessioner ─────────────────────────────
 
 def iter_session_markers(session_id: str):
@@ -141,28 +234,83 @@ def iter_session_markers(session_id: str):
         yield video, markers
 
 
-def build_dataset(sessions: list[str]) -> tuple[np.ndarray, np.ndarray, list[str], list[dict]]:
-    rows: list[dict] = []
+def compute_features(roi: np.ndarray, source: str, mode: str) -> np.ndarray:
+    if mode == "pixels":
+        return roi_pixel_features(roi)
+    feats = roi_features(roi, source)
+    return np.array([feats[n] for n in sorted(feats)], dtype=np.float64)
+
+
+def feature_names_for_mode(mode: str) -> list[str]:
+    if mode == "pixels":
+        return [f"px_{i}" for i in range(48 * 48 * 3)]
+    dummy = roi_features(np.zeros((8, 8, 3), dtype=np.uint8), "red_anchor")
+    return sorted(dummy)
+
+
+def roi_for_frame(frame: np.ndarray) -> tuple[np.ndarray | None, str]:
+    """Primär ROI: handleds-ankrad (pose). Fallback: röd-ankare, sedan centrum."""
+    roi = wrist_anchored_roi(frame)
+    if roi is not None and roi.size:
+        return roi, "wrist_anchor"
+    return find_racket_roi(frame)
+
+
+def build_dataset(sessions: list[str], mode: str) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    """En rad per markör: träfframen vid markörens tidsstämpel (utvärderingen
+    visade att enkelframe + handleds-ROI slår både ±80 ms-röstning och
+    röd-ankare-varianterna)."""
+    rows: list[np.ndarray] = []
     meta: list[dict] = []
     for session_id in sessions:
         for video, markers in iter_session_markers(session_id):
             cap = cv2.VideoCapture(str(video))
             for marker in markers:
+                marker_key = f"{session_id}:{marker['timestamp_ms']}"
                 frame = frame_at_ms(cap, float(marker["timestamp_ms"]))
                 if frame is None:
                     continue
-                roi, source = find_racket_roi(frame)
+                roi, source = roi_for_frame(frame)
                 if roi is None or roi.size == 0:
                     continue
-                feats = roi_features(roi, source)
-                rows.append(feats)
-                meta.append({"session_id": session_id, "ts_ms": marker["timestamp_ms"],
+                rows.append(compute_features(roi, source, mode))
+                meta.append({"session_id": session_id, "marker_key": marker_key,
+                             "ts_ms": marker["timestamp_ms"],
                              "label": marker["bounce_side"], "roi_source": source})
             cap.release()
-    feature_names = list(rows[0].keys())
-    X = np.array([[r[n] for n in feature_names] for r in rows], dtype=np.float64)
+    X = np.stack(rows)
     y = np.array([m["label"] for m in meta])
-    return X, y, feature_names, meta
+    return X, y, meta
+
+
+def marker_vote_accuracy(model, X: np.ndarray, meta: list[dict]) -> tuple[float, list, int]:
+    """Aggregera per-frame-prediktioner till en röst per markör."""
+    if hasattr(model, "predict_proba"):
+        scores = model.predict_proba(X)
+        classes = list(model.classes_)
+        fh_idx = classes.index("forehand")
+        margin = scores[:, fh_idx] - (1.0 - scores[:, fh_idx])
+    else:
+        raw = model.decision_function(X)
+        classes = list(model.classes_)
+        # decision_function > 0 => classes_[1]
+        margin = raw if classes[1] == "forehand" else -raw
+    per_marker: dict[str, dict] = {}
+    for i, m in enumerate(meta):
+        entry = per_marker.setdefault(m["marker_key"], {"label": m["label"], "margins": []})
+        entry["margins"].append(float(margin[i]))
+    correct = 0
+    cm = {("forehand", "forehand"): 0, ("forehand", "backhand"): 0,
+          ("backhand", "forehand"): 0, ("backhand", "backhand"): 0}
+    for entry in per_marker.values():
+        pred = "forehand" if float(np.mean(entry["margins"])) > 0 else "backhand"
+        cm[(entry["label"], pred)] += 1
+        if pred == entry["label"]:
+            correct += 1
+    n = len(per_marker)
+    matrix = [[cm[("forehand", "forehand")], cm[("forehand", "backhand")]],
+              [cm[("backhand", "forehand")], cm[("backhand", "backhand")]]]
+    return correct / n if n else 0.0, matrix, n
 
 
 def train_main() -> None:
@@ -172,45 +320,41 @@ def train_main() -> None:
     from sklearn.preprocessing import StandardScaler
     from sklearn.svm import LinearSVC
 
-    X_train, y_train, feature_names, meta_train = build_dataset(TRAIN_SESSIONS)
-    X_test, y_test, _, meta_test = build_dataset([HOLDOUT_SESSION])
-    n_fallback_tr = sum(1 for m in meta_train if m["roi_source"] != "red_anchor")
-    n_fallback_te = sum(1 for m in meta_test if m["roi_source"] != "red_anchor")
-    print(f"Train: {len(y_train)} samples ({dict(zip(*np.unique(y_train, return_counts=True)))}, {n_fallback_tr} ROI-fallback)")
-    print(f"Holdout {HOLDOUT_SESSION}: {len(y_test)} samples ({dict(zip(*np.unique(y_test, return_counts=True)))}, {n_fallback_te} ROI-fallback)")
+    results: dict[str, dict] = {}
+    best = {"acc": -1.0, "name": "", "mode": "", "model": None}
+    for mode in ("pixels", "grid"):
+        X_train, y_train, meta_train = build_dataset(TRAIN_SESSIONS, mode)
+        X_test, y_test, meta_test = build_dataset([HOLDOUT_SESSION], mode)
+        n_fb_tr = sum(1 for m in meta_train if m["roi_source"] != "red_anchor")
+        n_fb_te = sum(1 for m in meta_test if m["roi_source"] != "red_anchor")
+        print(f"[{mode}] Train: {len(y_train)} ({n_fb_tr} ROI-fallback) | Holdout: {len(y_test)} ({n_fb_te} fallback)")
 
-    models = {
-        "linear_svc": make_pipeline(StandardScaler(), LinearSVC(C=0.5, random_state=SEED, max_iter=5000)),
-        "extra_trees": ExtraTreesClassifier(n_estimators=400, random_state=SEED, n_jobs=-1, class_weight="balanced"),
-        "rf": RandomForestClassifier(n_estimators=400, random_state=SEED, n_jobs=-1, class_weight="balanced_subsample"),
-    }
-    results = {}
-    best_name, best_acc = None, -1.0
-    for name, model in models.items():
-        model.fit(X_train, y_train)
-        pred = model.predict(X_test)
-        acc = accuracy_score(y_test, pred)
-        cm = confusion_matrix(y_test, pred, labels=["forehand", "backhand"]).tolist()
-        results[name] = {"holdout_accuracy": round(float(acc), 3), "confusion_fh_bh": cm}
-        print(f"  {name}: holdout accuracy {acc:.3f}  confusion [[FH-FH,FH-BH],[BH-FH,BH-BH]] {cm}")
-        if acc > best_acc:
-            best_name, best_acc = name, acc
+        models = {
+            "linear_svc": make_pipeline(StandardScaler(), LinearSVC(C=0.5, random_state=SEED, max_iter=5000)),
+            "extra_trees": ExtraTreesClassifier(n_estimators=400, random_state=SEED, n_jobs=-1, class_weight="balanced"),
+            "rf": RandomForestClassifier(n_estimators=400, random_state=SEED, n_jobs=-1, class_weight="balanced_subsample"),
+        }
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            acc, cm, n_markers = marker_vote_accuracy(model, X_test, meta_test)
+            results[f"{mode}/{name}"] = {"holdout_marker_accuracy": round(float(acc), 3), "confusion_fh_bh": cm, "n_markers": n_markers}
+            print(f"  {mode}/{name}: holdout MARKER accuracy {acc:.3f} ({n_markers} markörer)  [[FH-FH,FH-BH],[BH-FH,BH-BH]] {cm}")
+            if acc > best["acc"]:
+                best = {"acc": acc, "name": name, "mode": mode, "model": model}
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    best_model = models[best_name]
-    joblib.dump(best_model, OUT_DIR / "bounce_side_model.pkl")
-    joblib.dump(feature_names, OUT_DIR / "bounce_side_feature_names.pkl")
+    joblib.dump(best["model"], OUT_DIR / "bounce_side_model.pkl")
+    joblib.dump({"mode": best["mode"], "feature_names": feature_names_for_mode(best["mode"])},
+                OUT_DIR / "bounce_side_feature_meta.pkl")
     (OUT_DIR / "training_summary.json").write_text(json.dumps({
         "train_sessions": TRAIN_SESSIONS,
         "holdout_session": HOLDOUT_SESSION,
-        "n_train": int(len(y_train)),
-        "n_holdout": int(len(y_test)),
         "results": results,
-        "selected_model": best_name,
-        "feature_count": len(feature_names),
+        "selected": f"{best['mode']}/{best['name']}",
+        "selected_holdout_accuracy": round(float(best["acc"]), 3),
         "seed": SEED,
     }, indent=1), encoding="utf-8")
-    print(f"Selected: {best_name} ({best_acc:.3f}). Artifacts: {OUT_DIR}")
+    print(f"Selected: {best['mode']}/{best['name']} ({best['acc']:.3f}). Artifacts: {OUT_DIR}")
 
 
 # ── Klassificera ny video: ljudankare -> ROI -> sida ─────────────────────────
@@ -224,7 +368,8 @@ def classify_main(video_path: Path, audio_path: Path | None, out_prefix: str) ->
     from analyze_video_retro import extract_audio  # noqa: PLC0415
 
     model = joblib.load(OUT_DIR / "bounce_side_model.pkl")
-    feature_names = joblib.load(OUT_DIR / "bounce_side_feature_names.pkl")
+    feature_meta = joblib.load(OUT_DIR / "bounce_side_feature_meta.pkl")
+    feature_mode = feature_meta["mode"]
     audio_model = joblib.load(NR_MODEL_DIR / "nr_histgb_all83.pkl")
     audio_scaler = joblib.load(NR_MODEL_DIR / "nr_scaler_all83.pkl")
     audio_cols = list(joblib.load(NR_MODEL_DIR / "nr_feature_cols_all83.pkl"))
@@ -261,15 +406,26 @@ def classify_main(video_path: Path, audio_path: Path | None, out_prefix: str) ->
         frame = frame_at_ms(cap, ts)
         if frame is None:
             continue
-        roi, source = find_racket_roi(frame)
-        feats = roi_features(roi, source)
-        x = np.array([[feats[n] for n in feature_names]], dtype=np.float64)
-        pred = model.predict(x)[0]
-        score = ""
+        roi, source = roi_for_frame(frame)
+        if roi is None or roi.size == 0:
+            continue
+        x = compute_features(roi, source, feature_mode).reshape(1, -1)
         if hasattr(model, "predict_proba"):
             proba = model.predict_proba(x)[0]
-            score = round(float(np.max(proba)), 3)
-        out_rows.append({"ts_ms": round(ts, 1), "side": pred, "score": score, "roi_source": source})
+            classes = list(model.classes_)
+            fh = float(proba[classes.index("forehand")])
+            margin = fh - (1.0 - fh)
+        else:
+            raw = float(model.decision_function(x)[0])
+            classes = list(model.classes_)
+            margin = raw if classes[1] == "forehand" else -raw
+        side = "forehand" if margin > 0 else "backhand"
+        out_rows.append({
+            "ts_ms": round(ts, 1),
+            "side": side,
+            "score": round(abs(float(margin)), 3),
+            "roi_source": source,
+        })
     cap.release()
 
     out_csv = Path(f"{out_prefix}_bounce_sides.csv")
