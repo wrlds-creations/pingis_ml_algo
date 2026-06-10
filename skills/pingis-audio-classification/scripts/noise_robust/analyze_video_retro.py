@@ -53,7 +53,10 @@ from preprocess_audio import FFMPEG, load_audio, is_trainable_review_marker  # n
 ROOT_DIR = Path(__file__).resolve().parents[4]
 MODEL_DIR = ROOT_DIR / "data" / "audio" / "models" / "noise_robust_v3"
 
-# Detektorprofil (samma som Fable-läget/replayens känsliga profil).
+# Detektorprofil (validerat på hold-out 06-04_006: retrigger 120 gav bäst
+# racket-recall; 60 ms gav +bord men -racket — flaskhalsen är modellens
+# racket/bord-förväxling i tätt spel, inte gaten. För täta SPEL-sekvenser är
+# spel_retro_audio-familjen rätt uppgradering: racket-recall 0.98 där).
 GATE_KWARGS = dict(onset_ratio=1.5, retrigger_ms=120, abs_min_rms=0.0015, mode="bandpass", spectral_gate=False)
 RACKET_CONF_MIN = 0.5
 TABLE_CONF_MIN = 0.5
@@ -72,7 +75,10 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".m4a", ".aac
 def extract_audio(input_path: Path) -> tuple[np.ndarray, int, Path | None]:
     """Ladda ljud; konvertera via ffmpeg om input inte är WAV @ rätt format."""
     if input_path.suffix.lower() in VIDEO_SUFFIXES:
-        tmp = Path(tempfile.mkstemp(suffix=".wav")[1])
+        fd, tmp_name = tempfile.mkstemp(suffix=".wav")
+        import os
+        os.close(fd)  # Windows: lämna inte fd öppet, annars kan filen inte raderas
+        tmp = Path(tmp_name)
         cmd = [FFMPEG, "-y", "-i", str(input_path), "-vn", "-ac", "1", "-ar", "22050",
                "-acodec", "pcm_s16le", str(tmp)]
         proc = subprocess.run(cmd, capture_output=True, text=True)
@@ -219,7 +225,11 @@ def main() -> None:
     parser.add_argument("--session-json", default="", help="Granskad session-JSON för validering mot facit.")
     parser.add_argument("--wav-filename", default="", help="Begränsa facit till detta wav_filename i sessionen.")
     parser.add_argument("--model-dir", default=str(MODEL_DIR))
+    parser.add_argument("--retrigger-ms", type=int, default=int(GATE_KWARGS["retrigger_ms"]))
+    parser.add_argument("--onset-ratio", type=float, default=float(GATE_KWARGS["onset_ratio"]))
     args = parser.parse_args()
+    GATE_KWARGS["retrigger_ms"] = args.retrigger_ms
+    GATE_KWARGS["onset_ratio"] = args.onset_ratio
 
     input_path = Path(args.input)
     if not input_path.exists():
