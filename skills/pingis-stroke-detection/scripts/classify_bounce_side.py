@@ -505,10 +505,13 @@ def train_main() -> None:
         n_fb_te = sum(1 for m in meta_test if m["roi_source"] != "red_anchor")
         print(f"[{mode}] Train: {len(y_train)} ({n_fb_tr} ROI-fallback) | Holdout: {len(y_test)} ({n_fb_te} fallback)")
 
+        # Trädmodellerna FÖRST: vid lika holdout-accuracy ska vinnaren vara
+        # exporterbar till appens flat-tree-JSON (SVC-pipeline kan inte
+        # exporteras och blockerade app-uppdateringen 2026-06-11).
         models = {
-            "linear_svc": make_pipeline(StandardScaler(), LinearSVC(C=0.5, random_state=SEED, max_iter=5000)),
             "extra_trees": ExtraTreesClassifier(n_estimators=400, random_state=SEED, n_jobs=-1, class_weight="balanced"),
             "rf": RandomForestClassifier(n_estimators=400, random_state=SEED, n_jobs=-1, class_weight="balanced_subsample"),
+            "linear_svc": make_pipeline(StandardScaler(), LinearSVC(C=0.5, random_state=SEED, max_iter=5000)),
         }
         for name, model in models.items():
             model.fit(X_train, y_train)
