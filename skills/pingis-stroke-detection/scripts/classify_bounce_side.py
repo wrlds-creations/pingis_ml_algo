@@ -43,11 +43,15 @@ OUT_DIR = ROOT_DIR / "data" / "video" / "models" / "bounce_side_v1"
 NR_DIR = ROOT_DIR / "skills" / "pingis-audio-classification" / "scripts" / "noise_robust"
 NR_MODEL_DIR = ROOT_DIR / "data" / "audio" / "models" / "noise_robust_v3"
 
-# _001 är medvetet EXKLUDERAD ur träningen: den är block-labelad
+# 2026-06-09_001 är medvetet EXKLUDERAD ur träningen: den är block-labelad
 # feasibility-data (PROJECT_CONTEXT/T0038) och att ta med den sänker
 # holdout-accuracyn från 0.92 till 0.68 (reproducerat ur T0040:s artefakter).
+# 2026-06-11_001: Loves blandade underifrån-session (111 markörer, 62 FH /
+# 49 BH, individuellt granskade) - ny kameravinkel som också är den
+# rekommenderade live-uppställningen (mobilen lutad på bordet).
 TRAIN_SESSIONS = ["video_bounce_side_session_2026-06-09_002",
-                  "video_bounce_side_session_2026-06-09_003"]
+                  "video_bounce_side_session_2026-06-09_003",
+                  "video_bounce_side_session_2026-06-11_001"]
 HOLDOUT_SESSION = "video_bounce_side_session_2026-06-09_004"
 
 GRID = 4
