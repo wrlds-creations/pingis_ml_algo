@@ -191,6 +191,52 @@ function speeds(samples: NormalizedPoseSample[]): number[] {
   return values;
 }
 
+// ── Auto-detektering av spelhand ─────────────────────────────────────────────
+// Profilens hänthet beskriver APP-ANVÄNDAREN, inte nödvändigtvis spelaren i
+// en importerad video (Loves profil är vänster, Tomas spelar höger). Fel hand
+// => fel arm följs + spegelvänd x-axel => backhand klassas systematiskt som
+// forehand. Racketarmen rör sig alltid mycket mer än fria armen, så den kan
+// detekteras robust ur pose-serien.
+
+export interface HandednessDetection {
+  handedness: PlayerSetup['handedness'];
+  source: 'auto' | 'fallback';
+  leftTravel: number;
+  rightTravel: number;
+}
+
+const HANDEDNESS_RATIO_MIN = 1.25;
+
+export function detectRacketHandedness(
+  frames: VideoPoseFrame[],
+  fallback: PlayerSetup['handedness'],
+): HandednessDetection {
+  let leftTravel = 0;
+  let rightTravel = 0;
+  let prevLeft: { x: number; y: number } | null = null;
+  let prevRight: { x: number; y: number } | null = null;
+  for (const frame of frames) {
+    if (!frame.pose_detected) continue;
+    let left: { x: number; y: number } | null = null;
+    let right: { x: number; y: number } | null = null;
+    for (const landmark of frame.landmarks) {
+      if (landmark.type === LEFT_WRIST) left = landmark;
+      else if (landmark.type === RIGHT_WRIST) right = landmark;
+    }
+    if (left && prevLeft) leftTravel += Math.abs(left.x - prevLeft.x) + Math.abs(left.y - prevLeft.y);
+    if (right && prevRight) rightTravel += Math.abs(right.x - prevRight.x) + Math.abs(right.y - prevRight.y);
+    if (left) prevLeft = left;
+    if (right) prevRight = right;
+  }
+  if (rightTravel > leftTravel * HANDEDNESS_RATIO_MIN) {
+    return { handedness: 'right', source: 'auto', leftTravel, rightTravel };
+  }
+  if (leftTravel > rightTravel * HANDEDNESS_RATIO_MIN) {
+    return { handedness: 'left', source: 'auto', leftTravel, rightTravel };
+  }
+  return { handedness: fallback, source: 'fallback', leftTravel, rightTravel };
+}
+
 // ── v2-features: tidsupplösta, kroppsram-normaliserade, spegel-invarianta ──
 // Exakt port av extract_v2_features i train_video_stroke_v2.py (utan
 // z-featurerna: z-semantiken skiljer mellan MediaPipe och ML Kit, övriga
