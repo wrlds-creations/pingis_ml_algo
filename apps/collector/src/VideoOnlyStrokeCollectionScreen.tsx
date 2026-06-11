@@ -30,7 +30,7 @@ import type {
   VideoStrokeSessionFile,
 } from './types';
 import { buildVideoStrokeFeatures, detectRacketHandedness, VIDEO_STROKE_FEATURE_SPEC } from './videoStrokeFeatures';
-import { extractFableFeatures } from './nrFeatures';
+import { detectGateOnsets, extractFableFeatures } from './nrFeatures';
 import { fablePredict } from './hgbRuntime';
 import { bounceSideFeatures, predictBounceSide } from './bounceSideInference';
 import { hasTrainedVideoStrokeModel, predictVideoStroke, videoStrokeModelVersion } from './videoStrokeInference';
@@ -352,7 +352,12 @@ async function analyzeVideoOnlyStrokes(
 
   // Ankare FÖRE pose: med ljudankare behöver pose bara köras i fönster
   // kring bollträffarna (stor hastighetsvinst i nativemodulen).
-  const anchors = waveform ? findAudioPeaks(waveform, STROKE_ANCHOR_MIN_GAP_MS, STROKE_ANCHOR_MAX_PEAKS) : [];
+  // Adaptiv gate i stället för global tröskel: en enda stark smäll i
+  // klippet får inte dränka de vanliga bollträffarna.
+  const anchors = waveform
+    ? detectGateOnsets(waveform.samples, waveform.sampleRate, STROKE_ANCHOR_MIN_GAP_MS)
+        .slice(0, STROKE_ANCHOR_MAX_PEAKS)
+    : [];
   const anchored = anchors.length >= STROKE_ANCHOR_MIN_PEAKS;
   const pose = anchored
     ? await VideoPose.extractPoseInWindows(
@@ -934,16 +939,35 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
       setPaused(true);
       setStatus(isBounceSideMode ? 'Video importerad. Letar ljudankare...' : 'Video importerad. Kör poseanalys...');
       if (isBounceSideMode) {
-        const peakMarkers = decodedWaveform
-          ? buildAudioPeakBounceMarkers(decodedWaveform, nextVideo.durationMs)
+        // Ankare från den ADAPTIVA gaten (samma princip som live-detektorn):
+        // en global tröskel relativ klippets max dödade alla studsar så fort
+        // klippet innehöll en enda stark smäll (2026-06-11_002: 2 av ~60).
+        const gateOnsets = decodedWaveform
+          ? detectGateOnsets(decodedWaveform.samples, decodedWaveform.sampleRate, BOUNCE_SIDE_PEAK_MIN_GAP_MS)
+              .slice(0, BOUNCE_SIDE_PEAK_MAX_MARKERS)
           : [];
-        // Filtrera ankarna med Fable-modellen (brusrobusta studsklassificeraren):
-        // bara ljudtoppar som klassas som RACKETSTUDS blir ankare, så bords-
-        // studsar, klapp och röst inte behöver märkas bort manuellt.
+        const peakMarkers: ReviewMarker[] = gateOnsets.map((onset, index) => ({
+          id: `audio_peak_bounce_${String(index + 1).padStart(3, '0')}_${onset.timestamp_ms}`,
+          timestamp_ms: clampTimestamp(onset.timestamp_ms, nextVideo.durationMs),
+          stroke_type: 'unknown',
+          source: 'audio_peak',
+          review_status: 'suggested',
+          created_at: new Date().toISOString(),
+          anchor_source: 'audio_peak',
+          audio_peak_score: Math.round(onset.rms * 1000) / 1000,
+          snapshot_window_ms: {
+            pre_ms: BOUNCE_SIDE_SNAPSHOT_PRE_MS,
+            post_ms: BOUNCE_SIDE_SNAPSHOT_POST_MS,
+          },
+        }));
+        // Fable-filtret behåller BOLLTRÄFFAR (racket ELLER bord): med mobilen
+        // liggande på bordet leds studsljudet genom skivan och klassas ofta
+        // som bordsstuds - sidan avgörs ändå av videon. Bara röst/klapp/
+        // tystnad ska bort.
         let rackedMarkers = peakMarkers;
         let filteredAway = 0;
         if (decodedWaveform && peakMarkers.length > 0) {
-          setStatus(`Hittade ${peakMarkers.length} ljudtoppar. Filtrerar racketstudsar med Fable-modellen...`);
+          setStatus(`Hittade ${peakMarkers.length} ljudtoppar. Filtrerar bollträffar med Fable-modellen...`);
           const { samples, sampleRate } = decodedWaveform;
           const kept: ReviewMarker[] = [];
           for (let index = 0; index < peakMarkers.length; index += 1) {
@@ -956,7 +980,9 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
               clip[i] = j >= 0 && j < samples.length ? samples[j] : 0;
             }
             const prediction = fablePredict(extractFableFeatures(clip));
-            if (prediction.label === 'racket_bounce' && prediction.confidence >= 0.5) {
+            const pBall = (prediction.probabilities.racket_bounce ?? 0)
+              + (prediction.probabilities.table_bounce ?? 0);
+            if (pBall >= 0.5) {
               kept.push(marker);
             }
             if (index % 8 === 7) {

@@ -487,6 +487,60 @@ export function extractNrFeatures(clipIn: Float32Array): Record<string, number> 
 }
 
 /**
+ * Adaptiv onset-gate på en hel inspelning (offline-variant av native-gaten):
+ * kausal bandpass 1.5–7 kHz, 10 ms-frames, trigger när frame-RMS >=
+ * max(rullande bakgrund x ratio, absMin). Robust där en global tröskel
+ * (relativ klippets max) fallerar — en enda hög smäll i klippet får inte
+ * dränka alla vanliga studsar.
+ */
+export function detectGateOnsets(
+  samples: Float32Array,
+  sampleRate: number,
+  retriggerMs: number = 180,
+  onsetRatio: number = 1.5,
+  absMinRms: number = 0.0015,
+): Array<{ timestamp_ms: number; rms: number }> {
+  const frameSize = Math.max(32, Math.round(sampleRate * 0.01));
+  // Kausal biquad-kaskad (samma SOS som nativegaten/featurerna).
+  const state = BP_SOS.map(() => [0, 0]);
+  const onsets: Array<{ timestamp_ms: number; rms: number }> = [];
+  const bg: number[] = [];
+  let lastTriggerMs = -1e9;
+
+  const nFrames = Math.floor(samples.length / frameSize);
+  for (let f = 0; f < nFrames; f += 1) {
+    let sumSq = 0;
+    const base = f * frameSize;
+    for (let i = 0; i < frameSize; i += 1) {
+      let x = samples[base + i];
+      for (let s = 0; s < BP_SOS.length; s += 1) {
+        const c = BP_SOS[s];
+        const st = state[s];
+        const out = c[0] * x + st[0];
+        st[0] = c[1] * x - c[3] * out + st[1];
+        st[1] = c[2] * x - c[4] * out;
+        x = out;
+      }
+      sumSq += x * x;
+    }
+    const frameRms = Math.sqrt(sumSq / frameSize);
+    const tMs = (base / sampleRate) * 1000;
+    if (tMs - lastTriggerMs < retriggerMs) continue;
+    const bgMean = bg.length ? bg.reduce((a, b) => a + b, 0) / bg.length : frameRms;
+    if (frameRms >= Math.max(bgMean * onsetRatio, absMinRms)) {
+      onsets.push({ timestamp_ms: Math.round(tMs), rms: frameRms });
+      lastTriggerMs = tMs;
+      bg.length = 0;
+      for (let i = 0; i < 30; i += 1) bg.push(bgMean * 2);
+    } else {
+      bg.push(frameRms);
+      if (bg.length > 30) bg.shift();
+    }
+  }
+  return onsets;
+}
+
+/**
  * Alla 83 features för Fable-modellen: base62 (på 1 s END-zero-paddad buffer,
  * samma som övriga modeller) + 21 nr_ på det råa 300 ms-klippet.
  */
