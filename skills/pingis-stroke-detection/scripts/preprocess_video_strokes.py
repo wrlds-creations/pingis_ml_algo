@@ -52,6 +52,17 @@ EXCLUDED_AUDIO_VIDEO_SESSIONS = {
     "audio_session_2026-05-26_002",
     "audio_session_2026-05-26_003",
     "audio_session_2026-05-26_004",
+    # 2026-06-11: diagnostiska bulk-sparningar av Tomas backhand-video.
+    # Markörerna är modellförslag som godkändes utan granskning men
+    # stämplades 'confirmed' av appens dåvarande sparlogik (fixad samma dag
+    # med ny status 'bulk_confirmed'). Får aldrig användas som facit.
+    # _001 har dessutom spegelvänt fel (FH-labels på BH-slag).
+    "video_stroke_session_2026-06-11_001",
+    "video_stroke_session_2026-06-11_002",
+    "video_stroke_session_2026-06-11_003",
+    "video_stroke_session_2026-06-11_004",
+    "video_stroke_session_2026-06-11_005",
+    "video_stroke_session_2026-06-11_006",
 }
 
 LEFT_SHOULDER = 11

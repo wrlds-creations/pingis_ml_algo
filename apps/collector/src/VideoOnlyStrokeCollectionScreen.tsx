@@ -407,9 +407,12 @@ async function analyzeVideoOnlyStrokes(
       // vinna knappt på riktiga slag. P(FH)+P(BH) >= 0.5 = det är ett slag;
       // sidan avgörs av den större. Bordsstuds-ankare utan sving har
       // unknown-sannolikhet klart över 0.5 och avvisas fortfarande.
+      // Tröskel 0.40 från device-diagnostik 2026-06-11 (76 ankare): äkta
+      // slag som föll bort hade P(FH)+P(BH) 0.40-0.48 i tydlig slagrytm,
+      // medan bordsstuds-ankare låg 0.25-0.36 (unknown 0.65-0.75).
       const pForehand = prediction.probabilities.forehand ?? 0;
       const pBackhand = prediction.probabilities.backhand ?? 0;
-      if (pForehand + pBackhand < 0.5) {
+      if (pForehand + pBackhand < 0.4) {
         diagnostics.drops.not_strokeish += 1;
         diagnostics.not_strokeish_detail.push({
           ts_ms: Math.round(timestampMs),
