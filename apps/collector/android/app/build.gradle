@@ -117,6 +117,11 @@ android {
 dependencies {
     // The version of react-native is set by the React Native Gradle Plugin
     implementation("com.facebook.react:react-android")
+    implementation("com.google.mlkit:pose-detection:18.0.0-beta5")
+    // MediaPipe Tasks: SAMMA pose-motor som PC-träningen (modellfilen
+    // pose_landmarker_lite.task i assets). Eliminerar inramningsgapet
+    // mellan mobilens och datorns handleds-crops för bounce-side.
+    implementation("com.google.mediapipe:tasks-vision:0.10.14")
 
     if (hermesEnabled.toBoolean()) {
         implementation("com.facebook.react:hermes-android")

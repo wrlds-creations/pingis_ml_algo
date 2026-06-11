@@ -121,38 +121,52 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
      * fel FH/BH-förslag), full upplösning och bilinjär skalning - närmast
      * träningens cv2-pipeline. Långsamma per-frame-seeks är OK här: bara
      * ~40 ankarframes per video, inte 900.
+     *
+     * Pose: MediaPipe Tasks med SAMMA modellfil som PC-träningen
+     * (pose_landmarker_lite.task) - ML Kit ramade in handleden annorlunda
+     * än träningens MediaPipe, vilket gav förskjutna crops och fel
+     * FH/BH-förslag trots korrekt modell (PC 37/37 på samma ankare).
      */
     private fun extractCropsWithRetriever(path: String, anchors: List<Long>): WritableArray {
         val retriever = MediaMetadataRetriever()
-        val detector = PoseDetection.getClient(
-            PoseDetectorOptions.Builder()
-                .setDetectorMode(PoseDetectorOptions.SINGLE_IMAGE_MODE)
-                .build()
-        )
+        val landmarkerOptions = com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker.PoseLandmarkerOptions.builder()
+            .setBaseOptions(
+                com.google.mediapipe.tasks.core.BaseOptions.builder()
+                    .setModelAssetPath("pose_landmarker_lite.task")
+                    .build()
+            )
+            .setRunningMode(com.google.mediapipe.tasks.vision.core.RunningMode.IMAGE)
+            .build()
+        val landmarker = com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker.createFromOptions(ctx, landmarkerOptions)
         val results = Arguments.createArray()
         try {
             retriever.setDataSource(path)
             for (anchorTs in anchors) {
                 val bitmap = retriever.getFrameAtTime(anchorTs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
                     ?: continue
-                val input = InputImage.fromBitmap(bitmap, 0)
-                val pose = try { Tasks.await(detector.process(input)) } catch (_: Exception) { null }
+                val mpImage = com.google.mediapipe.framework.image.BitmapImageBuilder(bitmap).build()
+                val poseResult = try { landmarker.detect(mpImage) } catch (_: Exception) { null }
 
                 val w = bitmap.width
                 val h = bitmap.height
                 var x0: Int; var y0: Int; var x1: Int; var y1: Int; var source: String
-                val rWrist = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_WRIST)
-                val lWrist = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.LEFT_WRIST)
-                val rElbow = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_ELBOW)
-                val lElbow = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.LEFT_ELBOW)
-                val useRight = (rWrist?.inFrameLikelihood ?: 0f) >= (lWrist?.inFrameLikelihood ?: 0f)
-                val wrist = if (useRight) rWrist else lWrist
-                val elbow = if (useRight) rElbow else lElbow
-                if (wrist != null && elbow != null) {
-                    val wx = wrist.position.x
-                    val wy = wrist.position.y
-                    val fx = wx - elbow.position.x
-                    val fy = wy - elbow.position.y
+                val landmarks = poseResult?.landmarks()?.firstOrNull()
+                if (landmarks != null && landmarks.size > 16) {
+                    // MediaPipe-index: 13/14 = armbåge V/H, 15/16 = handled V/H.
+                    // Koordinater normaliserade [0,1] -> pixlar.
+                    val lw = landmarks[15]
+                    val rw = landmarks[16]
+                    val le = landmarks[13]
+                    val re = landmarks[14]
+                    val lVis = lw.visibility().orElse(0f)
+                    val rVis = rw.visibility().orElse(0f)
+                    val useRight = rVis >= lVis
+                    val wristL = if (useRight) rw else lw
+                    val elbowL = if (useRight) re else le
+                    val wx = wristL.x() * w
+                    val wy = wristL.y() * h
+                    val fx = wx - elbowL.x() * w
+                    val fy = wy - elbowL.y() * h
                     val flen = maxOf(Math.hypot(fx.toDouble(), fy.toDouble()).toFloat(), 1f)
                     val cx = wx + 0.8f * fx
                     val cy = wy + 0.8f * fy
@@ -191,7 +205,7 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
             }
         } finally {
             retriever.release()
-            detector.close()
+            landmarker.close()
         }
         return results
     }

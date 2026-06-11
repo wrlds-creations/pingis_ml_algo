@@ -610,6 +610,12 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
   const playheadLongPressHandledRef = useRef(false);
   const playheadLongPressStartPageXRef = useRef(0);
   const [cameraSide, setCameraSide] = useState<VideoStrokeCameraSide>('player_left');
+  // Vilken färg spelarens FOREHANDSIDA har. Sidomodellen känner igen
+  // färgsidan (tränad på Loves racket: forehand = röd); väljer spelaren
+  // 'black' byts förslagens FH/BH-etiketter - ingen omträning behövs.
+  const [forehandColor, setForehandColor] = useState<'red' | 'black'>('red');
+  const forehandColorRef = useRef<'red' | 'black'>('red');
+  forehandColorRef.current = forehandColor;
   const [cameraFacing, setCameraFacing] = useState<VideoStrokeCameraFacing>('front');
   const [video, setVideo] = useState<ImportedVideoState | null>(null);
   const [waveform, setWaveform] = useState<TimelineWaveform | null>(null);
@@ -1025,7 +1031,12 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
               for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
               const prediction = predictBounceSide(bounceSideFeatures(rgb, crop.roi_source));
               sideSuggested += 1;
-              return { ...marker, stroke_type: prediction.label };
+              // Modellen känner igen FÄRGSIDAN (tränad: forehand = röd).
+              // Spelare med svart forehandsida får etiketterna växlade.
+              const side = forehandColorRef.current === 'black'
+                ? (prediction.label === 'forehand' ? 'backhand' as const : 'forehand' as const)
+                : prediction.label;
+              return { ...marker, stroke_type: side };
             });
           } catch {
             // Sidoförslag är "nice to have" - ankarna fungerar utan dem.
@@ -1332,6 +1343,7 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
             collection_type: 'video_bounce_side_snapshot',
             label_schema: 'video_bounce_side_v1',
             anchor_source: 'audio_peak',
+            racket_forehand_color: forehandColor,
             snapshot_window_ms: {
               pre_ms: BOUNCE_SIDE_SNAPSHOT_PRE_MS,
               post_ms: BOUNCE_SIDE_SNAPSHOT_POST_MS,
@@ -1499,6 +1511,27 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
         </View>
 
         <View style={styles.algorithmPanel}>
+          {isBounceSideMode && (
+            <>
+              <Text style={styles.algorithmLabel}>Forehandsidans färg (ditt racket)</Text>
+              <View style={styles.labelSegment}>
+                {(['red', 'black'] as const).map(color => {
+                  const active = forehandColor === color;
+                  return (
+                    <TouchableOpacity
+                      key={color}
+                      style={[styles.segmentBtn, active && { backgroundColor: '#12351f', borderColor: '#2ecc71' }]}
+                      onPress={() => setForehandColor(color)}
+                    >
+                      <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>
+                        {color === 'red' ? 'Röd' : 'Svart'}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            </>
+          )}
           <Text style={styles.algorithmLabel}>Kameraposition</Text>
           <View style={styles.labelSegment}>
             {(['player_left', 'player_right', 'center_front'] as VideoStrokeCameraSide[]).map(side => {

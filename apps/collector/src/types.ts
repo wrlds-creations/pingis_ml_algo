@@ -145,6 +145,9 @@ export interface VideoBounceSideSessionFile {
     collection_type: 'video_bounce_side_snapshot';
     label_schema: 'video_bounce_side_v1';
     anchor_source: 'audio_peak';
+    /** Färg på spelarens forehandsida; sidomodellen känner igen färgsidan
+     *  och appen mappar färg -> FH/BH per spelare. */
+    racket_forehand_color?: 'red' | 'black';
     snapshot_window_ms: {
       pre_ms: number;
       post_ms: number;
