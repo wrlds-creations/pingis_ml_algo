@@ -58,7 +58,10 @@ TRAIN_SESSIONS = ["video_bounce_side_session_2026-06-09_002",
                   # Samma video återimporterad och fullgranskad på appen
                   # (37 facit) - bär app-crops via crops.json när den
                   # importeras om på dump-versionen.
-                  "video_bounce_side_session_2026-06-11_003"]
+                  "video_bounce_side_session_2026-06-11_003",
+                  # Ny video på MediaPipe-versionen: 14 bekräftade + 47
+                  # intygade crops (Love: alla förslag korrekta).
+                  "video_bounce_side_session_2026-06-11_004"]
 HOLDOUT_SESSION = "video_bounce_side_session_2026-06-09_004"
 
 GRID = 4
@@ -267,6 +270,14 @@ def roi_for_frame(frame: np.ndarray) -> tuple[np.ndarray | None, str]:
     return find_racket_roi(frame)
 
 
+# Sessioner där Love uttryckligen intygat att ALLA appens förslag var
+# korrekta (skriftligt 2026-06-11) - crops utan bekräftad markör får då
+# modellens egen prediktion som etikett (självträning med mänsklig
+# stickprovskontroll). Lägg ALDRIG till sessioner här utan uttryckligt
+# intygande från granskaren.
+VOUCHED_FULL_SESSIONS = {"video_bounce_side_session_2026-06-11_004"}
+
+
 def app_crop_rows(session_id: str, mode: str) -> tuple[list[np.ndarray], list[dict]]:
     """Träningsrader från APPENS egna crops (<sid>.crops.json, sparad av
     Collector vid import). Mobilens pose-motor ramar in racketen annorlunda
@@ -283,8 +294,19 @@ def app_crop_rows(session_id: str, mode: str) -> tuple[list[np.ndarray], list[di
     for crop in data.get("crops", []):
         crops_by_ts[round(float(crop["timestamp_ms"]))] = crop
 
+    def crop_to_row(crop: dict) -> np.ndarray | None:
+        rgb = np.frombuffer(base64.b64decode(crop["rgb_b64"]), dtype=np.uint8)
+        if rgb.size != 64 * 64 * 3:
+            return None
+        bgr = cv2.cvtColor(rgb.reshape(64, 64, 3).copy(), cv2.COLOR_RGB2BGR)
+        if mode == "pixels":
+            return roi_pixel_features(bgr)
+        feats = roi_features(bgr, crop.get("roi_source", "wrist_anchor"))
+        return np.array([feats[n] for n in sorted(feats)], dtype=np.float64)
+
     rows: list[np.ndarray] = []
     meta: list[dict] = []
+    used_ts: set[int] = set()
     for _, markers in iter_session_markers(session_id):
         for marker in markers:
             ts = round(float(marker["timestamp_ms"]))
@@ -294,18 +316,38 @@ def app_crop_rows(session_id: str, mode: str) -> tuple[list[np.ndarray], list[di
                 if not near:
                     continue
                 crop = crops_by_ts[min(near, key=lambda k: abs(k - ts))]
-            rgb = np.frombuffer(base64.b64decode(crop["rgb_b64"]), dtype=np.uint8)
-            if rgb.size != 64 * 64 * 3:
+            row = crop_to_row(crop)
+            if row is None:
                 continue
-            bgr = cv2.cvtColor(rgb.reshape(64, 64, 3), cv2.COLOR_RGB2BGR)
-            if mode == "pixels":
-                rows.append(roi_pixel_features(bgr))
-            else:
-                feats = roi_features(bgr, crop.get("roi_source", "wrist_anchor"))
-                rows.append(np.array([feats[n] for n in sorted(feats)], dtype=np.float64))
+            used_ts.add(round(float(crop["timestamp_ms"])))
+            rows.append(row)
             meta.append({"session_id": session_id, "marker_key": f"{session_id}:{ts}:app",
                          "ts_ms": ts, "label": marker["bounce_side"],
                          "roi_source": crop.get("roi_source", "wrist_anchor"), "domain": "app"})
+
+    if session_id in VOUCHED_FULL_SESSIONS:
+        # Resterande crops: modellens prediktion som intygad etikett.
+        model = joblib.load(OUT_DIR / "bounce_side_model.pkl")
+        feature_meta = joblib.load(OUT_DIR / "bounce_side_feature_meta.pkl")
+        n_vouched = 0
+        for ts_key, crop in crops_by_ts.items():
+            if ts_key in used_ts:
+                continue
+            row = crop_to_row(crop)
+            if row is None:
+                continue
+            if feature_meta["mode"] != mode:
+                continue
+            label = str(model.predict(row.reshape(1, -1))[0])
+            if label not in ("forehand", "backhand"):
+                continue
+            rows.append(row)
+            meta.append({"session_id": session_id, "marker_key": f"{session_id}:{ts_key}:vouched",
+                         "ts_ms": ts_key, "label": label,
+                         "roi_source": crop.get("roi_source", "wrist_anchor"), "domain": "app_vouched"})
+            n_vouched += 1
+        if n_vouched:
+            print(f"  [{session_id}] +{n_vouched} intygade självtränings-rader")
     return rows, meta
 
 
