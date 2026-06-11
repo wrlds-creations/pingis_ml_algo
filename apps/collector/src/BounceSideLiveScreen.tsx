@@ -19,6 +19,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   PermissionsAndroid, Platform, StyleSheet, StatusBar, Text, TouchableOpacity, View,
 } from 'react-native';
+import RNFS from 'react-native-fs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { decodeBase64PCM } from './NativeAudioCapture';
 import {
@@ -28,13 +29,28 @@ import {
   type NativeAudioOnsetDebug,
 } from './NativeAudioStream';
 import { BounceSideCameraView, BounceSideLive } from './NativeBounceSideLive';
-import { BallImpactCounter } from './fableEngine';
+import { FableCounter } from './fableEngine';
 import { bounceSideFeatures, predictBounceSide, BOUNCE_SIDE_MODEL_VERSION } from './bounceSideInference';
 import type { PlayerSetup } from './types';
 
 const ONSET_THRESHOLD = 0.005; // -> native onset-ratio 1.5
 const RETRIGGER_MS = 120;
 const ABS_MIN_RMS = 0.0015;
+/** Under denna sidokonfidens räknas studsen som Osäker i stället för
+ *  att gissas till fel sida. */
+const SIDE_MIN_CONFIDENCE = 0.6;
+
+interface LiveDebugEvent {
+  onset_time_ms: number;
+  side: string;
+  confidence: number;
+  probabilities: Record<string, number>;
+  roi_source: string;
+  frame_delay_ms: number;
+  audio_label: string;
+  audio_confidence: number;
+  rgb_b64: string;
+}
 
 interface Props { setup: PlayerSetup; onDone: () => void; }
 
@@ -51,19 +67,31 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
   const [isRunning, setIsRunning] = useState(false);
   const [fhCount, setFhCount] = useState(0);
   const [bhCount, setBhCount] = useState(0);
-  const [lastSide, setLastSide] = useState<{ side: 'forehand' | 'backhand'; confidence: number; roi: string } | null>(null);
+  const [uncertainCount, setUncertainCount] = useState(0);
+  const [lastSide, setLastSide] = useState<{ side: 'forehand' | 'backhand' | 'uncertain'; confidence: number; roi: string } | null>(null);
   const [forehandColor, setForehandColor] = useState<'red' | 'black'>('red');
   const [statusText, setStatusText] = useState('Luta mobilen mot något på bordet så kameran ser racketen snett underifrån.');
 
-  const counterRef = useRef(new BallImpactCounter());
+  const counterRef = useRef(new FableCounter());
   const forehandColorRef = useRef<'red' | 'black'>('red');
   forehandColorRef.current = forehandColor;
   const busyRef = useRef(false);
+  const debugEventsRef = useRef<LiveDebugEvent[]>([]);
 
   const stopAll = useCallback(() => {
     AudioStream.stopStreaming();
     void BounceSideLive.stopCamera();
     setIsRunning(false);
+    // Debug-dump: varje räknad studs med crop + beslut, så felanalys kan
+    // göras på fakta i stället för teorier. Hämtas via adb från Download.
+    const events = debugEventsRef.current;
+    if (events.length > 0) {
+      const path = `${RNFS.DownloadDirectoryPath}/pingis_live_sidedebug_${Date.now()}.json`;
+      RNFS.writeFile(path, JSON.stringify({ model: BOUNCE_SIDE_MODEL_VERSION, events }), 'utf8')
+        .then(() => RNFS.scanFile(path))
+        .catch(() => {});
+      debugEventsRef.current = [];
+    }
   }, []);
 
   const toggle = useCallback(() => {
@@ -86,8 +114,10 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
           }
         }
         counterRef.current.reset();
+        debugEventsRef.current = [];
         setFhCount(0);
         setBhCount(0);
+        setUncertainCount(0);
         setLastSide(null);
         await BounceSideLive.startCamera(true);
         await AudioStream.startStreaming(ONSET_THRESHOLD);
@@ -116,17 +146,34 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
           const result = counterRef.current.process(pcm, onsetTimeMs, frameRms, Date.now());
           if (!result.counted) return;
 
-          const crop = await BounceSideLive.captureCrop();
+          // Bilden från TRÄFFÖGONBLICKET (ringbufferten i nativemodulen),
+          // inte från "nu" - JS-kedjan hinner ta 200-300 ms.
+          const crop = await BounceSideLive.captureCrop(onsetTimeMs);
           const binary = atob(crop.rgb_b64);
           const rgb = new Uint8Array(binary.length);
           for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
           const prediction = predictBounceSide(bounceSideFeatures(rgb, crop.roi_source));
-          const side = forehandColorRef.current === 'black'
+          const mapped = forehandColorRef.current === 'black'
             ? (prediction.label === 'forehand' ? 'backhand' as const : 'forehand' as const)
             : prediction.label;
+          const side = prediction.confidence >= SIDE_MIN_CONFIDENCE ? mapped : 'uncertain' as const;
           if (side === 'forehand') setFhCount(n => n + 1);
-          else setBhCount(n => n + 1);
+          else if (side === 'backhand') setBhCount(n => n + 1);
+          else setUncertainCount(n => n + 1);
           setLastSide({ side, confidence: prediction.confidence, roi: crop.roi_source });
+          if (debugEventsRef.current.length < 300) {
+            debugEventsRef.current.push({
+              onset_time_ms: onsetTimeMs,
+              side,
+              confidence: prediction.confidence,
+              probabilities: prediction.probabilities,
+              roi_source: crop.roi_source,
+              frame_delay_ms: crop.frame_delay_ms,
+              audio_label: result.prediction?.label ?? 'unknown',
+              audio_confidence: result.prediction?.confidence ?? 0,
+              rgb_b64: crop.rgb_b64,
+            });
+          }
         } catch {
           // ingen kameraframe ännu / capture-fel: räkna inte sida för denna studs
         } finally {
@@ -154,9 +201,12 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
       <View style={styles.cameraWrap}>
         <BounceSideCameraView style={styles.camera} />
         {lastSide ? (
-          <View style={[styles.sideBadge, lastSide.side === 'forehand' ? styles.badgeFh : styles.badgeBh]}>
+          <View style={[
+            styles.sideBadge,
+            lastSide.side === 'forehand' ? styles.badgeFh : lastSide.side === 'backhand' ? styles.badgeBh : styles.badgeUncertain,
+          ]}>
             <Text style={styles.sideBadgeTxt}>
-              {lastSide.side === 'forehand' ? 'FOREHAND' : 'BACKHAND'} {(lastSide.confidence * 100).toFixed(0)}%
+              {lastSide.side === 'forehand' ? 'FOREHAND' : lastSide.side === 'backhand' ? 'BACKHAND' : 'OSÄKER'} {(lastSide.confidence * 100).toFixed(0)}%
             </Text>
           </View>
         ) : null}
@@ -170,6 +220,10 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
         <View style={styles.countBox}>
           <Text style={[styles.countValue, { color: '#f1c40f' }]}>{bhCount}</Text>
           <Text style={styles.countLabel}>BACKHAND</Text>
+        </View>
+        <View style={styles.countBox}>
+          <Text style={[styles.countValue, { color: '#777' }]}>{uncertainCount}</Text>
+          <Text style={styles.countLabel}>OSÄKER</Text>
         </View>
       </View>
 
@@ -211,6 +265,7 @@ const styles = StyleSheet.create({
   sideBadge: { position: 'absolute', top: 12, alignSelf: 'center', paddingHorizontal: 18, paddingVertical: 8, borderRadius: 20 },
   badgeFh: { backgroundColor: 'rgba(53,199,255,0.85)' },
   badgeBh: { backgroundColor: 'rgba(241,196,15,0.85)' },
+  badgeUncertain: { backgroundColor: 'rgba(150,150,150,0.85)' },
   sideBadgeTxt: { color: '#000', fontWeight: '800', fontSize: 16 },
   countRow: { flexDirection: 'row', gap: 12, paddingHorizontal: 12 },
   countBox: { flex: 1, alignItems: 'center', backgroundColor: '#101010', borderRadius: 12, paddingVertical: 10 },

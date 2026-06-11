@@ -58,12 +58,21 @@ class BounceSideLiveModule(private val ctx: ReactApplicationContext)
 
     @Volatile private var cameraProvider: ProcessCameraProvider? = null
 
-    // Senaste analysframe (NV21 + dimensioner + rotation), dubbelbuffrad.
+    // Ringbuffert med senaste ~halvsekunden av frames (NV21 + tidsstämpel):
+    // ljudkedjan hinner processa i 200-300 ms innan JS ber om bilden, och
+    // racketen har då hunnit röra sig - vi vill ha bilden från TRÄFF-
+    // ögonblicket (onset_time_ms), inte från "nu".
+    private class FrameRec(
+        val tsMs: Long,
+        val nv21: ByteArray,
+        val width: Int,
+        val height: Int,
+        val rotation: Int,
+    )
+
     private val frameLock = Any()
-    private var latestNv21: ByteArray? = null
-    private var latestWidth = 0
-    private var latestHeight = 0
-    private var latestRotation = 0
+    private val frameBuffer = ArrayDeque<FrameRec>()
+    private val maxBufferedFrames = 16
 
     private var landmarker: com.google.mediapipe.tasks.vision.poselandmarker.PoseLandmarker? = null
 
@@ -111,11 +120,16 @@ class BounceSideLiveModule(private val ctx: ReactApplicationContext)
                 analysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { proxy ->
                     try {
                         val nv21 = imageProxyToNv21(proxy)
+                        val record = FrameRec(
+                            System.currentTimeMillis(),
+                            nv21,
+                            proxy.width,
+                            proxy.height,
+                            proxy.imageInfo.rotationDegrees,
+                        )
                         synchronized(frameLock) {
-                            latestNv21 = nv21
-                            latestWidth = proxy.width
-                            latestHeight = proxy.height
-                            latestRotation = proxy.imageInfo.rotationDegrees
+                            frameBuffer.addLast(record)
+                            while (frameBuffer.size > maxBufferedFrames) frameBuffer.removeFirst()
                         }
                     } finally {
                         proxy.close()
@@ -140,33 +154,37 @@ class BounceSideLiveModule(private val ctx: ReactApplicationContext)
                 try { provider.unbindAll() } catch (_: Exception) {}
             }
         }
-        synchronized(frameLock) { latestNv21 = null }
+        synchronized(frameLock) { frameBuffer.clear() }
         promise.resolve("stopped")
     }
 
     /**
-     * Ta racket-crop ur senaste kameraframen: MediaPipe-pose -> handleds-
-     * ankrad kvadrat -> 64x64 RGB (base64). Samma geometri som träningen.
+     * Ta racket-crop ur framen NÄRMAST `targetTimeMs` (träffögonblicket,
+     * System.currentTimeMillis-bas, samma klocka som ljudets onset_time_ms):
+     * MediaPipe-pose -> handleds-ankrad kvadrat -> 64x64 RGB (base64).
+     * Samma geometri som träningen.
      */
     @ReactMethod
-    fun captureCrop(promise: Promise) {
+    fun captureCrop(targetTimeMs: Double, promise: Promise) {
         Thread {
             try {
-                val nv21: ByteArray
-                val w: Int
-                val h: Int
-                val rotation: Int
+                val frame: FrameRec?
                 synchronized(frameLock) {
-                    val buffer = latestNv21
-                    if (buffer == null) {
-                        promise.reject("NO_FRAME", "Ingen kameraframe tillgänglig ännu")
-                        return@Thread
+                    frame = if (targetTimeMs > 0) {
+                        frameBuffer.minByOrNull { kotlin.math.abs(it.tsMs - targetTimeMs.toLong()) }
+                    } else {
+                        frameBuffer.lastOrNull()
                     }
-                    nv21 = buffer.copyOf()
-                    w = latestWidth
-                    h = latestHeight
-                    rotation = latestRotation
                 }
+                if (frame == null) {
+                    promise.reject("NO_FRAME", "Ingen kameraframe tillgänglig ännu")
+                    return@Thread
+                }
+                val nv21 = frame.nv21
+                val w = frame.width
+                val h = frame.height
+                val rotation = frame.rotation
+                val frameDelayMs = frame.tsMs - targetTimeMs.toLong()
 
                 // NV21 -> Bitmap via Androids egen JPEG-väg (korrekt färgrymd),
                 // sedan rotation till stående.
@@ -234,6 +252,7 @@ class BounceSideLiveModule(private val ctx: ReactApplicationContext)
                 promise.resolve(Arguments.createMap().apply {
                     putString("rgb_b64", Base64.encodeToString(rgb, Base64.NO_WRAP))
                     putString("roi_source", source)
+                    putDouble("frame_delay_ms", frameDelayMs.toDouble())
                 })
             } catch (error: Exception) {
                 promise.reject("CAPTURE_ERROR", error.message, error)
