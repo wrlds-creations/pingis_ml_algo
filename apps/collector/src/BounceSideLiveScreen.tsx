@@ -52,6 +52,18 @@ interface LiveDebugEvent {
   rgb_b64: string;
 }
 
+/** Alla ljudkandidater som nådde JS - även avvisade, med orsak. Visar om
+ *  missade studsar avvisades här eller aldrig triggade native-gaten. */
+interface LiveAudioCandidate {
+  onset_time_ms: number;
+  frame_rms: number;
+  counted: boolean;
+  reject_reason?: string;
+  audio_label?: string;
+  audio_confidence?: number;
+  bg_mode?: string;
+}
+
 interface Props { setup: PlayerSetup; onDone: () => void; }
 
 function parseNativeEvent(event: NativeAudioBounceEvent): {
@@ -77,6 +89,7 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
   forehandColorRef.current = forehandColor;
   const busyRef = useRef(false);
   const debugEventsRef = useRef<LiveDebugEvent[]>([]);
+  const audioCandidatesRef = useRef<LiveAudioCandidate[]>([]);
 
   const stopAll = useCallback(() => {
     AudioStream.stopStreaming();
@@ -85,12 +98,14 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
     // Debug-dump: varje räknad studs med crop + beslut, så felanalys kan
     // göras på fakta i stället för teorier. Hämtas via adb från Download.
     const events = debugEventsRef.current;
-    if (events.length > 0) {
+    const audioCandidates = audioCandidatesRef.current;
+    if (events.length > 0 || audioCandidates.length > 0) {
       const path = `${RNFS.DownloadDirectoryPath}/pingis_live_sidedebug_${Date.now()}.json`;
-      RNFS.writeFile(path, JSON.stringify({ model: BOUNCE_SIDE_MODEL_VERSION, events }), 'utf8')
+      RNFS.writeFile(path, JSON.stringify({ model: BOUNCE_SIDE_MODEL_VERSION, events, audio_candidates: audioCandidates }), 'utf8')
         .then(() => RNFS.scanFile(path))
         .catch(() => {});
       debugEventsRef.current = [];
+      audioCandidatesRef.current = [];
     }
   }, []);
 
@@ -144,6 +159,17 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
           const frameRms = nativeDebug?.rms ?? 0;
           const pcm = decodeBase64PCM(audioB64);
           const result = counterRef.current.process(pcm, onsetTimeMs, frameRms, Date.now());
+          if (audioCandidatesRef.current.length < 600) {
+            audioCandidatesRef.current.push({
+              onset_time_ms: onsetTimeMs,
+              frame_rms: frameRms,
+              counted: result.counted,
+              reject_reason: result.rejectReason,
+              audio_label: result.prediction?.label,
+              audio_confidence: result.prediction?.confidence,
+              bg_mode: result.bgMode,
+            });
+          }
           if (!result.counted) return;
 
           // Bilden från TRÄFFÖGONBLICKET (ringbufferten i nativemodulen),
