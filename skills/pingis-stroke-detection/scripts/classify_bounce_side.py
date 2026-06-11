@@ -51,7 +51,10 @@ NR_MODEL_DIR = ROOT_DIR / "data" / "audio" / "models" / "noise_robust_v3"
 # rekommenderade live-uppställningen (mobilen lutad på bordet).
 TRAIN_SESSIONS = ["video_bounce_side_session_2026-06-09_002",
                   "video_bounce_side_session_2026-06-09_003",
-                  "video_bounce_side_session_2026-06-11_001"]
+                  "video_bounce_side_session_2026-06-11_001",
+                  # Loves granskade markörer ur andra underifrån-videon
+                  # (11 st; dagens modell fick 7/11 på dem före omträning).
+                  "video_bounce_side_session_2026-06-11_002"]
 HOLDOUT_SESSION = "video_bounce_side_session_2026-06-09_004"
 
 GRID = 4
