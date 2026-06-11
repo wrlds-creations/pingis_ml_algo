@@ -305,8 +305,11 @@ const STROKE_ANCHOR_POSE_POST_MS = 600;
 // Ankrat läge behöver lägre konfidens än blindskanningen: ankaret i sig är
 // stark evidens (bollträff) och spök-FP:er kan inte uppstå i tysta partier.
 // Vid riktiga bollträff-ankare på Tomas-videon klarade bara 21/75 slag 0.58
-// medan 61/75 var korrekt klassade FH/BH.
-const STROKE_ANCHOR_MIN_CONFIDENCE = 0.45;
+// medan 61/75 var korrekt klassade FH/BH; 0.45 gav 41 på mobilen (ML Kit-
+// pose ger systematiskt lägre konfidens än träningens MediaPipe-pose).
+// 0.38 är strax över 3-klassers slumpnivå - fel kan bara bli fel SIDA på
+// ett riktigt slag, och förslagen granskas alltid manuellt.
+const STROKE_ANCHOR_MIN_CONFIDENCE = 0.38;
 
 async function analyzeVideoOnlyStrokes(
   videoPath: string,
