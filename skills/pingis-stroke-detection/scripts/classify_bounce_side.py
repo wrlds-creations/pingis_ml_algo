@@ -442,21 +442,125 @@ def classify_main(video_path: Path, audio_path: Path | None, out_prefix: str) ->
     print(f"FH {n_fh} / BH {n_bh}. Tidslinje: {out_csv}")
 
 
+APP_MODEL_JSON = ROOT_DIR / "apps" / "collector" / "src" / "models" / "bounce_side_model.json"
+APP_FIXTURE = OUT_DIR / "bounce_side_ts_parity_fixture.json"
+
+
+def export_app_main() -> None:
+    """Exportera tränad grid-modell till appens flat-tree-JSON + parity-fixture.
+
+    Kräver att --train körts med mode 'grid' som vinnare (trädmodell utan
+    scaler). Fixturen innehåller råa 64x64-RGB-crops + förväntade features
+    och sannolikheter för Node-paritetskontrollen av TS-porten.
+    """
+    import json as json_module
+
+    model = joblib.load(OUT_DIR / "bounce_side_model.pkl")
+    feature_meta = joblib.load(OUT_DIR / "bounce_side_feature_meta.pkl")
+    if feature_meta["mode"] != "grid":
+        raise SystemExit(f"App-export stödjer bara grid-features (tränad: {feature_meta['mode']}).")
+    if not hasattr(model, "estimators_"):
+        raise SystemExit("App-export kräver trädmodell (ExtraTrees/RF), inte pipeline/SVC.")
+    feature_names = feature_meta["feature_names"]
+    labels = [str(c) for c in model.classes_]
+
+    def export_tree(estimator) -> list:
+        tree = estimator.tree_
+        nodes = []
+        for i in range(tree.node_count):
+            if tree.children_left[i] == -1:
+                counts = tree.value[i][0]
+                total = float(counts.sum()) or 1.0
+                nodes.append([float(v) / total for v in counts])
+            else:
+                nodes.append([
+                    int(tree.feature[i]),
+                    float(tree.threshold[i]),
+                    int(tree.children_left[i]),
+                    int(tree.children_right[i]),
+                ])
+        return nodes
+
+    payload = {
+        "metadata": {
+            "model_version": "bounce_side_v2_2026_06_11_underangle",
+            "feature_spec": "bounce_side_grid_v1",
+            "labels": labels,
+            "tree_count": len(model.estimators_),
+            "holdout_marker_accuracy": 0.96,
+        },
+        "labels": labels,
+        "feature_names": list(feature_names),
+        "scaler_mean": [0.0] * len(feature_names),
+        "scaler_std": [1.0] * len(feature_names),
+        "trees": [export_tree(est) for est in model.estimators_],
+    }
+
+    # Round-trip + fixture: kör holdoutens crops genom exporten.
+    fixture_samples = []
+    max_diff = 0.0
+    n_checked = 0
+    for video, markers in iter_session_markers(HOLDOUT_SESSION):
+        cap = cv2.VideoCapture(str(video))
+        for marker in markers:
+            frame = frame_at_ms(cap, float(marker["timestamp_ms"]))
+            if frame is None:
+                continue
+            roi, source = roi_for_frame(frame)
+            if roi is None or roi.size == 0:
+                continue
+            resized = cv2.resize(roi, (64, 64), interpolation=cv2.INTER_AREA)
+            feats = roi_features(resized, source)
+            x = np.array([[feats[n] for n in feature_names]], dtype=np.float64)
+            expected = model.predict_proba(x)[0]
+            # Pure-python tree walk mot exporten
+            acc = np.zeros(len(labels))
+            for tree in payload["trees"]:
+                node = tree[0]
+                while not (len(node) == len(labels) and all(0 <= v <= 1 for v in node) and abs(sum(node) - 1) < 0.01):
+                    node = tree[node[2] if x[0][int(node[0])] <= node[1] else node[3]]
+                acc += np.array(node)
+            got = acc / len(payload["trees"])
+            max_diff = max(max_diff, float(np.max(np.abs(got - expected))))
+            n_checked += 1
+            if len(fixture_samples) < 30:
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                fixture_samples.append({
+                    "label": marker["bounce_side"],
+                    "roi_source": source,
+                    "rgb64": [int(v) for v in rgb.ravel()],
+                    "py_features": {k: float(v) for k, v in feats.items()},
+                    "py_proba": {label: float(p) for label, p in zip(labels, expected)},
+                })
+        cap.release()
+    print(f"Round-trip ({n_checked} holdout-crops): max diff {max_diff:.2e}")
+    if max_diff > 1e-9:
+        raise SystemExit("Round-trip FAILED.")
+
+    APP_MODEL_JSON.write_text(json_module.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    print(f"App-export: {APP_MODEL_JSON} ({APP_MODEL_JSON.stat().st_size / 1024:.0f} KB, {len(payload['trees'])} träd, {len(feature_names)} features)")
+    APP_FIXTURE.write_text(json_module.dumps({"feature_names": list(feature_names), "samples": fixture_samples}), encoding="utf-8")
+    print(f"Fixture: {APP_FIXTURE} ({len(fixture_samples)} samples)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="FH-/BH-sida vid racketstuds (audio-ankare + racket-ROI).")
     parser.add_argument("--train", action="store_true")
+    parser.add_argument("--export-app", action="store_true", help="Exportera till appens bounce_side_model.json.")
     parser.add_argument("--classify", default="", help="Video att klassificera.")
     parser.add_argument("--audio", default="", help="Valfri separat WAV (annars extraheras ur videon).")
     parser.add_argument("--out-prefix", default="")
     args = parser.parse_args()
     if args.train:
         train_main()
+    if args.export_app:
+        export_app_main()
     if args.classify:
         video = Path(args.classify)
         prefix = args.out_prefix or str(video.with_suffix(""))
         classify_main(video, Path(args.audio) if args.audio else None, prefix)
-    if not args.train and not args.classify:
-        raise SystemExit("Ange --train och/eller --classify <video>")
+    if not args.train and not args.export_app and not args.classify:
+        raise SystemExit("Ange --train, --export-app och/eller --classify <video>")
 
 
 if __name__ == "__main__":

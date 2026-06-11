@@ -86,6 +86,177 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
         }.start()
     }
 
+    /**
+     * Extrahera handleds-ankrade racket-crops (64x64 RGB) vid givna
+     * tidsstämplar, för FH-/BH-sidoklassificeringen i Video studs FH/BH.
+     * Sekventiell avkodning; vid varje ankare tas första framen >= ts,
+     * pose körs på den upprätta halvupplösta bilden, och en kvadrat
+     * centrerad bortom handleden längs underarmen beskärs (samma geometri
+     * som träningens wrist_anchored_roi i classify_bounce_side.py).
+     * Returnerar [{timestamp_ms, frame_ms, rgb_b64 (64*64*3), roi_source}].
+     */
+    @ReactMethod
+    fun extractBounceSideCrops(videoPath: String, timestampsMs: com.facebook.react.bridge.ReadableArray, promise: Promise) {
+        Thread {
+            val cleanPath = videoPath.removePrefix("file://")
+            if (!File(cleanPath).exists()) {
+                promise.reject("VIDEO_NOT_FOUND", "Video file does not exist: $cleanPath")
+                return@Thread
+            }
+            try {
+                val anchors = ArrayList<Long>(timestampsMs.size())
+                for (i in 0 until timestampsMs.size()) anchors.add(timestampsMs.getDouble(i).toLong())
+                anchors.sort()
+                promise.resolve(extractCropsWithMediaCodec(cleanPath, anchors))
+            } catch (error: Exception) {
+                promise.reject("BOUNCE_SIDE_CROP_ERROR", error.message, error)
+            }
+        }.start()
+    }
+
+    private fun extractCropsWithMediaCodec(path: String, anchors: List<Long>): WritableArray {
+        val extractor = MediaExtractor()
+        extractor.setDataSource(path)
+        var trackIndex = -1
+        var format: MediaFormat? = null
+        for (i in 0 until extractor.trackCount) {
+            val trackFormat = extractor.getTrackFormat(i)
+            val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: continue
+            if (mime.startsWith("video/")) { trackIndex = i; format = trackFormat; break }
+        }
+        if (trackIndex < 0 || format == null) {
+            extractor.release()
+            throw IllegalStateException("No video track")
+        }
+        extractor.selectTrack(trackIndex)
+        val mime = format.getString(MediaFormat.KEY_MIME)!!
+        val rotation = try { format.getInteger(MediaFormat.KEY_ROTATION) } catch (_: Exception) { 0 }
+
+        val detector = PoseDetection.getClient(
+            PoseDetectorOptions.Builder()
+                .setDetectorMode(PoseDetectorOptions.SINGLE_IMAGE_MODE)
+                .build()
+        )
+        val codec = MediaCodec.createDecoderByType(mime)
+        val results = Arguments.createArray()
+
+        try {
+            codec.configure(format, null, null, 0)
+            codec.start()
+            val bufferInfo = MediaCodec.BufferInfo()
+            var anchorIdx = 0
+            var inputDone = false
+            var outputDone = false
+
+            while (!outputDone && anchorIdx < anchors.size) {
+                if (!inputDone) {
+                    val inIndex = codec.dequeueInputBuffer(10_000)
+                    if (inIndex >= 0) {
+                        val inputBuffer = codec.getInputBuffer(inIndex)!!
+                        val sampleSize = extractor.readSampleData(inputBuffer, 0)
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            codec.queueInputBuffer(inIndex, 0, sampleSize, extractor.sampleTime, 0)
+                            extractor.advance()
+                        }
+                    }
+                }
+                val outIndex = codec.dequeueOutputBuffer(bufferInfo, 10_000)
+                if (outIndex >= 0) {
+                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) outputDone = true
+                    val ptsMs = bufferInfo.presentationTimeUs / 1000L
+                    if (bufferInfo.size > 0 && anchorIdx < anchors.size && ptsMs >= anchors[anchorIdx]) {
+                        val image = codec.getOutputImage(outIndex)
+                        if (image != null) {
+                            val converted = yuv420ToUprightNv21(image, rotation)
+                            val anchorTs = anchors[anchorIdx]
+                            val crop = buildWristCrop(converted, detector)
+                            results.pushMap(Arguments.createMap().apply {
+                                putDouble("timestamp_ms", anchorTs.toDouble())
+                                putDouble("frame_ms", ptsMs.toDouble())
+                                putString("rgb_b64", android.util.Base64.encodeToString(crop.first, android.util.Base64.NO_WRAP))
+                                putString("roi_source", crop.second)
+                            })
+                            // hoppa över alla ankare som denna frame täckte
+                            while (anchorIdx < anchors.size && ptsMs >= anchors[anchorIdx]) anchorIdx += 1
+                        }
+                    }
+                    codec.releaseOutputBuffer(outIndex, false)
+                }
+            }
+        } finally {
+            try { codec.stop() } catch (_: Exception) {}
+            codec.release()
+            extractor.release()
+            detector.close()
+        }
+        return results
+    }
+
+    /** Pose -> handleds-ankrad kvadrat -> 64x64 RGB-bytes (BT.601 limited range). */
+    private fun buildWristCrop(frame: ConvertedFrame, detector: com.google.mlkit.vision.pose.PoseDetector): Pair<ByteArray, String> {
+        val w = frame.width
+        val h = frame.height
+        val input = InputImage.fromByteArray(frame.data, w, h, 0, InputImage.IMAGE_FORMAT_NV21)
+        val pose = try { Tasks.await(detector.process(input)) } catch (_: Exception) { null }
+
+        var x0: Int; var y0: Int; var x1: Int; var y1: Int; var source: String
+        val rWrist = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_WRIST)
+        val lWrist = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.LEFT_WRIST)
+        val rElbow = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_ELBOW)
+        val lElbow = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.LEFT_ELBOW)
+        val useRight = (rWrist?.inFrameLikelihood ?: 0f) >= (lWrist?.inFrameLikelihood ?: 0f)
+        val wrist = if (useRight) rWrist else lWrist
+        val elbow = if (useRight) rElbow else lElbow
+        if (wrist != null && elbow != null) {
+            val wx = wrist.position.x
+            val wy = wrist.position.y
+            val fx = wx - elbow.position.x
+            val fy = wy - elbow.position.y
+            val flen = maxOf(Math.hypot(fx.toDouble(), fy.toDouble()).toFloat(), 1f)
+            val cx = wx + 0.8f * fx
+            val cy = wy + 0.8f * fy
+            val half = 1.3f * flen
+            x0 = maxOf(0, (cx - half).toInt()); y0 = maxOf(0, (cy - half).toInt())
+            x1 = minOf(w, (cx + half).toInt()); y1 = minOf(h, (cy + half).toInt())
+            source = "wrist_anchor"
+            if (x1 - x0 < 24 || y1 - y0 < 24) {
+                x0 = w / 3; y0 = h / 3; x1 = 2 * w / 3; y1 = 2 * h / 3; source = "center_fallback"
+            }
+        } else {
+            x0 = w / 3; y0 = h / 3; x1 = 2 * w / 3; y1 = 2 * h / 3; source = "center_fallback"
+        }
+
+        val out = ByteArray(64 * 64 * 3)
+        val nv = frame.data
+        val cw = x1 - x0
+        val ch = y1 - y0
+        var offset = 0
+        for (dy in 0 until 64) {
+            val sy = y0 + (dy * ch) / 64
+            for (dx in 0 until 64) {
+                val sx = x0 + (dx * cw) / 64
+                val yVal = (nv[sy * w + sx].toInt() and 0xFF)
+                val uvBase = w * h + (sy / 2) * w + (sx / 2) * 2
+                val vVal = (nv[uvBase].toInt() and 0xFF) - 128
+                val uVal = (nv[uvBase + 1].toInt() and 0xFF) - 128
+                val c = 1.164383 * (yVal - 16)
+                var r = (c + 1.596027 * vVal).toInt()
+                var g = (c - 0.391762 * uVal - 0.812968 * vVal).toInt()
+                var b = (c + 2.017232 * uVal).toInt()
+                if (r < 0) r = 0; if (r > 255) r = 255
+                if (g < 0) g = 0; if (g > 255) g = 255
+                if (b < 0) b = 0; if (b > 255) b = 255
+                out[offset++] = r.toByte()
+                out[offset++] = g.toByte()
+                out[offset++] = b.toByte()
+            }
+        }
+        return Pair(out, source)
+    }
+
     private fun insideWindows(windows: List<LongRange>, ptsMs: Long): Boolean {
         if (windows.isEmpty()) return false
         for (window in windows) {

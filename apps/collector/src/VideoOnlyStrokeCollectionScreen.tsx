@@ -32,6 +32,7 @@ import type {
 import { buildVideoStrokeFeatures, detectRacketHandedness, VIDEO_STROKE_FEATURE_SPEC } from './videoStrokeFeatures';
 import { extractFableFeatures } from './nrFeatures';
 import { fablePredict } from './hgbRuntime';
+import { bounceSideFeatures, predictBounceSide } from './bounceSideInference';
 import { hasTrainedVideoStrokeModel, predictVideoStroke, videoStrokeModelVersion } from './videoStrokeInference';
 
 const APP_VERSION = 'collector-video-pose-only-v5';
@@ -966,12 +967,39 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
           filteredAway = peakMarkers.length - kept.length;
           rackedMarkers = kept;
         }
+        // FH-/BH-sidoförslag per ankare: träfframe -> handleds-ROI ->
+        // sidomodellen (0.96 på orörd holdout). Förslagen är 'suggested'
+        // tills de bekräftas/rättas - de blir aldrig träningsfacit av sig
+        // själva.
+        let sideSuggested = 0;
+        if (rackedMarkers.length > 0) {
+          try {
+            setStatus(`${rackedMarkers.length} racketstudsar. Föreslår FH-/BH-sida från videon...`);
+            const crops = await VideoPose.extractBounceSideCrops(
+              nextVideo.videoPath,
+              rackedMarkers.map(marker => marker.timestamp_ms),
+            );
+            const cropByTs = new Map(crops.map(crop => [Math.round(crop.timestamp_ms), crop]));
+            rackedMarkers = rackedMarkers.map(marker => {
+              const crop = cropByTs.get(Math.round(marker.timestamp_ms));
+              if (!crop) return marker;
+              const binary = atob(crop.rgb_b64);
+              const rgb = new Uint8Array(binary.length);
+              for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
+              const prediction = predictBounceSide(bounceSideFeatures(rgb, crop.roi_source));
+              sideSuggested += 1;
+              return { ...marker, stroke_type: prediction.label };
+            });
+          } catch {
+            // Sidoförslag är "nice to have" - ankarna fungerar utan dem.
+          }
+        }
         setMarkers(rackedMarkers);
         setPoseAnalysis([]);
         setSelectedMarkerId(rackedMarkers[0]?.id ?? null);
         setStatus(
           rackedMarkers.length > 0
-            ? `${rackedMarkers.length} racketstudsar (Fable-modellen filtrerade bort ${filteredAway} av ${peakMarkers.length} ljudtoppar). Markera varje studs som FH-sida, BH-sida eller Oklart.`
+            ? `${rackedMarkers.length} racketstudsar (Fable filtrerade bort ${filteredAway} av ${peakMarkers.length} ljudtoppar), ${sideSuggested} med FH/BH-sidoförslag. Godkänn eller rätta varje studs.`
             : 'Inga racketstudsar hittades i ljudet. Lägg till markers manuellt.',
         );
         await RNFS.scanFile(nextVideo.videoPath).catch(() => {});
