@@ -107,13 +107,96 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
                 val anchors = ArrayList<Long>(timestampsMs.size())
                 for (i in 0 until timestampsMs.size()) anchors.add(timestampsMs.getDouble(i).toLong())
                 anchors.sort()
-                promise.resolve(extractCropsWithMediaCodec(cleanPath, anchors))
+                promise.resolve(extractCropsWithRetriever(cleanPath, anchors))
             } catch (error: Exception) {
                 promise.reject("BOUNCE_SIDE_CROP_ERROR", error.message, error)
             }
         }.start()
     }
 
+    /**
+     * Crops via Androids egen bitmap-avkodning (MediaMetadataRetriever):
+     * korrekt färgrymd (BT.709 vs BT.601 - modellens features ÄR
+     * färgstatistik, min handrullade YUV->RGB gav färgskiftade crops och
+     * fel FH/BH-förslag), full upplösning och bilinjär skalning - närmast
+     * träningens cv2-pipeline. Långsamma per-frame-seeks är OK här: bara
+     * ~40 ankarframes per video, inte 900.
+     */
+    private fun extractCropsWithRetriever(path: String, anchors: List<Long>): WritableArray {
+        val retriever = MediaMetadataRetriever()
+        val detector = PoseDetection.getClient(
+            PoseDetectorOptions.Builder()
+                .setDetectorMode(PoseDetectorOptions.SINGLE_IMAGE_MODE)
+                .build()
+        )
+        val results = Arguments.createArray()
+        try {
+            retriever.setDataSource(path)
+            for (anchorTs in anchors) {
+                val bitmap = retriever.getFrameAtTime(anchorTs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
+                    ?: continue
+                val input = InputImage.fromBitmap(bitmap, 0)
+                val pose = try { Tasks.await(detector.process(input)) } catch (_: Exception) { null }
+
+                val w = bitmap.width
+                val h = bitmap.height
+                var x0: Int; var y0: Int; var x1: Int; var y1: Int; var source: String
+                val rWrist = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_WRIST)
+                val lWrist = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.LEFT_WRIST)
+                val rElbow = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.RIGHT_ELBOW)
+                val lElbow = pose?.getPoseLandmark(com.google.mlkit.vision.pose.PoseLandmark.LEFT_ELBOW)
+                val useRight = (rWrist?.inFrameLikelihood ?: 0f) >= (lWrist?.inFrameLikelihood ?: 0f)
+                val wrist = if (useRight) rWrist else lWrist
+                val elbow = if (useRight) rElbow else lElbow
+                if (wrist != null && elbow != null) {
+                    val wx = wrist.position.x
+                    val wy = wrist.position.y
+                    val fx = wx - elbow.position.x
+                    val fy = wy - elbow.position.y
+                    val flen = maxOf(Math.hypot(fx.toDouble(), fy.toDouble()).toFloat(), 1f)
+                    val cx = wx + 0.8f * fx
+                    val cy = wy + 0.8f * fy
+                    val half = 1.3f * flen
+                    x0 = maxOf(0, (cx - half).toInt()); y0 = maxOf(0, (cy - half).toInt())
+                    x1 = minOf(w, (cx + half).toInt()); y1 = minOf(h, (cy + half).toInt())
+                    source = "wrist_anchor"
+                    if (x1 - x0 < 24 || y1 - y0 < 24) {
+                        x0 = w / 3; y0 = h / 3; x1 = 2 * w / 3; y1 = 2 * h / 3; source = "center_fallback"
+                    }
+                } else {
+                    x0 = w / 3; y0 = h / 3; x1 = 2 * w / 3; y1 = 2 * h / 3; source = "center_fallback"
+                }
+
+                val cropped = android.graphics.Bitmap.createBitmap(bitmap, x0, y0, x1 - x0, y1 - y0)
+                val scaled = android.graphics.Bitmap.createScaledBitmap(cropped, 64, 64, true)
+                val pixels = IntArray(64 * 64)
+                scaled.getPixels(pixels, 0, 64, 0, 0, 64, 64)
+                val rgb = ByteArray(64 * 64 * 3)
+                var offset = 0
+                for (pixel in pixels) {
+                    rgb[offset++] = ((pixel shr 16) and 0xFF).toByte()
+                    rgb[offset++] = ((pixel shr 8) and 0xFF).toByte()
+                    rgb[offset++] = (pixel and 0xFF).toByte()
+                }
+                if (scaled !== cropped) scaled.recycle()
+                if (cropped !== bitmap) cropped.recycle()
+                bitmap.recycle()
+
+                results.pushMap(Arguments.createMap().apply {
+                    putDouble("timestamp_ms", anchorTs.toDouble())
+                    putDouble("frame_ms", anchorTs.toDouble())
+                    putString("rgb_b64", android.util.Base64.encodeToString(rgb, android.util.Base64.NO_WRAP))
+                    putString("roi_source", source)
+                })
+            }
+        } finally {
+            retriever.release()
+            detector.close()
+        }
+        return results
+    }
+
+    @Suppress("unused")
     private fun extractCropsWithMediaCodec(path: String, anchors: List<Long>): WritableArray {
         val extractor = MediaExtractor()
         extractor.setDataSource(path)
