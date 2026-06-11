@@ -80,6 +80,29 @@ export interface FableDetectionResult {
   bounceGapMs?: number;
 }
 
+/**
+ * Bollträff-räknare för live FH/BH-studs: samma fönsterlogik som
+ * FableCounter (samma-studs/eko/inaktualitet) men kvalificerar på
+ * BOLLTRÄFF (P(racket)+P(bord) >= 0.5) i stället för enbart racket -
+ * med mobilen liggande på bordet leds studsljudet genom skivan och
+ * klassas ofta som bordsstuds; vilken SIDA det är avgörs av kameran.
+ */
+export class BallImpactCounter {
+  private counter = new FableCounter();
+
+  reset(): void {
+    this.counter.reset();
+  }
+
+  process(pcm: Float32Array, onsetTimeMs: number, frameRms: number, nowMs?: number): FableDetectionResult {
+    return this.counter.processWithQualifier(pcm, onsetTimeMs, frameRms, nowMs, prediction => {
+      const pBall = (prediction.probabilities.racket_bounce ?? 0)
+        + (prediction.probabilities.table_bounce ?? 0);
+      return pBall >= 0.5;
+    });
+  }
+}
+
 const GRAVITY = 9.82;
 const HEIGHT_MIN_GAP_MS = 250;   // < 250 ms = eko/dubbelträff, inte en hel flygbana
 const HEIGHT_MAX_GAP_MS = 1500;  // > 1.5 s = bollen var inte i kontinuerligt studs
@@ -115,6 +138,18 @@ export class FableCounter {
    * `nowMs` = JS-klocka vid bearbetning (för inaktualitetsspärren).
    */
   process(pcm: Float32Array, onsetTimeMs: number, frameRms: number, nowMs?: number): FableDetectionResult {
+    return this.processWithQualifier(pcm, onsetTimeMs, frameRms, nowMs, undefined);
+  }
+
+  /** Som process(), men med valfri anpassad kvalificeringsregel
+   *  (t.ex. bollträff i stället för enbart racketstuds). */
+  processWithQualifier(
+    pcm: Float32Array,
+    onsetTimeMs: number,
+    frameRms: number,
+    nowMs: number | undefined,
+    qualifier: ((prediction: FablePrediction, features: Record<string, number>) => boolean) | undefined,
+  ): FableDetectionResult {
     const result: FableDetectionResult = { counted: false, featureMs: 0, predictMs: 0 };
 
     // Inaktualitetsspärr före allt annat: gammal kö-kandidat hjälper ingen.
@@ -180,13 +215,20 @@ export class FableCounter {
     result.bgRmsDb = bgRmsDb;
     const confidenceThreshold = loud ? this.config.loudConfidence : this.config.quietConfidence;
 
-    if (prediction.label !== 'racket_bounce') {
-      result.rejectReason = 'not_racket';
-      return result;
-    }
-    if (prediction.confidence < confidenceThreshold) {
-      result.rejectReason = loud ? 'low_confidence_loud_bg' : 'low_confidence';
-      return result;
+    if (qualifier) {
+      if (!qualifier(prediction, features)) {
+        result.rejectReason = 'not_racket';
+        return result;
+      }
+    } else {
+      if (prediction.label !== 'racket_bounce') {
+        result.rejectReason = 'not_racket';
+        return result;
+      }
+      if (prediction.confidence < confidenceThreshold) {
+        result.rejectReason = loud ? 'low_confidence_loud_bg' : 'low_confidence';
+        return result;
+      }
     }
 
     if (this.lastCounted !== null) {
