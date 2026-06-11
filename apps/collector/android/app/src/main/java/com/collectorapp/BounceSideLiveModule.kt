@@ -86,7 +86,7 @@ class BounceSideLiveModule(private val ctx: ReactApplicationContext)
 
     @ReactMethod
     fun startCamera(useFrontCamera: Boolean, promise: Promise) {
-        val activity = currentActivity
+        val activity = ctx.currentActivity
         if (activity !is LifecycleOwner) {
             promise.reject("NO_ACTIVITY", "Ingen aktiv activity för kamerabindning")
             return
