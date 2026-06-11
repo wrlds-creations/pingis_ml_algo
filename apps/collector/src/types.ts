@@ -96,6 +96,8 @@ export interface VideoStrokeTake {
   review_status: VideoStrokeReviewStatus;
   markers: VideoStrokeMarker[];
   pose_analysis?: VideoStrokePoseAnalysis[];
+  /** Bortfallsbokföring från den ljudankrade slaganalysen (diagnostik). */
+  analysis_diagnostics?: unknown;
 }
 
 export interface VideoStrokeSessionFile {

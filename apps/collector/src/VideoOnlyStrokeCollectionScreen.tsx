@@ -311,17 +311,39 @@ const STROKE_ANCHOR_POSE_POST_MS = 600;
 // ett riktigt slag, och förslagen granskas alltid manuellt.
 const STROKE_ANCHOR_MIN_CONFIDENCE = 0.38;
 
+export interface StrokeAnalysisDiagnostics {
+  mode: 'audio_anchored' | 'scan';
+  anchors: number;
+  pose_frames: number;
+  detected_hand: string;
+  drops: {
+    no_features: number;
+    low_visibility: number;
+    not_strokeish: number;
+    deduped: number;
+  };
+  /** Ankare som föll på slag-aktighetsregeln, med sannolikheter - facit för
+   *  nästa tröskel-/modelliteration. */
+  not_strokeish_detail: Array<{ ts_ms: number; p_fh: number; p_bh: number; p_unknown: number }>;
+}
+
 async function analyzeVideoOnlyStrokes(
   videoPath: string,
   durationMs: number,
   handedness: PlayerSetup['handedness'],
   waveform: DecodedWavFile | null,
-): Promise<{ markers: ReviewMarker[]; poseAnalysis: VideoStrokePoseAnalysis[]; status: string }> {
+): Promise<{
+  markers: ReviewMarker[];
+  poseAnalysis: VideoStrokePoseAnalysis[];
+  status: string;
+  diagnostics: StrokeAnalysisDiagnostics | null;
+}> {
   if (!hasTrainedVideoStrokeModel()) {
     return {
       markers: [],
       poseAnalysis: [],
       status: `Ingen videomodell exporterad (${videoStrokeModelVersion()}).`,
+      diagnostics: null,
     };
   }
 
@@ -357,13 +379,28 @@ async function analyzeVideoOnlyStrokes(
       prediction: ReturnType<typeof predictVideoStroke>;
       wristSpeedMax: number;
     }
+    const diagnostics: StrokeAnalysisDiagnostics = {
+      mode: 'audio_anchored',
+      anchors: anchors.length,
+      pose_frames: pose.frames.length,
+      detected_hand: `${handLabel} (${handSource})`,
+      drops: { no_features: 0, low_visibility: 0, not_strokeish: 0, deduped: 0 },
+      not_strokeish_detail: [],
+    };
     const anchoredCandidates: AnchoredCandidate[] = [];
     for (const anchor of anchors) {
       const timestampMs = clampTimestamp(anchor.timestamp_ms, scanDurationMs || durationMs);
       const featureResult = buildVideoStrokeFeatures(pose.frames, timestampMs, playerHandedness);
       // Mjukare gate än blindskanningen: ankaret är redan stark evidens och
       // modellens unknown-klass avvisar bordsstuds-ankare utan sving.
-      if (!featureResult || featureResult.avg_visibility < MIN_AVG_VISIBILITY) continue;
+      if (!featureResult) {
+        diagnostics.drops.no_features += 1;
+        continue;
+      }
+      if (featureResult.avg_visibility < MIN_AVG_VISIBILITY) {
+        diagnostics.drops.low_visibility += 1;
+        continue;
+      }
       const prediction = predictVideoStroke(featureResult.features);
       // Slag-aktighet i stället för argmax: mobilens pose (ML Kit) ger
       // flackare sannolikheter än träningens (MediaPipe), så "unknown" kan
@@ -372,7 +409,16 @@ async function analyzeVideoOnlyStrokes(
       // unknown-sannolikhet klart över 0.5 och avvisas fortfarande.
       const pForehand = prediction.probabilities.forehand ?? 0;
       const pBackhand = prediction.probabilities.backhand ?? 0;
-      if (pForehand + pBackhand < 0.5) continue;
+      if (pForehand + pBackhand < 0.5) {
+        diagnostics.drops.not_strokeish += 1;
+        diagnostics.not_strokeish_detail.push({
+          ts_ms: Math.round(timestampMs),
+          p_fh: Math.round(pForehand * 1000) / 1000,
+          p_bh: Math.round(pBackhand * 1000) / 1000,
+          p_unknown: Math.round((prediction.probabilities.unknown ?? 0) * 1000) / 1000,
+        });
+        continue;
+      }
       const side: 'forehand' | 'backhand' = pForehand >= pBackhand ? 'forehand' : 'backhand';
       anchoredCandidates.push({
         timestampMs,
@@ -416,12 +462,15 @@ async function analyzeVideoOnlyStrokes(
         status: 'ok',
       });
     }
+    diagnostics.drops.deduped = anchoredCandidates.length - deduped.length;
     const fhCount = markers.filter(marker => marker.stroke_type === 'forehand').length;
     const bhCount = markers.filter(marker => marker.stroke_type === 'backhand').length;
+    const dropSummary = `bortfall: ${diagnostics.drops.not_strokeish} ej slag, ${diagnostics.drops.low_visibility} låg synlighet, ${diagnostics.drops.no_features} få frames, ${diagnostics.drops.deduped} dubbletter`;
     return {
       markers,
       poseAnalysis,
-      status: `Ljudankrad pose: ${anchors.length} bollträffar -> ${markers.length} slag (${fhCount} FH, ${bhCount} BH). Spelhand: ${handLabel} (${handSource}).`,
+      status: `Ljudankrad pose: ${anchors.length} bollträffar -> ${markers.length} slag (${fhCount} FH, ${bhCount} BH). ${dropSummary}. Spelhand: ${handLabel} (${handSource}).`,
+      diagnostics,
     };
   }
 
@@ -490,6 +539,14 @@ async function analyzeVideoOnlyStrokes(
     markers,
     poseAnalysis,
     status: `Pose ${SAMPLE_FPS} fps (utan ljudankare): ${markers.length} förslag (${concreteCount} FH/BH). Spelhand: ${handLabel} (${handSource}).`,
+    diagnostics: {
+      mode: 'scan',
+      anchors: 0,
+      pose_frames: pose.frames.length,
+      detected_hand: `${handLabel} (${handSource})`,
+      drops: { no_features: 0, low_visibility: 0, not_strokeish: 0, deduped: 0 },
+      not_strokeish_detail: [],
+    },
   };
 }
 
@@ -547,6 +604,7 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
   const [waveform, setWaveform] = useState<TimelineWaveform | null>(null);
   const [markers, setMarkers] = useState<ReviewMarker[]>([]);
   const [poseAnalysis, setPoseAnalysis] = useState<VideoStrokePoseAnalysis[]>([]);
+  const [analysisDiagnostics, setAnalysisDiagnostics] = useState<StrokeAnalysisDiagnostics | null>(null);
   const [selectedMarkerId, setSelectedMarkerId] = useState<string | null>(null);
   const [playbackMs, setPlaybackMs] = useState(0);
   const [paused, setPaused] = useState(true);
@@ -863,6 +921,7 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
       setVideo(nextVideo);
       setMarkers([]);
       setPoseAnalysis([]);
+      setAnalysisDiagnostics(null);
       setSelectedMarkerId(null);
       setPlaybackMs(0);
       setTimelineWindowStartMs(0);
@@ -892,6 +951,7 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
       );
       setMarkers(analyzed.markers);
       setPoseAnalysis(analyzed.poseAnalysis);
+      setAnalysisDiagnostics(analyzed.diagnostics);
       setSelectedMarkerId(analyzed.markers[0]?.id ?? null);
       setStatus(analyzed.status);
       await RNFS.scanFile(nextVideo.videoPath).catch(() => {});
@@ -1232,6 +1292,7 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
           review_status: 'reviewed',
           markers: reviewedMarkers,
           pose_analysis: poseAnalysis,
+          analysis_diagnostics: analysisDiagnostics,
           source_video_filename: video.importedSourceFilename,
           waveform_audio_filename: video.waveformAudioFilename,
           imported_source_uri: video.importedSourceUri,
