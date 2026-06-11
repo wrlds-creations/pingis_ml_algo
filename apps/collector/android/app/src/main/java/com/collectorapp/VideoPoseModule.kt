@@ -43,6 +43,29 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
 
     @ReactMethod
     fun extractPose(videoPath: String, sampleFps: Double, promise: Promise) {
+        runExtraction(videoPath, sampleFps, null, promise)
+    }
+
+    /**
+     * Pose enbart i givna tidsfönster (flat array [start0, end0, start1, end1, ...]
+     * i ms). Videon avkodas fortfarande sekventiellt (billigt), men konvertering
+     * + ML Kit-inferens hoppar över frames utanför fönstren - stor vinst när
+     * analysen är ljudankrad och bara behöver pose kring bollträffarna.
+     */
+    @ReactMethod
+    fun extractPoseInWindows(videoPath: String, sampleFps: Double, windowsMs: com.facebook.react.bridge.ReadableArray, promise: Promise) {
+        val windows = ArrayList<LongRange>(windowsMs.size() / 2)
+        var index = 0
+        while (index + 1 < windowsMs.size()) {
+            val start = windowsMs.getDouble(index).toLong()
+            val end = windowsMs.getDouble(index + 1).toLong()
+            if (end > start) windows.add(start..end)
+            index += 2
+        }
+        runExtraction(videoPath, sampleFps, windows.sortedBy { it.first }, promise)
+    }
+
+    private fun runExtraction(videoPath: String, sampleFps: Double, windows: List<LongRange>?, promise: Promise) {
         Thread {
             val cleanPath = videoPath.removePrefix("file://")
             if (!File(cleanPath).exists()) {
@@ -52,7 +75,7 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
             val safeSampleFps = max(1.0, sampleFps)
             try {
                 val result = try {
-                    extractWithMediaCodec(cleanPath, safeSampleFps)
+                    extractWithMediaCodec(cleanPath, safeSampleFps, windows)
                 } catch (codecError: Exception) {
                     extractWithRetriever(cleanPath, safeSampleFps)
                 }
@@ -63,9 +86,22 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
         }.start()
     }
 
+    private fun insideWindows(windows: List<LongRange>, ptsMs: Long): Boolean {
+        if (windows.isEmpty()) return false
+        for (window in windows) {
+            if (ptsMs < window.first) return false // sorterade: inget senare fönster kan träffa
+            if (ptsMs <= window.last) return true
+        }
+        return false
+    }
+
     // ── Snabb väg: sekventiell MediaCodec-avkodning ───────────────────────────
 
-    private fun extractWithMediaCodec(path: String, sampleFps: Double): com.facebook.react.bridge.WritableMap {
+    private fun extractWithMediaCodec(
+        path: String,
+        sampleFps: Double,
+        windows: List<LongRange>? = null,
+    ): com.facebook.react.bridge.WritableMap {
         val extractor = MediaExtractor()
         extractor.setDataSource(path)
         var trackIndex = -1
@@ -113,7 +149,6 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
             var nextTargetMs = 0L
             var inputDone = false
             var outputDone = false
-            var nv21: ByteArray? = null
 
             while (!outputDone) {
                 if (!inputDone) {
@@ -137,21 +172,21 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
                         outputDone = true
                     }
                     val ptsMs = bufferInfo.presentationTimeUs / 1000L
-                    val shouldSample = bufferInfo.size > 0 && ptsMs >= nextTargetMs
+                    val inWindow = windows == null || insideWindows(windows, ptsMs)
+                    val shouldSample = bufferInfo.size > 0 && ptsMs >= nextTargetMs && inWindow
                     if (shouldSample) {
                         val image = codec.getOutputImage(outIndex)
                         if (image != null) {
-                            // Avkodare paddar ofta till 16-alignment (1080 -> 1088);
-                            // cropRect anger den giltiga regionen.
-                            val crop = image.cropRect
-                            val width = crop.width()
-                            val height = crop.height()
-                            if (nv21 == null || nv21!!.size != width * height * 3 / 2) {
-                                nv21 = ByteArray(width * height * 3 / 2)
-                            }
-                            yuv420ToNv21(image, nv21!!)
+                            // Konvertera med 2x nedskalning OCH fysisk rotation till
+                            // stående läge (rotation=0 till ML Kit). Att rotera datan
+                            // själv ger exakt samma koordinatrum som gamla bitmap-
+                            // vägen, oberoende av ML Kits rotationssemantik; halverad
+                            // upplösning ger ~4x mindre arbete och påverkar inte
+                            // features som normaliseras med axelbredden.
+                            val converted = yuv420ToUprightNv21(image, rotation)
                             val input = InputImage.fromByteArray(
-                                nv21!!, width, height, rotation, InputImage.IMAGE_FORMAT_NV21
+                                converted.data, converted.width, converted.height,
+                                0, InputImage.IMAGE_FORMAT_NV21
                             )
                             val pose = Tasks.await(detector.process(input))
                             pushPoseFrame(frames, ptsMs, pose)
@@ -175,6 +210,92 @@ class VideoPoseModule(private val ctx: ReactApplicationContext)
             putDouble("frame_count", frames.size().toDouble())
             putArray("frames", frames)
         }
+    }
+
+    private class ConvertedFrame(val data: ByteArray, val width: Int, val height: Int)
+
+    private var convertBuffer: ByteArray? = null
+
+    /**
+     * YUV_420_888 -> NV21 i STÅENDE läge med 2x nedskalning.
+     * Rotationen bakas in i datan (ML Kit får rotation=0) så att
+     * koordinatrummet blir identiskt med gamla bitmap-vägen oavsett
+     * ML Kit-semantik; nedskalningen ger ~4x mindre konverterings- och
+     * inferensarbete utan att påverka axelbredd-normaliserade features.
+     */
+    private fun yuv420ToUprightNv21(image: Image, rotationDegrees: Int): ConvertedFrame {
+        val crop = image.cropRect
+        val srcW = crop.width()
+        val srcH = crop.height()
+        val rot = ((rotationDegrees % 360) + 360) % 360
+        val decW = srcW / 2
+        val decH = srcH / 2
+        val dstW = if (rot == 90 || rot == 270) decH else decW
+        val dstH = if (rot == 90 || rot == 270) decW else decH
+        // NV21 kräver jämna dimensioner
+        val outW = dstW and 0x7FFFFFFE
+        val outH = dstH and 0x7FFFFFFE
+        val needed = outW * outH * 3 / 2
+        var out = convertBuffer
+        if (out == null || out.size != needed) {
+            out = ByteArray(needed)
+            convertBuffer = out
+        }
+
+        val yPlane = image.planes[0]
+        val uPlane = image.planes[1]
+        val vPlane = image.planes[2]
+        val yBuf = yPlane.buffer
+        val yRow = yPlane.rowStride
+        val yPix = yPlane.pixelStride
+        val uBuf = uPlane.buffer
+        val uRow = uPlane.rowStride
+        val uPix = uPlane.pixelStride
+        val vBuf = vPlane.buffer
+        val vRow = vPlane.rowStride
+        val vPix = vPlane.pixelStride
+
+        // Y-plan: för varje dst-pixel, hitta källpixel via invers rotation
+        // + 2x decimering (i beskuret källkoordinatrum).
+        var offset = 0
+        for (dy in 0 until outH) {
+            for (dx in 0 until outW) {
+                val sxDec: Int
+                val syDec: Int
+                when (rot) {
+                    90 -> { sxDec = dy; syDec = decH - 1 - dx }
+                    180 -> { sxDec = decW - 1 - dx; syDec = decH - 1 - dy }
+                    270 -> { sxDec = decW - 1 - dy; syDec = dx }
+                    else -> { sxDec = dx; syDec = dy }
+                }
+                val sx = crop.left + sxDec * 2
+                val sy = crop.top + syDec * 2
+                out[offset++] = yBuf.get(sy * yRow + sx * yPix)
+            }
+        }
+
+        // Kroma (NV21: VU interleaved, halva upplösningen av dst).
+        val chromaW = outW / 2
+        val chromaH = outH / 2
+        for (dy in 0 until chromaH) {
+            for (dx in 0 until chromaW) {
+                val fullDx = dx * 2
+                val fullDy = dy * 2
+                val sxDec: Int
+                val syDec: Int
+                when (rot) {
+                    90 -> { sxDec = fullDy; syDec = decH - 1 - fullDx }
+                    180 -> { sxDec = decW - 1 - fullDx; syDec = decH - 1 - fullDy }
+                    270 -> { sxDec = decW - 1 - fullDy; syDec = fullDx }
+                    else -> { sxDec = fullDx; syDec = fullDy }
+                }
+                val scx = (crop.left + sxDec * 2) / 2
+                val scy = (crop.top + syDec * 2) / 2
+                out[offset++] = vBuf.get(scy * vRow + scx * vPix)
+                out[offset++] = uBuf.get(scy * uRow + scx * uPix)
+            }
+        }
+        return ConvertedFrame(out, outW, outH)
     }
 
     /** YUV_420_888 (godtyckliga strides) -> NV21 (Y + interleaved VU),

@@ -299,6 +299,14 @@ const STROKE_ANCHOR_MIN_GAP_MS = 350;
 const STROKE_ANCHOR_MAX_PEAKS = 220;
 const STROKE_ANCHOR_DEDUPE_MS = 600;
 const STROKE_ANCHOR_MIN_PEAKS = 3;
+// Posefönster runt varje ankare: slagfönstret är -700/+500 ms, plus marginal.
+const STROKE_ANCHOR_POSE_PRE_MS = 800;
+const STROKE_ANCHOR_POSE_POST_MS = 600;
+// Ankrat läge behöver lägre konfidens än blindskanningen: ankaret i sig är
+// stark evidens (bollträff) och spök-FP:er kan inte uppstå i tysta partier.
+// Vid riktiga bollträff-ankare på Tomas-videon klarade bara 21/75 slag 0.58
+// medan 61/75 var korrekt klassade FH/BH.
+const STROKE_ANCHOR_MIN_CONFIDENCE = 0.45;
 
 async function analyzeVideoOnlyStrokes(
   videoPath: string,
@@ -314,7 +322,20 @@ async function analyzeVideoOnlyStrokes(
     };
   }
 
-  const pose = await VideoPose.extractPose(videoPath, SAMPLE_FPS);
+  // Ankare FÖRE pose: med ljudankare behöver pose bara köras i fönster
+  // kring bollträffarna (stor hastighetsvinst i nativemodulen).
+  const anchors = waveform ? findAudioPeaks(waveform, STROKE_ANCHOR_MIN_GAP_MS, STROKE_ANCHOR_MAX_PEAKS) : [];
+  const anchored = anchors.length >= STROKE_ANCHOR_MIN_PEAKS;
+  const pose = anchored
+    ? await VideoPose.extractPoseInWindows(
+        videoPath,
+        SAMPLE_FPS,
+        anchors.flatMap(anchor => [
+          Math.max(0, anchor.timestamp_ms - STROKE_ANCHOR_POSE_PRE_MS),
+          anchor.timestamp_ms + STROKE_ANCHOR_POSE_POST_MS,
+        ]),
+      )
+    : await VideoPose.extractPose(videoPath, SAMPLE_FPS);
   const scanDurationMs = Math.max(0, Math.round(pose.duration_ms || durationMs));
   const candidates: AnalyzedStrokeCandidate[] = [];
 
@@ -326,36 +347,37 @@ async function analyzeVideoOnlyStrokes(
   const handLabel = playerHandedness === 'right' ? 'höger' : 'vänster';
   const handSource = handDetection.source === 'auto' ? 'auto' : 'profil';
 
-  const anchors = waveform ? findAudioPeaks(waveform, STROKE_ANCHOR_MIN_GAP_MS, STROKE_ANCHOR_MAX_PEAKS) : [];
-  if (anchors.length >= STROKE_ANCHOR_MIN_PEAKS) {
+  if (anchored) {
     interface AnchoredCandidate {
       timestampMs: number;
       strokeType: 'forehand' | 'backhand';
       prediction: ReturnType<typeof predictVideoStroke>;
       wristSpeedMax: number;
     }
-    const anchored: AnchoredCandidate[] = [];
+    const anchoredCandidates: AnchoredCandidate[] = [];
     for (const anchor of anchors) {
       const timestampMs = clampTimestamp(anchor.timestamp_ms, scanDurationMs || durationMs);
       const featureResult = buildVideoStrokeFeatures(pose.frames, timestampMs, playerHandedness);
-      if (!passesVideoOnlyMotionGate(featureResult)) continue;
-      const prediction = predictVideoStroke(featureResult!.features);
+      // Mjukare gate än blindskanningen: ankaret är redan stark evidens och
+      // modellens unknown-klass avvisar bordsstuds-ankare utan sving.
+      if (!featureResult || featureResult.avg_visibility < MIN_AVG_VISIBILITY) continue;
+      const prediction = predictVideoStroke(featureResult.features);
+      const rawLabel = prediction.raw_label ?? prediction.label;
       if (
-        prediction.status !== 'ok' ||
-        (prediction.label !== 'forehand' && prediction.label !== 'backhand') ||
-        prediction.confidence < MIN_CONFIDENCE
+        (rawLabel !== 'forehand' && rawLabel !== 'backhand') ||
+        prediction.confidence < STROKE_ANCHOR_MIN_CONFIDENCE
       ) continue;
-      anchored.push({
+      anchoredCandidates.push({
         timestampMs,
-        strokeType: prediction.label,
+        strokeType: rawLabel,
         prediction,
-        wristSpeedMax: featureResult!.features.wrist_speed_max,
+        wristSpeedMax: featureResult.features.wrist_speed_max,
       });
     }
     // En boll kan ge två peakar nära varandra (slaget + bordsstudsen) vars
     // posefönster överlappar samma sving: behåll den säkraste per slag.
     const deduped: AnchoredCandidate[] = [];
-    for (const candidate of anchored.sort((a, b) => b.prediction.confidence - a.prediction.confidence)) {
+    for (const candidate of anchoredCandidates.sort((a, b) => b.prediction.confidence - a.prediction.confidence)) {
       if (deduped.every(existing =>
         existing.strokeType !== candidate.strokeType ||
         Math.abs(existing.timestampMs - candidate.timestampMs) >= STROKE_ANCHOR_DEDUPE_MS
