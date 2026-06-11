@@ -31,6 +31,12 @@ export interface FableEngineConfig {
   loudConfidence: number;
   loudBgDb: number;
   mergeMs: number;
+  /** Allt inom detta fönster efter en räknad studs är SAMMA studs.
+   *  Fysik: två äkta studsar < 250 ms isär kräver studshöjd < 8 cm.
+   *  Loves 2026-06-11-sessioner visade dubbelräkningar med 121-140 ms
+   *  gap där den ANDRA träffen är 1.2-17x starkare (förljud + smäll);
+   *  ankaret uppdateras därför till den starkaste träffen i fönstret. */
+  sameBounceMs: number;
   groupMs: number;
   echoMs: number;
   echoRatio: number;
@@ -42,6 +48,7 @@ export const FABLE_DEFAULT_CONFIG: FableEngineConfig = {
   loudConfidence: 0.9,
   loudBgDb: -42,
   mergeMs: 120,
+  sameBounceMs: 250,
   groupMs: 80,
   echoMs: 300,
   echoRatio: 0.6,
@@ -52,6 +59,7 @@ export type FableRejectReason =
   | 'not_racket'
   | 'low_confidence'
   | 'low_confidence_loud_bg'
+  | 'same_bounce'
   | 'merge_window'
   | 'group_window'
   | 'echo_window'
@@ -119,8 +127,15 @@ export class FableCounter {
     // sparar hela extraktionskostnaden för täta kandidater.
     if (this.lastCounted !== null) {
       const sinceCounted = onsetTimeMs - this.lastCounted.tsMs;
-      if (sinceCounted <= this.config.mergeMs) {
-        result.rejectReason = 'merge_window';
+      if (sinceCounted <= this.config.sameBounceMs) {
+        // Samma fysiska studs (förljud + smäll): räkna inte igen, men flytta
+        // ankaret till den starkaste träffen så efterföljande fönster och
+        // höjdberäkning utgår från själva smällen.
+        if (frameRms > this.lastCounted.frameRms) {
+          this.lastCounted = { tsMs: onsetTimeMs, frameRms };
+          this.groupStartMs = onsetTimeMs;
+        }
+        result.rejectReason = 'same_bounce';
         return result;
       }
       if (this.groupStartMs !== null && onsetTimeMs - this.groupStartMs <= this.config.groupMs) {
@@ -128,7 +143,6 @@ export class FableCounter {
         return result;
       }
       if (
-        this.config.echoMs > this.config.mergeMs &&
         sinceCounted <= this.config.echoMs &&
         frameRms <= this.config.echoRatio * this.lastCounted.frameRms
       ) {
