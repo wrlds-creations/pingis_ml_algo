@@ -30,6 +30,8 @@ import type {
   VideoStrokeSessionFile,
 } from './types';
 import { buildVideoStrokeFeatures, detectRacketHandedness, VIDEO_STROKE_FEATURE_SPEC } from './videoStrokeFeatures';
+import { extractFableFeatures } from './nrFeatures';
+import { fablePredict } from './hgbRuntime';
 import { hasTrainedVideoStrokeModel, predictVideoStroke, videoStrokeModelVersion } from './videoStrokeInference';
 
 const APP_VERSION = 'collector-video-pose-only-v5';
@@ -934,13 +936,43 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
         const peakMarkers = decodedWaveform
           ? buildAudioPeakBounceMarkers(decodedWaveform, nextVideo.durationMs)
           : [];
-        setMarkers(peakMarkers);
+        // Filtrera ankarna med Fable-modellen (brusrobusta studsklassificeraren):
+        // bara ljudtoppar som klassas som RACKETSTUDS blir ankare, så bords-
+        // studsar, klapp och röst inte behöver märkas bort manuellt.
+        let rackedMarkers = peakMarkers;
+        let filteredAway = 0;
+        if (decodedWaveform && peakMarkers.length > 0) {
+          setStatus(`Hittade ${peakMarkers.length} ljudtoppar. Filtrerar racketstudsar med Fable-modellen...`);
+          const { samples, sampleRate } = decodedWaveform;
+          const kept: ReviewMarker[] = [];
+          for (let index = 0; index < peakMarkers.length; index += 1) {
+            const marker = peakMarkers[index];
+            const onsetSample = Math.round((marker.timestamp_ms / 1000) * sampleRate);
+            const clip = new Float32Array(6615);
+            const start = onsetSample - 2205; // 100 ms före, som live-detektorn
+            for (let i = 0; i < 6615; i += 1) {
+              const j = start + i;
+              clip[i] = j >= 0 && j < samples.length ? samples[j] : 0;
+            }
+            const prediction = fablePredict(extractFableFeatures(clip));
+            if (prediction.label === 'racket_bounce' && prediction.confidence >= 0.5) {
+              kept.push(marker);
+            }
+            if (index % 8 === 7) {
+              // Släpp fram UI-tråden under filtreringen.
+              await new Promise<void>(resolve => setTimeout(resolve, 0));
+            }
+          }
+          filteredAway = peakMarkers.length - kept.length;
+          rackedMarkers = kept;
+        }
+        setMarkers(rackedMarkers);
         setPoseAnalysis([]);
-        setSelectedMarkerId(peakMarkers[0]?.id ?? null);
+        setSelectedMarkerId(rackedMarkers[0]?.id ?? null);
         setStatus(
-          peakMarkers.length > 0
-            ? `Hittade ${peakMarkers.length} ljudankare. Markera varje studs som FH-sida, BH-sida eller Oklart.`
-            : 'Ingen ljudvåg eller inga tydliga ljudankare hittades. Lägg till markers manuellt.',
+          rackedMarkers.length > 0
+            ? `${rackedMarkers.length} racketstudsar (Fable-modellen filtrerade bort ${filteredAway} av ${peakMarkers.length} ljudtoppar). Markera varje studs som FH-sida, BH-sida eller Oklart.`
+            : 'Inga racketstudsar hittades i ljudet. Lägg till markers manuellt.',
         );
         await RNFS.scanFile(nextVideo.videoPath).catch(() => {});
         return;
