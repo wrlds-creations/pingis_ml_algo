@@ -1207,7 +1207,12 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
             timestamp_ms: marker.timestamp_ms,
             bounce_side: marker.stroke_type,
             source: marker.source === 'audio_peak' ? ('audio_peak' as const) : ('manual' as const),
-            review_status: 'confirmed' as const,
+            // Ärlig status: bara individuellt granskade markörer blir
+            // 'confirmed'; "Godkänn alla" ger 'bulk_confirmed' som
+            // träningspipelinen INTE accepterar som facit.
+            review_status: marker.review_status === 'confirmed'
+              ? ('confirmed' as const)
+              : ('bulk_confirmed' as const),
             created_at: marker.created_at,
             audio_peak_score: marker.audio_peak_score,
             snapshot_window_ms: marker.snapshot_window_ms ?? {
@@ -1266,7 +1271,11 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
           timestamp_ms: marker.timestamp_ms,
           stroke_type: marker.stroke_type,
           source: 'manual' as const,
-          review_status: 'confirmed' as const,
+          // Ärlig status: "Godkänn alla" får aldrig se ut som individuell
+          // granskning i filen (träningen kräver confirmed/edited).
+          review_status: marker.review_status === 'confirmed'
+            ? ('confirmed' as const)
+            : ('bulk_confirmed' as const),
           created_at: marker.created_at,
         }))
         .sort((left, right) => left.timestamp_ms - right.timestamp_ms);

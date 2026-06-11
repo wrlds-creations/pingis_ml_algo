@@ -44,7 +44,10 @@ export interface VideoStrokeMarker {
   timestamp_ms: number;
   stroke_type: VideoStrokeMarkerType;
   source: 'manual' | 'model' | 'audio_peak';
-  review_status: 'confirmed' | 'suggested';
+  /** 'bulk_confirmed' = godkänd via "Godkänn alla" UTAN individuell
+   *  granskning - träningspipelinen accepterar bara 'confirmed'/'edited'
+   *  som facit, så bulk-godkända förslag kan aldrig förgifta träningen. */
+  review_status: 'confirmed' | 'suggested' | 'bulk_confirmed';
   created_at: string;
 }
 
@@ -122,7 +125,7 @@ export interface VideoBounceSideMarker {
   timestamp_ms: number;
   bounce_side: VideoStrokeMarkerType;
   source: 'manual' | 'audio_peak';
-  review_status: 'confirmed';
+  review_status: 'confirmed' | 'bulk_confirmed';
   created_at: string;
   audio_peak_score?: number;
   snapshot_window_ms?: {
