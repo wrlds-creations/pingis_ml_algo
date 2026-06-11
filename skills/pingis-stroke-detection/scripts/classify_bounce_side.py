@@ -351,6 +351,76 @@ def app_crop_rows(session_id: str, mode: str) -> tuple[list[np.ndarray], list[di
     return rows, meta
 
 
+LIVE_DEBUG_DIR = ROOT_DIR / "data" / "video" / "raw" / "live_sidedebug"
+LIVE_PAUSE_MS = 1500
+
+
+def live_debug_rows(mode: str) -> tuple[list[np.ndarray], list[str]]:
+    """Träningsrader från live-lägets debug-dumpar (frontkamera-domänen).
+
+    Facit från Loves alternationsprotokoll (strikt vartannat FH/BH,
+    2026-06-11): sekvensen delas i segment vid pauser (>1.5 s - omstarts-
+    fasen är okänd); inom ett segment ger tidsgapen antalet flips
+    (gap ~2x period = en missad studs = samma sida igen). Fasen per
+    segment väljs som bästa anpassning mot modellens beslut och segmentet
+    används BARA om alla beslutade event är 100% konsistenta med fasen.
+    Osäkra event får då också sin alternationsetikett (de mest värdefulla
+    raderna)."""
+    import base64
+
+    rows: list[np.ndarray] = []
+    labels: list[str] = []
+    if not LIVE_DEBUG_DIR.exists():
+        return rows, labels
+    for path in sorted(LIVE_DEBUG_DIR.glob("pingis_live_sidedebug_*.json")):
+        events = json.loads(path.read_text(encoding="utf-8"))["events"]
+        if len(events) < 4:
+            continue
+        segments: list[list[dict]] = [[events[0]]]
+        for prev, cur in zip(events, events[1:]):
+            if cur["onset_time_ms"] - prev["onset_time_ms"] > LIVE_PAUSE_MS:
+                segments.append([cur])
+            else:
+                segments[-1].append(cur)
+        for segment in segments:
+            if len(segment) < 4:
+                continue
+            gaps = [b["onset_time_ms"] - a["onset_time_ms"] for a, b in zip(segment, segment[1:])]
+            med = sorted(gaps)[len(gaps) // 2]
+            if med <= 0:
+                continue
+            flips = [max(1, round(g / med)) for g in gaps]
+            best: tuple[int, list[str]] | None = None
+            for start in ("forehand", "backhand"):
+                truth = [start]
+                for f in flips:
+                    side = truth[-1]
+                    for _ in range(f):
+                        side = "backhand" if side == "forehand" else "forehand"
+                    truth.append(side)
+                score = sum(1 for e, t in zip(segment, truth) if e["side"] == t)
+                if best is None or score > best[0]:
+                    best = (score, truth)
+            _, truth = best
+            decided = [(e, t) for e, t in zip(segment, truth) if e["side"] != "uncertain"]
+            if not decided or any(e["side"] != t for e, t in decided):
+                continue  # facit ej trovärdigt för segmentet
+            for e, t in zip(segment, truth):
+                rgb = np.frombuffer(base64.b64decode(e["rgb_b64"]), dtype=np.uint8)
+                if rgb.size != 64 * 64 * 3:
+                    continue
+                bgr = cv2.cvtColor(rgb.reshape(64, 64, 3).copy(), cv2.COLOR_RGB2BGR)
+                if mode == "pixels":
+                    rows.append(roi_pixel_features(bgr))
+                else:
+                    feats = roi_features(bgr, e.get("roi_source", "wrist_anchor"))
+                    rows.append(np.array([feats[n] for n in sorted(feats)], dtype=np.float64))
+                labels.append(t)
+    if rows:
+        print(f"  [live_sidedebug] +{len(rows)} live-domän-rader (alternationsfacit)")
+    return rows, labels
+
+
 def build_dataset(sessions: list[str], mode: str) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     """En rad per markör: träfframen vid markörens tidsstämpel (utvärderingen
     visade att enkelframe + handleds-ROI slår både ±80 ms-röstning och
@@ -426,6 +496,10 @@ def train_main() -> None:
     best = {"acc": -1.0, "name": "", "mode": "", "model": None}
     for mode in ("pixels", "grid"):
         X_train, y_train, meta_train = build_dataset(TRAIN_SESSIONS, mode)
+        live_rows, live_labels = live_debug_rows(mode)
+        if live_rows:
+            X_train = np.vstack([X_train, np.stack(live_rows)])
+            y_train = np.concatenate([y_train, np.array(live_labels)])
         X_test, y_test, meta_test = build_dataset([HOLDOUT_SESSION], mode)
         n_fb_tr = sum(1 for m in meta_train if m["roi_source"] != "red_anchor")
         n_fb_te = sum(1 for m in meta_test if m["roi_source"] != "red_anchor")
