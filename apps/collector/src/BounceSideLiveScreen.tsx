@@ -84,7 +84,13 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
   const [forehandColor, setForehandColor] = useState<'red' | 'black'>('red');
   const [statusText, setStatusText] = useState('Luta mobilen mot något på bordet så kameran ser racketen snett underifrån.');
 
-  const counterRef = useRef(new FableCounter());
+  // Instrumenterat pass 2026-06-11: 3 av 4 missade studsar var korrekt
+  // klassade racketstudsar (conf 0.62-0.88) som föll på loud-spärren 0.9 -
+  // efterklangen från tätt studsande (~0.5 s period) höjde uppmätt
+  // bakgrund över -42 dB och flippade detektorn till musikläge. Här:
+  // loud först vid -36 dB (självbrus flippar inte läget) och 0.85 i
+  // loud-krav (äkta studsar låg 0.87-0.88 även då).
+  const counterRef = useRef(new FableCounter({ loudBgDb: -36, loudConfidence: 0.85 }));
   const forehandColorRef = useRef<'red' | 'black'>('red');
   forehandColorRef.current = forehandColor;
   const busyRef = useRef(false);
