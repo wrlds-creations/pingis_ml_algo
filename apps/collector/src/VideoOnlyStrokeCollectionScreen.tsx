@@ -173,7 +173,19 @@ function percentile(sortedValues: number[], ratio: number): number {
   return sortedValues[index];
 }
 
-function buildAudioPeakBounceMarkers(waveform: DecodedWavFile, durationMs: number): ReviewMarker[] {
+interface AudioPeak {
+  timestamp_ms: number;
+  rms: number;
+  score: number;
+}
+
+/** Hitta ljudpeakar (bollträffar) i en avkodad WAV. Delas av studs-läget
+ *  (FH-/BH-sida-ankare) och slagläget (ljudankrad poseanalys). */
+function findAudioPeaks(
+  waveform: DecodedWavFile,
+  minGapMs: number,
+  maxPeaks: number,
+): AudioPeak[] {
   const { samples, sampleRate } = waveform;
   if (samples.length === 0 || sampleRate <= 0) return [];
 
@@ -216,14 +228,25 @@ function buildAudioPeakBounceMarkers(waveform: DecodedWavFile, durationMs: numbe
 
   const picked: Array<{ timestamp_ms: number; rms: number }> = [];
   for (const candidate of candidates.sort((left, right) => right.rms - left.rms)) {
-    if (picked.length >= BOUNCE_SIDE_PEAK_MAX_MARKERS) break;
-    if (picked.every(existing => Math.abs(existing.timestamp_ms - candidate.timestamp_ms) >= BOUNCE_SIDE_PEAK_MIN_GAP_MS)) {
+    if (picked.length >= maxPeaks) break;
+    if (picked.every(existing => Math.abs(existing.timestamp_ms - candidate.timestamp_ms) >= minGapMs)) {
       picked.push(candidate);
     }
   }
 
   return picked
     .sort((left, right) => left.timestamp_ms - right.timestamp_ms)
+    .map(candidate => ({
+      timestamp_ms: candidate.timestamp_ms,
+      rms: candidate.rms,
+      score: Math.round((candidate.rms / maxRms) * 1000) / 1000,
+    }));
+}
+
+function buildAudioPeakBounceMarkers(waveform: DecodedWavFile, durationMs: number): ReviewMarker[] {
+  const picked = findAudioPeaks(waveform, BOUNCE_SIDE_PEAK_MIN_GAP_MS, BOUNCE_SIDE_PEAK_MAX_MARKERS);
+  const maxRms = picked.reduce((currentMax, peak) => Math.max(currentMax, peak.rms), 0);
+  return picked
     .map((candidate, index) => ({
       id: `audio_peak_bounce_${String(index + 1).padStart(3, '0')}_${candidate.timestamp_ms}`,
       timestamp_ms: clampTimestamp(candidate.timestamp_ms, durationMs),
@@ -232,7 +255,7 @@ function buildAudioPeakBounceMarkers(waveform: DecodedWavFile, durationMs: numbe
       review_status: 'suggested',
       created_at: new Date().toISOString(),
       anchor_source: 'audio_peak',
-      audio_peak_score: Math.round((candidate.rms / maxRms) * 1000) / 1000,
+      audio_peak_score: maxRms > 0 ? candidate.score : 0,
       snapshot_window_ms: {
         pre_ms: BOUNCE_SIDE_SNAPSHOT_PRE_MS,
         post_ms: BOUNCE_SIDE_SNAPSHOT_POST_MS,
@@ -268,10 +291,20 @@ function passesVideoOnlyMotionGate(featureResult: ReturnType<typeof buildVideoSt
   );
 }
 
+// Ljudankrat slagläge: varje riktigt slag träffar en boll = en ljudpeak.
+// Blindskanning både missade slag (28 av 60+ i Tomas-testet) och hittade
+// på slag i tysta ögonblick; ankare gör båda felklasserna strukturellt
+// omöjliga (tyst ögonblick = inget ankare = inget förslag).
+const STROKE_ANCHOR_MIN_GAP_MS = 350;
+const STROKE_ANCHOR_MAX_PEAKS = 220;
+const STROKE_ANCHOR_DEDUPE_MS = 600;
+const STROKE_ANCHOR_MIN_PEAKS = 3;
+
 async function analyzeVideoOnlyStrokes(
   videoPath: string,
   durationMs: number,
   handedness: PlayerSetup['handedness'],
+  waveform: DecodedWavFile | null,
 ): Promise<{ markers: ReviewMarker[]; poseAnalysis: VideoStrokePoseAnalysis[]; status: string }> {
   if (!hasTrainedVideoStrokeModel()) {
     return {
@@ -290,6 +323,78 @@ async function analyzeVideoOnlyStrokes(
   // ger fel arm + spegelvänd x-axel och systematiskt fel FH/BH.
   const handDetection = detectRacketHandedness(pose.frames, handedness);
   const playerHandedness = handDetection.handedness;
+  const handLabel = playerHandedness === 'right' ? 'höger' : 'vänster';
+  const handSource = handDetection.source === 'auto' ? 'auto' : 'profil';
+
+  const anchors = waveform ? findAudioPeaks(waveform, STROKE_ANCHOR_MIN_GAP_MS, STROKE_ANCHOR_MAX_PEAKS) : [];
+  if (anchors.length >= STROKE_ANCHOR_MIN_PEAKS) {
+    interface AnchoredCandidate {
+      timestampMs: number;
+      strokeType: 'forehand' | 'backhand';
+      prediction: ReturnType<typeof predictVideoStroke>;
+      wristSpeedMax: number;
+    }
+    const anchored: AnchoredCandidate[] = [];
+    for (const anchor of anchors) {
+      const timestampMs = clampTimestamp(anchor.timestamp_ms, scanDurationMs || durationMs);
+      const featureResult = buildVideoStrokeFeatures(pose.frames, timestampMs, playerHandedness);
+      if (!passesVideoOnlyMotionGate(featureResult)) continue;
+      const prediction = predictVideoStroke(featureResult!.features);
+      if (
+        prediction.status !== 'ok' ||
+        (prediction.label !== 'forehand' && prediction.label !== 'backhand') ||
+        prediction.confidence < MIN_CONFIDENCE
+      ) continue;
+      anchored.push({
+        timestampMs,
+        strokeType: prediction.label,
+        prediction,
+        wristSpeedMax: featureResult!.features.wrist_speed_max,
+      });
+    }
+    // En boll kan ge två peakar nära varandra (slaget + bordsstudsen) vars
+    // posefönster överlappar samma sving: behåll den säkraste per slag.
+    const deduped: AnchoredCandidate[] = [];
+    for (const candidate of anchored.sort((a, b) => b.prediction.confidence - a.prediction.confidence)) {
+      if (deduped.every(existing =>
+        existing.strokeType !== candidate.strokeType ||
+        Math.abs(existing.timestampMs - candidate.timestampMs) >= STROKE_ANCHOR_DEDUPE_MS
+      )) {
+        deduped.push(candidate);
+      }
+    }
+    deduped.sort((a, b) => a.timestampMs - b.timestampMs);
+    const markers: ReviewMarker[] = [];
+    const poseAnalysis: VideoStrokePoseAnalysis[] = [];
+    for (const candidate of deduped) {
+      const markerId = `auto_pose_${Math.round(candidate.timestampMs)}`;
+      markers.push({
+        id: markerId,
+        timestamp_ms: Math.round(candidate.timestampMs),
+        stroke_type: candidate.strokeType,
+        source: 'model',
+        review_status: 'suggested',
+        created_at: new Date().toISOString(),
+      });
+      poseAnalysis.push({
+        marker_id: markerId,
+        timestamp_ms: Math.round(candidate.timestampMs),
+        predicted_stroke_type: candidate.strokeType,
+        confidence: candidate.prediction.confidence,
+        probabilities: candidate.prediction.probabilities,
+        model_version: candidate.prediction.model_version,
+        feature_spec: VIDEO_STROKE_FEATURE_SPEC,
+        status: 'ok',
+      });
+    }
+    const fhCount = markers.filter(marker => marker.stroke_type === 'forehand').length;
+    const bhCount = markers.filter(marker => marker.stroke_type === 'backhand').length;
+    return {
+      markers,
+      poseAnalysis,
+      status: `Ljudankrad pose: ${anchors.length} bollträffar -> ${markers.length} slag (${fhCount} FH, ${bhCount} BH). Spelhand: ${handLabel} (${handSource}).`,
+    };
+  }
 
   for (
     let timestampMs = WINDOW_PRE_MS;
@@ -352,12 +457,10 @@ async function analyzeVideoOnlyStrokes(
   const poseAnalysis = sorted.map(candidate => candidate.analysis);
   const concreteCount = markers.filter(marker => marker.stroke_type !== 'unknown').length;
 
-  const handLabel = playerHandedness === 'right' ? 'höger' : 'vänster';
-  const handSource = handDetection.source === 'auto' ? 'auto' : 'profil';
   return {
     markers,
     poseAnalysis,
-    status: `Pose ${SAMPLE_FPS} fps: ${markers.length} förslag (${concreteCount} FH/BH). Spelhand: ${handLabel} (${handSource}).`,
+    status: `Pose ${SAMPLE_FPS} fps (utan ljudankare): ${markers.length} förslag (${concreteCount} FH/BH). Spelhand: ${handLabel} (${handSource}).`,
   };
 }
 
@@ -756,6 +859,7 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
         nextVideo.videoPath,
         nextVideo.durationMs,
         setup.handedness,
+        decodedWaveform,
       );
       setMarkers(analyzed.markers);
       setPoseAnalysis(analyzed.poseAnalysis);
