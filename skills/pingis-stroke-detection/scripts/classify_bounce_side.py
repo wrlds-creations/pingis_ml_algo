@@ -54,7 +54,11 @@ TRAIN_SESSIONS = ["video_bounce_side_session_2026-06-09_002",
                   "video_bounce_side_session_2026-06-11_001",
                   # Loves granskade markörer ur andra underifrån-videon
                   # (11 st; dagens modell fick 7/11 på dem före omträning).
-                  "video_bounce_side_session_2026-06-11_002"]
+                  "video_bounce_side_session_2026-06-11_002",
+                  # Samma video återimporterad och fullgranskad på appen
+                  # (37 facit) - bär app-crops via crops.json när den
+                  # importeras om på dump-versionen.
+                  "video_bounce_side_session_2026-06-11_003"]
 HOLDOUT_SESSION = "video_bounce_side_session_2026-06-09_004"
 
 GRID = 4
@@ -263,10 +267,53 @@ def roi_for_frame(frame: np.ndarray) -> tuple[np.ndarray | None, str]:
     return find_racket_roi(frame)
 
 
+def app_crop_rows(session_id: str, mode: str) -> tuple[list[np.ndarray], list[dict]]:
+    """Träningsrader från APPENS egna crops (<sid>.crops.json, sparad av
+    Collector vid import). Mobilens pose-motor ramar in racketen annorlunda
+    än PC-pipelinen (bevisat 2026-06-11: PC 37/37 rätt där appen föreslog
+    fel på samma ankare) - modellen måste därför se appens bilddomän."""
+    import base64
+
+    sdir = BOUNCE_SIDE_RAW / session_id
+    crops_path = sdir / f"{session_id}.crops.json"
+    if not crops_path.exists():
+        return [], []
+    data = json.loads(crops_path.read_text(encoding="utf-8"))
+    crops_by_ts = {}
+    for crop in data.get("crops", []):
+        crops_by_ts[round(float(crop["timestamp_ms"]))] = crop
+
+    rows: list[np.ndarray] = []
+    meta: list[dict] = []
+    for _, markers in iter_session_markers(session_id):
+        for marker in markers:
+            ts = round(float(marker["timestamp_ms"]))
+            crop = crops_by_ts.get(ts)
+            if crop is None:
+                near = [k for k in crops_by_ts if abs(k - ts) <= 50]
+                if not near:
+                    continue
+                crop = crops_by_ts[min(near, key=lambda k: abs(k - ts))]
+            rgb = np.frombuffer(base64.b64decode(crop["rgb_b64"]), dtype=np.uint8)
+            if rgb.size != 64 * 64 * 3:
+                continue
+            bgr = cv2.cvtColor(rgb.reshape(64, 64, 3), cv2.COLOR_RGB2BGR)
+            if mode == "pixels":
+                rows.append(roi_pixel_features(bgr))
+            else:
+                feats = roi_features(bgr, crop.get("roi_source", "wrist_anchor"))
+                rows.append(np.array([feats[n] for n in sorted(feats)], dtype=np.float64))
+            meta.append({"session_id": session_id, "marker_key": f"{session_id}:{ts}:app",
+                         "ts_ms": ts, "label": marker["bounce_side"],
+                         "roi_source": crop.get("roi_source", "wrist_anchor"), "domain": "app"})
+    return rows, meta
+
+
 def build_dataset(sessions: list[str], mode: str) -> tuple[np.ndarray, np.ndarray, list[dict]]:
     """En rad per markör: träfframen vid markörens tidsstämpel (utvärderingen
     visade att enkelframe + handleds-ROI slår både ±80 ms-röstning och
-    röd-ankare-varianterna)."""
+    röd-ankare-varianterna). Sessioner med sparade app-crops bidrar
+    DESSUTOM med rader i appens egen bilddomän."""
     rows: list[np.ndarray] = []
     meta: list[dict] = []
     for session_id in sessions:
@@ -283,8 +330,14 @@ def build_dataset(sessions: list[str], mode: str) -> tuple[np.ndarray, np.ndarra
                 rows.append(compute_features(roi, source, mode))
                 meta.append({"session_id": session_id, "marker_key": marker_key,
                              "ts_ms": marker["timestamp_ms"],
-                             "label": marker["bounce_side"], "roi_source": source})
+                             "label": marker["bounce_side"], "roi_source": source,
+                             "domain": "pc"})
             cap.release()
+        app_rows, app_meta = app_crop_rows(session_id, mode)
+        rows.extend(app_rows)
+        meta.extend(app_meta)
+        if app_meta:
+            print(f"  [{session_id}] +{len(app_meta)} app-domän-rader från crops.json")
     X = np.stack(rows)
     y = np.array([m["label"] for m in meta])
     return X, y, meta

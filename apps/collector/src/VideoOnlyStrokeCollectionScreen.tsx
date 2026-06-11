@@ -1005,6 +1005,17 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
               nextVideo.videoPath,
               rackedMarkers.map(marker => marker.timestamp_ms),
             );
+            // Spara appens egna crops till sessionen: tillsammans med de
+            // granskade markörerna blir de träningsdata i appens EGEN
+            // bilddomän (pose-motor, färgrymd, skalning) - då kan PC/mobil-
+            // skillnader i bildvägen inte skapa osynliga modellgap.
+            try {
+              await RNFS.writeFile(
+                `${sessionDir}/${sessionId}.crops.json`,
+                JSON.stringify({ session_id: sessionId, crops }),
+                'utf8',
+              );
+            } catch {}
             const cropByTs = new Map(crops.map(crop => [Math.round(crop.timestamp_ms), crop]));
             rackedMarkers = rackedMarkers.map(marker => {
               const crop = cropByTs.get(Math.round(marker.timestamp_ms));
