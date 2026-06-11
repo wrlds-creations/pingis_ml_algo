@@ -365,15 +365,19 @@ async function analyzeVideoOnlyStrokes(
       // modellens unknown-klass avvisar bordsstuds-ankare utan sving.
       if (!featureResult || featureResult.avg_visibility < MIN_AVG_VISIBILITY) continue;
       const prediction = predictVideoStroke(featureResult.features);
-      const rawLabel = prediction.raw_label ?? prediction.label;
-      if (
-        (rawLabel !== 'forehand' && rawLabel !== 'backhand') ||
-        prediction.confidence < STROKE_ANCHOR_MIN_CONFIDENCE
-      ) continue;
+      // Slag-aktighet i stället för argmax: mobilens pose (ML Kit) ger
+      // flackare sannolikheter än träningens (MediaPipe), så "unknown" kan
+      // vinna knappt på riktiga slag. P(FH)+P(BH) >= 0.5 = det är ett slag;
+      // sidan avgörs av den större. Bordsstuds-ankare utan sving har
+      // unknown-sannolikhet klart över 0.5 och avvisas fortfarande.
+      const pForehand = prediction.probabilities.forehand ?? 0;
+      const pBackhand = prediction.probabilities.backhand ?? 0;
+      if (pForehand + pBackhand < 0.5) continue;
+      const side: 'forehand' | 'backhand' = pForehand >= pBackhand ? 'forehand' : 'backhand';
       anchoredCandidates.push({
         timestampMs,
-        strokeType: rawLabel,
-        prediction,
+        strokeType: side,
+        prediction: { ...prediction, confidence: Math.max(pForehand, pBackhand) },
         wristSpeedMax: featureResult.features.wrist_speed_max,
       });
     }
