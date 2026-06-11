@@ -249,9 +249,86 @@ def evaluate(name: str, df: pd.DataFrame, feature_cols: list[str], le: LabelEnco
     return results
 
 
+# Features som utesluts ur APP-exporten: z-semantiken skiljer mellan
+# MediaPipe (träning, höft-normaliserad) och ML Kit (appen, pixelskala);
+# övriga features är enhetsinvarianta via axelbredd-normaliseringen.
+APP_EXCLUDED_FEATURES = {"impact_nz", "nz_mean"}
+APP_MODEL_JSON = ROOT_DIR / "apps" / "collector" / "src" / "models" / "video_stroke_model.json"
+
+
+def export_app_model(df: pd.DataFrame, feature_cols: list[str], le: LabelEncoder, out_json: Path) -> None:
+    """Träna RF på ALLA rader (utvärderingsprotokollet körs separat innan)
+    och exportera till appens video_stroke_model.json-format."""
+    from sklearn.preprocessing import StandardScaler
+
+    app_cols = [c for c in feature_cols if c not in APP_EXCLUDED_FEATURES]
+    X = np.nan_to_num(df[app_cols].to_numpy(dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
+    y = le.transform(df["stroke_type"].astype(str))
+    scaler = StandardScaler().fit(X)
+    clf = RandomForestClassifier(
+        n_estimators=300, class_weight="balanced_subsample", random_state=SEED, n_jobs=-1,
+    ).fit(scaler.transform(X), y)
+
+    def export_tree(estimator) -> list:
+        tree = estimator.tree_
+        nodes = []
+        for i in range(tree.node_count):
+            if tree.children_left[i] == -1:
+                counts = tree.value[i][0]
+                total = float(counts.sum()) or 1.0
+                nodes.append([round(float(v) / total, 8) for v in counts])
+            else:
+                nodes.append([
+                    int(tree.feature[i]),
+                    round(float(tree.threshold[i]), 8),
+                    int(tree.children_left[i]),
+                    int(tree.children_right[i]),
+                ])
+        return nodes
+
+    payload = {
+        "trained": True,
+        "model_version": "collector_video_stroke_v2_2026_06_11_timebins",
+        "feature_spec": "video_stroke_features_v2",
+        "labels": [str(c) for c in le.classes_],
+        "feature_names": app_cols,
+        "scaler_mean": [float(v) for v in scaler.mean_],
+        "scaler_std": [float(v) for v in scaler.scale_],
+        "trees": [export_tree(est) for est in clf.estimators_],
+    }
+
+    # Round-trip-kontroll: gå igenom exporten i ren Python mot sklearn.
+    rng = np.random.default_rng(7)
+    idx = rng.choice(len(X), size=min(100, len(X)), replace=False)
+    Xs = scaler.transform(X[idx])
+    expected = clf.predict_proba(Xs)
+    n_classes = len(le.classes_)
+    max_diff = 0.0
+    for row_i, row in enumerate(Xs):
+        acc = np.zeros(n_classes)
+        for tree in payload["trees"]:
+            node = tree[0]
+            pos = 0
+            while not (len(node) == n_classes and all(0 <= v <= 1 for v in node) and abs(sum(node) - 1) < 0.01):
+                pos = node[2] if row[int(node[0])] <= node[1] else node[3]
+                node = tree[int(pos)]
+            acc += np.array(node)
+        got = acc / len(payload["trees"])
+        max_diff = max(max_diff, float(np.max(np.abs(got - expected[row_i]))))
+    print(f"App-export round-trip ({len(idx)} rader): max diff {max_diff:.2e}")
+    if max_diff > 1e-6:
+        raise SystemExit("Round-trip FAILED - exporterar inte.")
+
+    out_json.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    size_kb = out_json.stat().st_size / 1024
+    print(f"App-export: {out_json} ({size_kb:.0f} KB, {len(payload['trees'])} träd, {len(app_cols)} features)")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train improved FH/BH video stroke model (v2).")
     parser.add_argument("--out-dir", default=str(OUT_DIR))
+    parser.add_argument("--export-app", action="store_true",
+                        help="Exportera RF (utan z-features) till appens video_stroke_model.json.")
     args = parser.parse_args()
 
     meta = pd.read_csv(DATASET_CSV)
@@ -280,6 +357,9 @@ def main() -> None:
     summary = {"baseline_30feat": baseline, "v2": v2, "n_v2_features": len(v2_cols), "seed": SEED}
     (out_dir / "training_summary.json").write_text(json.dumps(summary, indent=1, default=str), encoding="utf-8")
     print(f"\nArtifacts: {out_dir}")
+
+    if args.export_app:
+        export_app_model(v2_df, v2_cols, le, APP_MODEL_JSON)
 
 
 if __name__ == "__main__":

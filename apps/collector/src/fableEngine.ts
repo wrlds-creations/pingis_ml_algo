@@ -127,27 +127,41 @@ export class FableCounter {
     // sparar hela extraktionskostnaden för täta kandidater.
     if (this.lastCounted !== null) {
       const sinceCounted = onsetTimeMs - this.lastCounted.tsMs;
+      const rmsRatio = frameRms / Math.max(this.lastCounted.frameRms, 1e-9);
       if (sinceCounted <= this.config.sameBounceMs) {
-        // Samma fysiska studs (förljud + smäll): räkna inte igen, men flytta
-        // ankaret till den starkaste träffen så efterföljande fönster och
-        // höjdberäkning utgår från själva smällen.
-        if (frameRms > this.lastCounted.frameRms) {
+        // Inom 250 ms avgör styrkeförhållandet vad det är:
+        //  - klart STARKARE (>=1.1x): förljud+smäll = samma studs; flytta
+        //    ankaret till smällen (Loves dubbelräkningar 2026-06-11 hade
+        //    alla detta mönster: 121-140 ms gap, andra träffen 1.2-17x).
+        //  - klart SVAGARE (<=0.6x): eko/skrammel, släng.
+        //  - LIKVÄRDIG styrka och gap >= 150 ms: äkta snabb studs (8 cm
+        //    studs = 255 ms, 3 cm = 156 ms - snabbt drillande är verkligt)
+        //    -> släpp igenom till klassificering.
+        //  - likvärdig men gap < 150 ms (< 2.8 cm flygbana): samma studs.
+        if (rmsRatio >= 1.1) {
           this.lastCounted = { tsMs: onsetTimeMs, frameRms };
           this.groupStartMs = onsetTimeMs;
+          result.rejectReason = 'same_bounce';
+          return result;
         }
-        result.rejectReason = 'same_bounce';
-        return result;
-      }
-      if (this.groupStartMs !== null && onsetTimeMs - this.groupStartMs <= this.config.groupMs) {
-        result.rejectReason = 'group_window';
-        return result;
-      }
-      if (
-        sinceCounted <= this.config.echoMs &&
-        frameRms <= this.config.echoRatio * this.lastCounted.frameRms
-      ) {
-        result.rejectReason = 'echo_window';
-        return result;
+        if (rmsRatio <= this.config.echoRatio) {
+          result.rejectReason = 'echo_window';
+          return result;
+        }
+        if (sinceCounted < 150) {
+          result.rejectReason = 'same_bounce';
+          return result;
+        }
+        // likvärdig styrka, 150-250 ms: behandla som äkta snabb studs.
+      } else {
+        if (this.groupStartMs !== null && onsetTimeMs - this.groupStartMs <= this.config.groupMs) {
+          result.rejectReason = 'group_window';
+          return result;
+        }
+        if (sinceCounted <= this.config.echoMs && rmsRatio <= this.config.echoRatio) {
+          result.rejectReason = 'echo_window';
+          return result;
+        }
       }
     }
 
