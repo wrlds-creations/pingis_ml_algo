@@ -1139,7 +1139,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model-dir", default=str(DEFAULT_MODEL_DIR))
     parser.add_argument("--model", choices=["rf", "histgb"], default="rf")
-    parser.add_argument("--feature-set", choices=["base62", "robust21", "all83"], default="all83")
+    parser.add_argument("--feature-set", choices=["base62", "robust21", "all83", "stable"], default="all83")
     parser.add_argument(
         "--split",
         action="append",

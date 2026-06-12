@@ -84,7 +84,7 @@ META_COLS = [
     "close_event_bucket",
 ]
 
-FEATURE_SET_ORDER = ["base62", "robust21", "all83"]
+FEATURE_SET_ORDER = ["base62", "robust21", "all83", "stable"]
 RACKET_LABEL = "racket_bounce"
 RACKET_PRECISION_FLOOR = 0.90
 SCORE_RECALL_WEIGHT = 0.6
@@ -128,11 +128,21 @@ def resolve_feature_sets(feature_cols: list[str]) -> dict[str, list[str]]:
     if not robust_cols:
         raise ValueError("No nr_ feature columns found in the dataset.")
 
-    return {
+    sets = {
         "base62": base_cols,
         "robust21": robust_cols,
         "all83": base_cols + robust_cols,
     }
+    # Approximations-stabilt urval (TS-extraktorn i appen == Python-referensen,
+    # max |delta|/scaler-std < 0.05 på paritetsfixturen, se
+    # report_feature_parity.js). Klipp nära beslutsgränsen flippade i appen
+    # när modellen lutade sig på de divergerande featurerna (2026-06-12).
+    stable_path = ROOT_DIR / "data" / "audio" / "processed" / "noise_robust" / "stable_feature_cols.json"
+    if stable_path.exists():
+        stable = [c for c in json.loads(stable_path.read_text(encoding="utf-8")) if c in feature_cols]
+        if stable:
+            sets["stable"] = stable
+    return sets
 
 
 def sanitize_features(df: pd.DataFrame, feature_cols: list[str], name: str) -> int:
@@ -561,6 +571,8 @@ def main() -> None:
     results: list[dict] = []
     fitted: dict[tuple[str, str], tuple] = {}
     for set_name in FEATURE_SET_ORDER:
+        if set_name not in feature_sets:
+            continue
         cols = feature_sets[set_name]
         X_train_raw = train_df[cols].to_numpy(dtype=np.float64)
         X_val_raw = val_clean[cols].to_numpy(dtype=np.float64)

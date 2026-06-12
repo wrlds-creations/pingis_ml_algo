@@ -110,12 +110,14 @@ def main() -> None:
     parser.add_argument("--val-csv", default=str(DEFAULT_VAL_CSV))
     parser.add_argument("--model-version", default="fable_audio_hgb_v3_2026_06_10")
     parser.add_argument("--n-check-rows", type=int, default=200)
+    parser.add_argument("--feature-set", default="all83",
+                        help="Featureset-suffix i artefaktnamnen (t.ex. all83, stable).")
     args = parser.parse_args()
 
     model_dir = Path(args.model_dir)
-    clf = joblib.load(model_dir / "nr_histgb_all83.pkl")
-    scaler = joblib.load(model_dir / "nr_scaler_all83.pkl")
-    feature_cols = list(joblib.load(model_dir / "nr_feature_cols_all83.pkl"))
+    clf = joblib.load(model_dir / f"nr_histgb_{args.feature_set}.pkl")
+    scaler = joblib.load(model_dir / f"nr_scaler_{args.feature_set}.pkl")
+    feature_cols = list(joblib.load(model_dir / f"nr_feature_cols_{args.feature_set}.pkl"))
     encoder = joblib.load(model_dir / "nr_label_encoder.pkl")
     labels = [str(c) for c in encoder.classes_]
     if labels != nr_config.CLASSES:
