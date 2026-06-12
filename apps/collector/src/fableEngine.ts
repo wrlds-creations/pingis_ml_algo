@@ -128,6 +128,12 @@ export class FableCounter {
     qualifier: ((prediction: FablePrediction, features: Record<string, number>) => boolean) | undefined,
   ): FableDetectionResult {
     const result: FableDetectionResult = { counted: false, featureMs: 0, predictMs: 0 };
+    // Sätts när kandidaten släpps igenom 150-250 ms-fönstret som "äkta
+    // snabb studs": fysiskt möjligt (3-8 cm studs), men svansskrammel
+    // landar i samma fönster med likvärdig styrka - kräv då 0.9 i
+    // konfidens så bara entydiga racketträffar dubbelräknas inte
+    // (Loves 2026-06-12-rapport: "ibland två studsar på en studs").
+    let fastRebound = false;
 
     // Inaktualitetsspärr före allt annat: gammal kö-kandidat hjälper ingen.
     if (nowMs !== undefined && nowMs - onsetTimeMs > this.config.staleMs) {
@@ -164,7 +170,9 @@ export class FableCounter {
           result.rejectReason = 'same_bounce';
           return result;
         }
-        // likvärdig styrka, 150-250 ms: behandla som äkta snabb studs.
+        // likvärdig styrka, 150-250 ms: behandla som äkta snabb studs,
+        // men med skärpt konfidenskrav (se fastRebound ovan).
+        fastRebound = true;
       } else {
         if (this.groupStartMs !== null && onsetTimeMs - this.groupStartMs <= this.config.groupMs) {
           result.rejectReason = 'group_window';
@@ -190,7 +198,8 @@ export class FableCounter {
     const loud = bgRmsDb >= this.config.loudBgDb;
     result.bgMode = loud ? 'loud' : 'quiet';
     result.bgRmsDb = bgRmsDb;
-    const confidenceThreshold = loud ? this.config.loudConfidence : this.config.quietConfidence;
+    const baseThreshold = loud ? this.config.loudConfidence : this.config.quietConfidence;
+    const confidenceThreshold = fastRebound ? Math.max(baseThreshold, 0.9) : baseThreshold;
 
     if (qualifier) {
       if (!qualifier(prediction, features)) {

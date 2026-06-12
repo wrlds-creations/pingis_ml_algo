@@ -64,7 +64,18 @@ interface FableDebugEvent {
   reject_reason: string;
   feature_ms?: number;
   predict_ms?: number;
+  /** 300 ms PCM-klipp (base64) - gör felpass till träningsdata (v4-mining).
+   *  Cappas till de första klippen per session för filstorlekens skull. */
+  audio_b64?: string;
 }
+
+/** Skärm-lokala motoröverrides, speglade i debug-dumpen.
+ *  -36/-0.85: tätt självstudsande (~380 ms period) höjer uppmätt bakgrund
+ *  över -42 dB och flippade motorn till musikläge - 2026-06-12-dumparna
+ *  visade 5+ äkta racketträffar per pass avvisade på 0.9-kravet (samma
+ *  fenomen som i FH/BH-live, fixat där 2026-06-11). */
+const FABLE_LIVE_ENGINE_OVERRIDES = { loudBgDb: -36, loudConfidence: 0.85 } as const;
+const MAX_AUDIO_DEBUG_CLIPS = 150;
 
 function parseNativeEvent(event: NativeAudioBounceEvent): {
   audioB64?: string;
@@ -97,7 +108,7 @@ export function FableLiveScreen({ setup, onDone }: Props) {
   const [latencyMs, setLatencyMs] = useState<{ p50: number; max: number } | null>(null);
   const [savedDebugPath, setSavedDebugPath] = useState<string | null>(null);
 
-  const counterRef = useRef(new FableCounter());
+  const counterRef = useRef(new FableCounter(FABLE_LIVE_ENGINE_OVERRIDES));
   const latenciesRef = useRef<number[]>([]);
   const debugEventsRef = useRef<FableDebugEvent[]>([]);
   const startedAtRef = useRef<string | null>(null);
@@ -112,7 +123,7 @@ export function FableLiveScreen({ setup, onDone }: Props) {
       player: setup,
       started_at: startedAtRef.current ?? stoppedAt,
       stopped_at: stoppedAt,
-      engine_config: FABLE_DEFAULT_CONFIG,
+      engine_config: { ...FABLE_DEFAULT_CONFIG, ...FABLE_LIVE_ENGINE_OVERRIDES },
       gate_config: {
         mode: 'bandpass',
         spectral_gate: false,
@@ -242,6 +253,7 @@ export function FableLiveScreen({ setup, onDone }: Props) {
           reject_reason: result.counted ? '' : (result.rejectReason ?? 'unknown'),
           feature_ms: result.featureMs,
           predict_ms: result.predictMs,
+          ...(debugEventsRef.current.length < MAX_AUDIO_DEBUG_CLIPS ? { audio_b64: audioB64 } : {}),
         });
       } catch (err) {
         debugEventsRef.current.push({
