@@ -14,6 +14,8 @@ Output: data/audio/processed/noise_robust/fable_clip_parity_fixture.json
 
 from __future__ import annotations
 
+import argparse
+import base64
 import json
 import sys
 from pathlib import Path
@@ -31,7 +33,7 @@ from preprocess_audio import load_audio  # noqa: E402
 ROOT_DIR = Path(__file__).resolve().parents[4]
 INVENTORY = ROOT_DIR / "data" / "audio" / "processed" / "audio_inventory_2026_06_10.json"
 OUT = ROOT_DIR / "data" / "audio" / "processed" / "noise_robust" / "fable_clip_parity_fixture.json"
-MODEL_DIR = ROOT_DIR / "data" / "audio" / "models" / "noise_robust_v3"
+DEFAULT_MODEL_DIR = ROOT_DIR / "data" / "audio" / "models" / "noise_robust_v3"
 
 SESSIONS = [
     "audio_session_2026-05-06_007",  # quiet
@@ -40,13 +42,21 @@ SESSIONS = [
     "audio_session_2026-05-13_008",  # mixed dense
 ]
 PER_WAV = 6
+PER_LIVE_DUMP = 8
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--model-dir", type=Path, default=DEFAULT_MODEL_DIR,
+                        help="Modellkatalog vars förväntade sannolikheter bakas in i fixturen.")
+    parser.add_argument("--live-dump-dir", type=Path, default=None,
+                        help="Katalog med fable_live_session_*.json (audio_b64) - klipp ur appens egen domän.")
+    args = parser.parse_args()
+
     inventory = {s["session_id"]: s for s in json.loads(INVENTORY.read_text(encoding="utf-8"))["sessions"]}
-    clf = joblib.load(MODEL_DIR / "nr_histgb_all83.pkl")
-    scaler = joblib.load(MODEL_DIR / "nr_scaler_all83.pkl")
-    feature_cols = list(joblib.load(MODEL_DIR / "nr_feature_cols_all83.pkl"))
+    clf = joblib.load(args.model_dir / "nr_histgb_all83.pkl")
+    scaler = joblib.load(args.model_dir / "nr_scaler_all83.pkl")
+    feature_cols = list(joblib.load(args.model_dir / "nr_feature_cols_all83.pkl"))
     labels = nr_config.CLASSES
 
     clips = []
@@ -82,6 +92,32 @@ def main() -> None:
                     "wav": wav_name,
                     "onset_sample": int(trig["onset_sample"]),
                     "frame_rms": float(trig["frame_rms"]),
+                    "samples": [float(v) for v in clip],
+                    "py_features": {name: float(feats[name]) for name in feature_cols},
+                    "py_proba": {label: float(p) for label, p in zip(labels, proba)},
+                })
+
+    if args.live_dump_dir is not None:
+        for dump_path in sorted(args.live_dump_dir.glob("fable_live_session_*.json")):
+            events = json.loads(dump_path.read_text(encoding="utf-8")).get("events", [])
+            with_audio = [e for e in events if e.get("audio_b64")]
+            if not with_audio:
+                continue
+            keep = np.linspace(0, len(with_audio) - 1, min(PER_LIVE_DUMP, len(with_audio))).astype(int)
+            for ei in sorted(set(int(i) for i in keep)):
+                event = with_audio[ei]
+                pcm = np.frombuffer(base64.b64decode(event["audio_b64"]), dtype="<i2")
+                clip = (pcm.astype(np.float32) / 32768.0)
+                feats = nr_features.extract_all_features(clip)
+                x = np.array([[float(feats.get(name, 0.0)) for name in feature_cols]], dtype=np.float64)
+                x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+                proba = clf.predict_proba(scaler.transform(x))[0]
+                clips.append({
+                    "id": f"{dump_path.stem}:ev{ei}",
+                    "session": dump_path.stem,
+                    "wav": "",
+                    "onset_sample": 2205,
+                    "frame_rms": float(event.get("native_rms") or 0.0),
                     "samples": [float(v) for v in clip],
                     "py_features": {name: float(feats[name]) for name in feature_cols},
                     "py_proba": {label: float(p) for label, p in zip(labels, proba)},
