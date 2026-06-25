@@ -32,7 +32,7 @@ import type {
 import { buildVideoStrokeFeatures, detectRacketHandedness, VIDEO_STROKE_FEATURE_SPEC } from './videoStrokeFeatures';
 import { detectGateOnsets, extractFableFeatures } from './nrFeatures';
 import { fablePredict } from './hgbRuntime';
-import { bounceSideFeatures, predictBounceSide } from './bounceSideInference';
+import { bounceSideFeatures, predictBounceSide, resolveBounceSide } from './bounceSideInference';
 import { hasTrainedVideoStrokeModel, predictVideoStroke, videoStrokeModelVersion } from './videoStrokeInference';
 
 const APP_VERSION = 'collector-video-pose-only-v5';
@@ -1029,13 +1029,13 @@ export function VideoOnlyStrokeCollectionScreen({ setup, mode = 'stroke', onDone
               const binary = atob(crop.rgb_b64);
               const rgb = new Uint8Array(binary.length);
               for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
-              const prediction = predictBounceSide(bounceSideFeatures(rgb, crop.roi_source));
+              const features = bounceSideFeatures(rgb, crop.roi_source);
+              const prediction = predictBounceSide(features);
+              const resolved = resolveBounceSide(features, prediction, forehandColorRef.current, 0.6);
               sideSuggested += 1;
-              // Modellen känner igen FÄRGSIDAN (tränad: forehand = röd).
-              // Spelare med svart forehandsida får etiketterna växlade.
-              const side = forehandColorRef.current === 'black'
-                ? (prediction.label === 'forehand' ? 'backhand' as const : 'forehand' as const)
-                : prediction.label;
+              // Modellen känner igen färgsidan, men färgguarden får vinna
+              // när röd/svart evidens är tydlig. Otydligt blir unknown.
+              const side = resolved.side === 'uncertain' ? 'unknown' : resolved.side;
               return { ...marker, stroke_type: side };
             });
           } catch {

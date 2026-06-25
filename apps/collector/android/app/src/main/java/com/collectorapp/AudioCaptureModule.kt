@@ -208,6 +208,28 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
     }
 
     @ReactMethod
+    fun extractAudioFromVideoFile(inputPath: String, outputPath: String, promise: Promise) {
+        Thread {
+            try {
+                val result = decodeAudioFileToWav(inputPath, outputPath)
+                val payload = Arguments.createMap().apply {
+                    putString("outputPath", outputPath)
+                    putString("displayName", result.displayName)
+                    putString("sourceUri", result.sourceUri)
+                    putDouble("durationMs", result.durationMs.toDouble())
+                    putDouble("sampleRate", TARGET_SAMPLE_RATE.toDouble())
+                    putDouble("sourceSampleRate", result.sourceSampleRate.toDouble())
+                    putDouble("channels", result.sourceChannels.toDouble())
+                    putDouble("writtenSamples", result.writtenSamples.toDouble())
+                }
+                promise.resolve(payload)
+            } catch (e: Exception) {
+                promise.reject("EXTRACT_AUDIO_ERROR", e.message, e)
+            }
+        }.start()
+    }
+
+    @ReactMethod
     fun startSession(outputPath: String, targetDurationMs: Int, promise: Promise) {
         if (sessionRunning) {
             promise.reject("SESSION_ACTIVE", "A session is already running")
@@ -408,8 +430,36 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
     private fun intToLEBytes(v: Int): ByteArray =
         ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(v).array()
 
-    private fun decodeAudioUriToWav(uri: Uri, outputPath: String): ImportedAudioResult {
-        val displayName = displayNameForUri(uri)
+    private fun decodeAudioUriToWav(uri: Uri, outputPath: String): ImportedAudioResult =
+        decodeAudioSourceToWav(
+            displayName = displayNameForUri(uri),
+            sourceUri = uri.toString(),
+            outputPath = outputPath,
+        ) { extractor ->
+            extractor.setDataSource(ctx, uri, null)
+        }
+
+    private fun decodeAudioFileToWav(inputPath: String, outputPath: String): ImportedAudioResult {
+        val cleanPath = inputPath.removePrefix("file://")
+        val inputFile = File(cleanPath)
+        if (!inputFile.exists()) {
+            throw IllegalArgumentException("Video file does not exist: $cleanPath")
+        }
+        return decodeAudioSourceToWav(
+            displayName = inputFile.name,
+            sourceUri = inputFile.absolutePath,
+            outputPath = outputPath,
+        ) { extractor ->
+            extractor.setDataSource(inputFile.absolutePath)
+        }
+    }
+
+    private fun decodeAudioSourceToWav(
+        displayName: String?,
+        sourceUri: String,
+        outputPath: String,
+        configureExtractor: (MediaExtractor) -> Unit,
+    ): ImportedAudioResult {
         val extractor = MediaExtractor()
         var decoder: MediaCodec? = null
         val decodedChunks = mutableListOf<ShortArray>()
@@ -419,7 +469,7 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
         var outputEncoding = AudioFormat.ENCODING_PCM_16BIT
 
         try {
-            extractor.setDataSource(ctx, uri, null)
+            configureExtractor(extractor)
             var audioTrackIndex = -1
             var inputFormat: MediaFormat? = null
 
@@ -535,7 +585,7 @@ class AudioCaptureModule(private val ctx: ReactApplicationContext)
 
         return ImportedAudioResult(
             displayName = displayName,
-            sourceUri = uri.toString(),
+            sourceUri = sourceUri,
             durationMs = resampled.size * 1000L / TARGET_SAMPLE_RATE,
             sourceSampleRate = outputSampleRate,
             sourceChannels = outputChannels,

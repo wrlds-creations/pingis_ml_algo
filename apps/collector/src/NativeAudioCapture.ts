@@ -10,6 +10,8 @@ interface AudioCaptureInterface {
   stopSession(): Promise<number>;
   /** Importerar en ljudfil via Androids filvaljare och skriver om den till WAV. */
   importAudioFile(outputPath: string): Promise<ImportedAudioFile>;
+  /** Extraherar ljudspåret ur en lokal videofil och skriver om det till WAV. */
+  extractAudioFromVideoFile(inputPath: string, outputPath: string): Promise<ImportedAudioFile>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }

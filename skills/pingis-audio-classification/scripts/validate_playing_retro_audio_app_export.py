@@ -20,7 +20,7 @@ DEFAULT_MODEL_DIR = (
     / "audio"
     / "models"
     / "playing_retro_candidates"
-    / "playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context"
+    / "playing_retro_audio_rf_v2026_06_04_t0030_multi_window_context"
 )
 DEFAULT_APP_MODEL = (
     ROOT_DIR
@@ -51,10 +51,10 @@ REQUIRED_CONTEXT_FEATURES = [
     "ctx_density_600ms",
 ]
 
-EXPECTED_MODEL_VERSION = "playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context"
+EXPECTED_MODEL_VERSION = "playing_retro_audio_rf_v2026_06_04_t0030_multi_window_context"
 REQUIRED_REVIEW_THRESHOLDS = {
     "racket_contact": 0.0,
-    "table_bounce": 0.45,
+    "table_bounce": 0.0,
     "same_label_dedupe_ms": 80,
 }
 

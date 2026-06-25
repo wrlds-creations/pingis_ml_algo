@@ -372,7 +372,7 @@ export function CalibrationScreen({ setup, mode = 'table_only', onCalibrated, on
       <Text style={styles.title}>Calibration</Text>
       <Text style={styles.subtitle}>
         {mode === 'bounce_sides'
-          ? 'AirHive-baseline för Audio plus IMU. FH/BH-poser är valfria hjälpdata och är inte slag-labels.'
+          ? 'AirHive-baseline för äldre synkad insamling. FH/BH-poser är valfria hjälpdata och är inte slag-labels.'
           : 'Table calibration for data collection or internal tooling.'}
       </Text>
 
@@ -463,7 +463,7 @@ export function CalibrationScreen({ setup, mode = 'table_only', onCalibrated, on
         <TouchableOpacity style={styles.startBtn} onPress={start} activeOpacity={0.7}>
           <Text style={styles.startBtnTxt}>
             {mode === 'bounce_sides'
-              ? (bounceSidesCaptured ? 'Starta Audio plus IMU' : 'Fortsätt utan posekalibrering')
+              ? (bounceSidesCaptured ? 'Starta synkad insamling' : 'Fortsätt utan posekalibrering')
               : 'Continue to next screen'}
           </Text>
         </TouchableOpacity>

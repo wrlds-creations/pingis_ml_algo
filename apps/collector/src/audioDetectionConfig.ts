@@ -5,13 +5,13 @@ import type {
 } from './types';
 
 export const COLLECTOR_BOUNCE_BASELINE_ID =
-  'collector_bounce_live_v2026_05_13_normal_4class_220_80_220';
+  'collector_bounce_live_v2026_05_28_tomas_stiga_candidate_normal_4class_220_80_220';
 
 const MODEL_VERSIONS = {
   bundle_id: COLLECTOR_BOUNCE_BASELINE_ID,
   live_config_id: 'normal_four_class_100_200_retrigger220_group80_merge220_v1',
   audio_contact_model: 'collector_audio_contact_v2026_05_12_stable_debug',
-  audio_model: 'collector_audio_4class_v2026_05_13_100_200_all_sources',
+  audio_model: 'collector_audio_4class_v2026_05_28_tomas_stiga_C_hybrid_window_candidate',
 };
 
 const onsetThresholdForRatio = (ratio: number) =>

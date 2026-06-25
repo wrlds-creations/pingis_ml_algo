@@ -100,6 +100,9 @@ TRAINABLE_REVIEW_LABELS = {"racket_contact", "not_racket_contact"}
 NON_AUDIO_REVIEW_CLASS_LABELS = {"no_bounce_motion"}
 EXCLUDED_TRAINING_SESSIONS = {
     "audio_session_2026-05-11_001",
+    "audio_session_2026-05-26_002",
+    "audio_session_2026-05-26_003",
+    "audio_session_2026-05-26_004",
 }
 MUSIC_RACKET_SCENARIOS = {"racket_music", "racket_music_low", "racket_music_mid"}
 
@@ -369,6 +372,16 @@ def reviewed_racket_timestamps(markers: list[dict]) -> list[int]:
     return sorted(int(marker.get("timestamp_ms", 0)) for marker in markers if is_trainable_racket_marker(marker))
 
 
+def is_reviewed_table_marker(marker: dict) -> bool:
+    class_label = str(
+        marker.get("class_label")
+        or marker.get("not_racket_kind")
+        or marker.get("surface_label")
+        or ""
+    )
+    return marker.get("final_label") == "not_racket_contact" and class_label == "table_bounce"
+
+
 def negative_marker_overlaps_racket(
     marker: dict,
     racket_timestamps_ms: list[int],
@@ -376,6 +389,8 @@ def negative_marker_overlaps_racket(
     after_s: float = REVIEW_WINDOW_AFTER_S,
 ) -> bool:
     if marker.get("final_label") != "not_racket_contact":
+        return False
+    if is_reviewed_table_marker(marker):
         return False
     timestamp_ms = int(marker.get("timestamp_ms", 0))
     marker_start_ms = timestamp_ms - int(round(before_s * 1000))
@@ -758,7 +773,7 @@ def main() -> None:
             audio_path = session_dir / event["wav_filename"]
             review = event.get("review") or {}
             markers = review.get("markers") or []
-            review_completed = bool(review.get("completed_at")) and len(markers) > 0
+            review_completed = bool(review.get("completed_at") or review.get("audio_completed_at")) and len(markers) > 0
             if bool(review.get("required")) and not review_completed:
                 print(f"  {event['wav_filename']}: hoppar över review-krävd men ej färdig take")
                 continue

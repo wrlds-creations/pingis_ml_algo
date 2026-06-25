@@ -26,7 +26,7 @@ DEFAULT_MODEL_DIR = (
     / "audio"
     / "models"
     / "playing_retro_candidates"
-    / "playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context"
+    / "playing_retro_audio_rf_v2026_06_04_t0030_multi_window_context"
 )
 DEFAULT_OUT_PATH = (
     ROOT_DIR
@@ -59,9 +59,9 @@ CONTEXT_FEATURE_NAMES = [
 
 REVIEW_THRESHOLDS = {
     "racket_contact": 0.0,
-    "table_bounce": 0.45,
+    "table_bounce": 0.0,
     "same_label_dedupe_ms": 80,
-    "source_ticket": "T0027",
+    "source_ticket": "T0030",
 }
 
 TRUTH_DERIVED_FORBIDDEN_PREFIXES = (
@@ -115,7 +115,7 @@ def build_model_json(model_dir: Path, model_version: str, train_dataset: str) ->
             "feature_version": "playing_retro_audio_features_t0009_multi_window_context_v1",
             "model_type": "random_forest_playing_retro_audio",
             "app_model_role": "spel_retro_audio_review_only",
-            "selected_variant": "multi_window_context_racket_weighted",
+            "selected_variant": "multi_window_context_safe_weighted",
             "classes": labels,
             "tree_count": len(classifier.estimators_),
             "total_nodes": total_nodes,
@@ -139,13 +139,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-path", default=str(DEFAULT_OUT_PATH))
     parser.add_argument(
         "--model-version",
-        default="playing_retro_audio_rf_v2026_06_04_t0026_multi_window_context",
+        default="playing_retro_audio_rf_v2026_06_04_t0030_multi_window_context",
     )
     parser.add_argument(
         "--train-dataset",
         default=(
-            "T0026 multi-window/context rows from 18 reviewed playing sessions, "
-            "including audio_session_2026-06-03_005 and audio_session_2026-06-04_001"
+            "T0030 multi-window/context rows from 19 reviewed playing sessions, "
+            "including audio_session_2026-06-03_005, audio_session_2026-06-04_001, "
+            "and audio_session_2026-06-04_006"
         ),
     )
     return parser.parse_args()

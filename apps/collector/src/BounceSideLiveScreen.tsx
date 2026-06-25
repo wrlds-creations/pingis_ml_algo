@@ -30,7 +30,12 @@ import {
 } from './NativeAudioStream';
 import { BounceSideCameraView, BounceSideLive } from './NativeBounceSideLive';
 import { FableCounter } from './fableEngine';
-import { bounceSideFeatures, predictBounceSide, BOUNCE_SIDE_MODEL_VERSION } from './bounceSideInference';
+import {
+  bounceSideFeatures,
+  predictBounceSide,
+  resolveBounceSide,
+  BOUNCE_SIDE_MODEL_VERSION,
+} from './bounceSideInference';
 import type { PlayerSetup } from './types';
 
 const ONSET_THRESHOLD = 0.005; // -> native onset-ratio 1.5
@@ -45,6 +50,13 @@ interface LiveDebugEvent {
   side: string;
   confidence: number;
   probabilities: Record<string, number>;
+  decision_source: string;
+  raw_side: string;
+  raw_confidence: number;
+  visible_color: string;
+  color_confidence: number;
+  red_total: number;
+  dark_total: number;
   roi_source: string;
   frame_delay_ms: number;
   audio_label: string;
@@ -184,21 +196,27 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
           const binary = atob(crop.rgb_b64);
           const rgb = new Uint8Array(binary.length);
           for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
-          const prediction = predictBounceSide(bounceSideFeatures(rgb, crop.roi_source));
-          const mapped = forehandColorRef.current === 'black'
-            ? (prediction.label === 'forehand' ? 'backhand' as const : 'forehand' as const)
-            : prediction.label;
-          const side = prediction.confidence >= SIDE_MIN_CONFIDENCE ? mapped : 'uncertain' as const;
+          const features = bounceSideFeatures(rgb, crop.roi_source);
+          const prediction = predictBounceSide(features);
+          const resolved = resolveBounceSide(features, prediction, forehandColorRef.current, SIDE_MIN_CONFIDENCE);
+          const side = resolved.side;
           if (side === 'forehand') setFhCount(n => n + 1);
           else if (side === 'backhand') setBhCount(n => n + 1);
           else setUncertainCount(n => n + 1);
-          setLastSide({ side, confidence: prediction.confidence, roi: crop.roi_source });
+          setLastSide({ side, confidence: resolved.confidence, roi: crop.roi_source });
           if (debugEventsRef.current.length < 300) {
             debugEventsRef.current.push({
               onset_time_ms: onsetTimeMs,
               side,
-              confidence: prediction.confidence,
+              confidence: resolved.confidence,
               probabilities: prediction.probabilities,
+              decision_source: resolved.decisionSource,
+              raw_side: resolved.rawLabel,
+              raw_confidence: resolved.rawConfidence,
+              visible_color: resolved.visibleColor,
+              color_confidence: resolved.colorConfidence,
+              red_total: resolved.redTotal,
+              dark_total: resolved.darkTotal,
               roi_source: crop.roi_source,
               frame_delay_ms: crop.frame_delay_ms,
               audio_label: result.prediction?.label ?? 'unknown',
