@@ -70,6 +70,49 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     // (slider-värdet 0.005–0.15 mappas om till ratio 1.5–4.0 i startStreaming)
     @Volatile private var onsetRatio    = ONSET_RATIO
 
+    // ── Gate-konfiguration (Fable-läget) ──────────────────────────────────────
+    // Default = exakt gamla beteendet: broadband-RMS + spektral gate på.
+    // "bandpass": frame-RMS beräknas på 1.5–7 kHz-bandpassat ljud (musik ligger
+    // lågfrekvent; bollträffen behåller sin energi i bandet) — kausal variant
+    // av offline-replayens nollfas-filter, skillnaden är några ms gruppfördröjning.
+    @Volatile private var gateMode            = "broadband"
+    @Volatile private var spectralGateEnabled = true
+    @Volatile private var absMinRms           = ABS_MIN_RMS
+
+    // Butterworth ordning 4 bandpass 1500–7000 Hz @ 22050 Hz som biquad-kaskad
+    // (scipy.signal.butter(4, [1500, 7000], 'bandpass', fs=22050, output='sos')).
+    // Rad: b0, b1, b2, a1, a2 (a0 = 1).
+    private val bpSos = arrayOf(
+        doubleArrayOf(0.09331299315653971, 0.18662598631307942, 0.09331299315653971, 0.19676635870899223, 0.09988498828008321),
+        doubleArrayOf(1.0, -2.0, 1.0, -1.1925622397360882, 0.39614858444118883),
+        doubleArrayOf(1.0, 2.0, 1.0, 0.6137123805223851, 0.5737584318188238),
+        doubleArrayOf(1.0, -2.0, 1.0, -1.6102285405185548, 0.7781414737694868),
+    )
+    // Direct form II transposed: 2 tillstånd per sektion, persistent över frames.
+    private val bpState = Array(4) { DoubleArray(2) }
+
+    private fun resetBandpassState() {
+        for (s in bpState) { s[0] = 0.0; s[1] = 0.0 }
+    }
+
+    /** Filtrerar en frame kausalt genom biquad-kaskaden och returnerar RMS. */
+    private fun bandpassFrameRms(frame: ShortArray, n: Int): Double {
+        var sumSq = 0.0
+        for (i in 0 until n) {
+            var x = frame[i].toDouble() / 32768.0
+            for (s in 0 until 4) {
+                val c = bpSos[s]
+                val st = bpState[s]
+                val y = c[0] * x + st[0]
+                st[0] = c[1] * x - c[3] * y + st[1]
+                st[1] = c[2] * x - c[4] * y
+                x = y
+            }
+            sumSq += x * x
+        }
+        return sqrt(sumSq / n)
+    }
+
     private val ring = ShortArray(RING_SIZE)
     @Volatile private var writePos = 0
 
@@ -77,6 +120,25 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     private val bgBuffer = DoubleArray(BG_FRAMES)
     private var bgIdx    = 0
     private var bgFilled = false
+
+    private data class SpectralGateResult(
+        val passed: Boolean,
+        val ballRatio: Double,
+        val flatness: Double,
+    )
+
+    private data class OnsetDebug(
+        val onsetTimeMs: Long,
+        val onsetPos: Int,
+        val rms: Double,
+        val backgroundRms: Double,
+        val adaptiveThreshold: Double,
+        val onsetRatio: Double,
+        val retriggerMs: Long,
+        val spectralPassed: Boolean,
+        val ballRatio: Double,
+        val flatness: Double,
+    )
 
     // ── ReactMethods ───────────────────────────────────────────────────────────
 
@@ -97,6 +159,13 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         bgIdx         = 0
         bgFilled      = false
         bgBuffer.fill(0.0)
+        // Gate-konfig återställs till gamla beteendet vid varje start så att
+        // de befintliga lägena aldrig påverkas av ett tidigare Fable-pass.
+        // Fable-skärmen anropar setGateConfig direkt efter startStreaming.
+        gateMode            = "broadband"
+        spectralGateEnabled = true
+        absMinRms           = ABS_MIN_RMS
+        resetBandpassState()
         Thread(::streamLoop, "AudioStreamThread").start()
         promise.resolve("started")
     }
@@ -116,6 +185,22 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     @ReactMethod
     fun setRetriggerMs(ms: Double, promise: Promise) {
         retriggerMs = ms.toLong().coerceIn(0L, 800L)
+        promise.resolve("ok")
+    }
+
+    /**
+     * Konfigurera gate-läget (Fable-läget). mode: "broadband" | "bandpass".
+     * spectralGate: kör 256-pt spektralgaten som hård avvisning eller inte
+     * (ball_ratio/flatness rapporteras alltid i debug). absMin: absolut
+     * RMS-golv för triggern (bandpass bör använda ~0.0015).
+     * Anropa innan startStreaming; återställer filtertillstånd.
+     */
+    @ReactMethod
+    fun setGateConfig(mode: String, spectralGate: Boolean, absMin: Double, promise: Promise) {
+        gateMode = if (mode == "bandpass") "bandpass" else "broadband"
+        spectralGateEnabled = spectralGate
+        absMinRms = absMin.coerceIn(0.0001, 0.05)
+        resetBandpassState()
         promise.resolve("ok")
     }
 
@@ -143,6 +228,9 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                 }
 
                 val rms = computeRMS(frame, read)
+                // Gate-RMS: bandpassad om Fable-läget begärt det, annars rå.
+                // Filtret måste mata sitt tillstånd varje frame, även i cooldown.
+                val gateRms = if (gateMode == "bandpass") bandpassFrameRms(frame, read) else rms
 
                 // Uppdatera bakgrundsestimat med current RMS
                 // (vi lägger bara till i bakgrundsbuffern, inte vid onset)
@@ -154,23 +242,41 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                     val bgAvg = if (bgFilled)
                         bgBuffer.average()
                     else
-                        bgBuffer.take(bgIdx).average().takeIf { bgIdx > 0 } ?: rms
+                        bgBuffer.take(bgIdx).average().takeIf { bgIdx > 0 } ?: gateRms
 
                     // Adaptiv onset: studs måste vara onsetRatio gånger starkare än bakgrunden
                     // och alltid över absolut minimum
-                    val adaptiveThreshold = maxOf(bgAvg * onsetRatio, ABS_MIN_RMS)
+                    val adaptiveThreshold = maxOf(bgAvg * onsetRatio, absMinRms)
 
-                    if (rms >= adaptiveThreshold) {
-                        if (!spectralGate(frame, read)) {
-                            bgBuffer[bgIdx % BG_FRAMES] = rms
+                    if (gateRms >= adaptiveThreshold) {
+                        val capturedOnsetPos = writePos - read
+                        val spectral = spectralGate(frame, read)
+                        // Spektralgaten är hård avvisning bara när den är på;
+                        // i Fable-läget gör modellen avvisningsjobbet i stället.
+                        val spectralRejects = spectralGateEnabled && !spectral.passed
+                        val debug = OnsetDebug(
+                            onsetTimeMs = now,
+                            onsetPos = capturedOnsetPos,
+                            rms = gateRms,
+                            backgroundRms = bgAvg,
+                            adaptiveThreshold = adaptiveThreshold,
+                            onsetRatio = onsetRatio,
+                            retriggerMs = retriggerMs,
+                            spectralPassed = spectral.passed,
+                            ballRatio = spectral.ballRatio,
+                            flatness = spectral.flatness,
+                        )
+
+                        if (spectralRejects) {
+                            emitCandidate(null, debug, "spectral_gate")
+                            bgBuffer[bgIdx % BG_FRAMES] = gateRms
                             bgIdx++
                             if (bgIdx >= BG_FRAMES) bgFilled = true
                             continue
                         }
 
                         lastOnsetTime = now
-                        val capturedOnsetPos = writePos - read
-                        scheduleExtraction(capturedOnsetPos)
+                        scheduleExtraction(capturedOnsetPos, debug)
                         // Höj bakgrunden måttligt — inte till onset-nivå (som
                         // blockerar nästa slag i 500ms) utan till 2× bakgrunden.
                         // retriggerMs hanterar eko/decay och kan justeras från JS.
@@ -180,7 +286,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                         bgFilled = true
                     } else {
                         // Uppdatera bakgrundsbuffer med denna tysta frame
-                        bgBuffer[bgIdx % BG_FRAMES] = rms
+                        bgBuffer[bgIdx % BG_FRAMES] = gateRms
                         bgIdx++
                         if (bgIdx >= BG_FRAMES) bgFilled = true
                     }
@@ -194,7 +300,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
 
     // ── Extrahera klipp i bakgrunden ──────────────────────────────────────────
 
-    private fun scheduleExtraction(onsetPos: Int) {
+    private fun scheduleExtraction(onsetPos: Int, debug: OnsetDebug) {
         Thread {
             val targetWritePos = onsetPos + POST_SAMPLES
             while (isRunning && writePos < targetWritePos) {
@@ -214,9 +320,30 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                 .apply { clip.forEach { putShort(it) } }
                 .array()
 
-            ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-                .emit(EVENT_NAME, Base64.encodeToString(bytes, Base64.NO_WRAP))
+            emitCandidate(Base64.encodeToString(bytes, Base64.NO_WRAP), debug, null)
         }.start()
+    }
+
+    private fun emitCandidate(audioB64: String?, debug: OnsetDebug, rejectedReason: String?) {
+        val debugMap = Arguments.createMap().apply {
+            putDouble("onset_time_ms", debug.onsetTimeMs.toDouble())
+            putDouble("onset_pos", debug.onsetPos.toDouble())
+            putDouble("rms", debug.rms)
+            putDouble("background_rms", debug.backgroundRms)
+            putDouble("adaptive_threshold", debug.adaptiveThreshold)
+            putDouble("onset_ratio", debug.onsetRatio)
+            putDouble("retrigger_ms", debug.retriggerMs.toDouble())
+            putBoolean("spectral_passed", debug.spectralPassed)
+            putDouble("ball_ratio", debug.ballRatio)
+            putDouble("flatness", debug.flatness)
+            if (rejectedReason == null) putNull("native_reject_reason") else putString("native_reject_reason", rejectedReason)
+        }
+        val payload = Arguments.createMap().apply {
+            if (audioB64 == null) putNull("audio_b64") else putString("audio_b64", audioB64)
+            putMap("native_debug", debugMap)
+        }
+        ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+            .emit(EVENT_NAME, payload)
     }
 
     // ── RMS ────────────────────────────────────────────────────────────────────
@@ -236,7 +363,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
      *
      * Returnerar true om framen passerar (sannolikt boll-studs).
      */
-    private fun spectralGate(frame: ShortArray, n: Int): Boolean {
+    private fun spectralGate(frame: ShortArray, n: Int): SpectralGateResult {
         val nFft = SPECTRAL_FFT
         val re = DoubleArray(nFft)
         val im = DoubleArray(nFft)
@@ -303,19 +430,21 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         }
 
         // Check 1: tillräckligt med energi i boll-bandet?
-        if (totalEnergy > 0 && ballEnergy / totalEnergy < MIN_BALL_RATIO) {
-            return false
+        val ballRatio = if (totalEnergy > 0) ballEnergy / totalEnergy else 0.0
+        if (totalEnergy > 0 && ballRatio < MIN_BALL_RATIO) {
+            return SpectralGateResult(false, ballRatio, 0.0)
         }
 
         // Check 2: spectral flatness (broadband brus = hög flatness)
         val validBins = nBins - 1
+        var flatness = 0.0
         if (validBins > 0 && arithSum > 0) {
             val geoMean = kotlin.math.exp(logSum / validBins)
             val ariMean = arithSum / validBins
-            val flatness = geoMean / ariMean
-            if (flatness > MAX_FLATNESS) return false
+            flatness = geoMean / ariMean
+            if (flatness > MAX_FLATNESS) return SpectralGateResult(false, ballRatio, flatness)
         }
 
-        return true
+        return SpectralGateResult(true, ballRatio, flatness)
     }
 }

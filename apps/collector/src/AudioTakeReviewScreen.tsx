@@ -29,6 +29,7 @@ import {
   writeTakePlaybackClip,
   type AudioSyncPoint,
 } from './audioReview';
+import { VideoPose } from './NativeVideoPose';
 import {
   detectionConfigTitle,
   getAudioDetectionConfig,
@@ -38,8 +39,11 @@ import {
   analyzePlayingRetroAudioCandidates,
   getPlayingRetroAudioModelMetadata,
   type PlayingRetroAudioAnalysisResult,
+  type PlayingRetroAudioReviewCandidate,
 } from './playingRetroAudio';
 import { ReviewOrientation } from './ReviewOrientation';
+import { buildVideoStrokeFeatures, detectRacketHandedness, VIDEO_STROKE_FEATURE_SPEC } from './videoStrokeFeatures';
+import { hasTrainedVideoStrokeModel, predictVideoStroke, videoStrokeModelVersion } from './videoStrokeInference';
 import type {
   AudioContactKind,
   AudioEvent,
@@ -52,8 +56,13 @@ import type {
   AudioReviewClassLabel,
   AudioReviewEventType,
   AudioReviewLabel,
+  AudioReviewMotionLabel,
   AudioReviewMarker,
+  AudioTakeReviewSaveOptions,
+  AudioVideoSyncMetadata,
+  AudioVideoSyncSource,
   ImuSample,
+  VideoPoseCandidate,
 } from './types';
 
 interface Props {
@@ -62,9 +71,11 @@ interface Props {
   videoFilePath?: string;
   onSave: (
     markers: AudioReviewMarker[],
-    videoSyncOffsetMs?: number,
+    videoSyncMetadata?: AudioVideoSyncMetadata,
     modelCandidates?: AudioModelCandidate[],
     detectionConfigSnapshot?: AudioDetectionConfigSnapshot,
+    videoPoseCandidates?: VideoPoseCandidate[],
+    saveOptions?: AudioTakeReviewSaveOptions,
   ) => Promise<void> | void;
   onDiscard: () => Promise<void> | void;
   onBack: () => void;
@@ -76,10 +87,25 @@ type TimelineZoomLevel = 1 | 2 | 4 | 8 | 12 | 16;
 type TimelineInteractionMode = 'idle' | 'playing' | 'scrubbing' | 'autoScrollingWhileScrubbing';
 type PlayingConfidenceFilterId = 'all' | 'medium' | 'safe';
 type ImuSeriesKey = 'accel_x' | 'accel_y' | 'accel_z' | 'gyro_x' | 'gyro_y' | 'gyro_z';
+type AudioVideoReviewStage = 'audio' | 'motion';
+
+interface ReviewStartProfileEntry {
+  phase: string;
+  elapsedMs: number;
+  durationMs?: number;
+  detail?: string;
+}
+
+interface ReviewStartProfile {
+  key: string;
+  startedAtMs: number;
+  entries: ReviewStartProfileEntry[];
+}
 
 const REVIEW_UI_REVISION = 'Simple Review UI | attack_start | r12-synced-timeline';
 const NUDGE_STEP_MS = 10;
 const LARGE_NUDGE_STEP_MS = 20;
+const EXTRA_LARGE_NUDGE_STEP_MS = 50;
 const PLAYBACK_SUBSCRIPTION_SEC = 0.1;
 const OVERVIEW_BAR_COUNT = 260;
 const DETAIL_PRE_MS = 120;
@@ -103,8 +129,38 @@ const PLAYING_CONFIDENCE_FILTERS: Array<{ id: PlayingConfidenceFilterId; title: 
 const REVIEW_SENSITIVITY_OPTIONS: AudioDetectionSensitivity[] = ['strict', 'normal', 'sensitive'];
 const REVIEW_DETECTION_MODE_OPTIONS: AudioDetectionMode[] = ['hybrid', 'binary_only', 'four_class_only'];
 const PRESERVED_MARKER_DUPLICATE_GAP_MS = 120;
+const PLAYING_RETRO_SAME_LABEL_DUPLICATE_GAP_MS = 80;
 const WAVEFORM_MIN_BIN_COUNT = 160;
 const WAVEFORM_MAX_BAR_HEIGHT = 92;
+const VIDEO_POSE_SAMPLE_FPS = 15;
+const VIDEO_POSE_SCAN_STEP_MS = 100;
+const VIDEO_POSE_MIN_CONFIDENCE = 0.58;
+const VIDEO_POSE_MIN_GAP_MS = 750;
+const VIDEO_POSE_AUDIO_MERGE_MS = 250;
+const VIDEO_POSE_MIN_WRIST_SPEED = 1.15;
+const VIDEO_POSE_MIN_FRAME_COUNT = 6;
+const VIDEO_POSE_MIN_AVG_VISIBILITY = 0.45;
+const VIDEO_POSE_MIN_WRIST_TRAVEL = 0.25;
+const VIDEO_POSE_MIN_LATERAL_TRAVEL = 0.1;
+const VIDEO_POSE_MIN_ELBOW_TRAVEL = 0.04;
+const AUDIO_VIDEO_POSE_MIN_AUDIO_CONFIDENCE = 0.65;
+const REVIEW_START_PROFILE_LOG_PREFIX = '[review-start-profile]';
+
+function audioVideoPoseReviewConfidence(config?: AudioDetectionConfigSnapshot): number {
+  return config?.contact_confidence_min ?? AUDIO_VIDEO_POSE_MIN_AUDIO_CONFIDENCE;
+}
+
+function reviewStartProfileEntryText(entry: ReviewStartProfileEntry): string {
+  const durationText = typeof entry.durationMs === 'number' ? `/${entry.durationMs}ms` : '';
+  return `${entry.phase} ${entry.elapsedMs}ms${durationText}`;
+}
+
+function reviewStartProfileSummary(entries: ReviewStartProfileEntry[]): string {
+  const latest = entries[entries.length - 1];
+  const recent = entries.slice(-3).map(reviewStartProfileEntryText).join(' | ');
+  return latest ? `${latest.elapsedMs} ms · ${recent}` : '0 ms';
+}
+
 const IMU_SERIES_COLORS = {
   x: '#2ecc71',
   y: '#ff4d4d',
@@ -121,7 +177,10 @@ interface LineSegment {
 interface QuickLabelPrompt {
   markerId: string;
   timestampMs: number;
+  layer?: ReviewTimelineLayer;
 }
+
+type ReviewTimelineLayer = 'audio' | 'motion';
 
 function labelText(label: AudioReviewLabel) {
   switch (label) {
@@ -166,6 +225,10 @@ function classColor(classLabel?: string, fallbackLabel?: AudioReviewLabel) {
 }
 
 function markerColor(marker: AudioReviewMarker) {
+  if (marker.event_type === 'motion') {
+    if (marker.motion_label === 'forehand') return '#35c7ff';
+    if (marker.motion_label === 'backhand') return '#7db7ff';
+  }
   return classColor(
     marker.class_label ?? marker.not_racket_kind ?? marker.contact_kind ?? marker.surface_label,
     marker.final_label,
@@ -179,20 +242,35 @@ function candidateColor(candidate: AudioModelCandidate) {
   );
 }
 
-function shouldShowCandidatePin(
-  candidate: AudioModelCandidate,
-  detectionConfig: AudioDetectionConfigSnapshot,
-) {
-  if (candidate.review_relevant) return true;
-  const surfaceConfidence = candidate.surface_confidence ?? 0;
-  if (
-    (candidate.surface_label === 'table_bounce' || candidate.surface_label === 'floor_bounce') &&
-    surfaceConfidence >= detectionConfig.surface_veto_confidence
-  ) {
-    return true;
-  }
-  if (candidate.surface_label === 'noise' && surfaceConfidence >= 0.65) return true;
-  return false;
+function poseCandidateColor(candidate: VideoPoseCandidate) {
+  if (candidate.predicted_stroke_type === 'forehand') return '#35c7ff';
+  if (candidate.predicted_stroke_type === 'backhand') return '#7db7ff';
+  return '#888';
+}
+
+function isConcretePoseStrokeCandidate(candidate: VideoPoseCandidate): boolean {
+  return candidate.review_relevant &&
+    candidate.status === 'ok' &&
+    (candidate.predicted_stroke_type === 'forehand' || candidate.predicted_stroke_type === 'backhand') &&
+    candidate.confidence >= VIDEO_POSE_MIN_CONFIDENCE;
+}
+
+function shouldShowPoseCandidatePin(candidate: VideoPoseCandidate): boolean {
+  return isConcretePoseStrokeCandidate(candidate);
+}
+
+function poseCandidateReviewStatusText(candidates: VideoPoseCandidate[], anchoredToAudio: boolean): string {
+  const visibleCount = candidates.filter(isConcretePoseStrokeCandidate).length;
+  const hiddenCount = candidates.length - visibleCount;
+  const sourceText = anchoredToAudio ? 'från racketträffar' : 'i hela videon';
+  const hiddenText = hiddenCount > 0
+    ? ` ${hiddenCount} oklara/no-target-kandidater sparas som analys men visas inte.`
+    : '';
+  return `Pose skapade ${visibleCount} FH/BH-förslag ${sourceText}. ${Math.round(VIDEO_POSE_MIN_CONFIDENCE * 100)}% krävs.${hiddenText}`;
+}
+
+function shouldShowCandidatePin(candidate: AudioModelCandidate) {
+  return candidate.review_relevant;
 }
 
 interface ReviewLabelChoice {
@@ -201,9 +279,17 @@ interface ReviewLabelChoice {
   final_label: AudioReviewLabel;
   event_type: AudioReviewEventType;
   class_label: AudioReviewClassLabel;
+  motion_label?: AudioReviewMotionLabel;
   contact_kind?: AudioContactKind;
   not_racket_kind?: AudioNotRacketKind;
   bounce_side?: AudioReviewBounceSide;
+  color: string;
+}
+
+interface ReviewMotionChoice {
+  id: string;
+  title: string;
+  motion_label: AudioReviewMotionLabel;
   color: string;
 }
 
@@ -310,6 +396,7 @@ const PLAYING_REVIEW_LABEL_CHOICES: ReviewLabelChoice[] = [
     final_label: 'racket_contact',
     event_type: 'racket_hit',
     class_label: 'forehand_hit',
+    motion_label: 'forehand',
     contact_kind: 'racket_bounce',
     bounce_side: 'forehand',
     color: '#2ecc71',
@@ -320,6 +407,7 @@ const PLAYING_REVIEW_LABEL_CHOICES: ReviewLabelChoice[] = [
     final_label: 'racket_contact',
     event_type: 'racket_hit',
     class_label: 'backhand_hit',
+    motion_label: 'backhand',
     contact_kind: 'racket_bounce',
     bounce_side: 'backhand',
     color: '#5fd18b',
@@ -335,8 +423,49 @@ const PLAYING_REVIEW_LABEL_CHOICES: ReviewLabelChoice[] = [
   },
 ];
 
+const AUDIO_VIDEO_POSE_AUDIO_LABEL_CHOICES: ReviewLabelChoice[] = [
+  {
+    id: 'audio_pose_racket_hit',
+    title: 'Ljud: Racketträff',
+    final_label: 'racket_contact',
+    event_type: 'racket_hit',
+    class_label: 'racket_bounce',
+    contact_kind: 'racket_bounce',
+    bounce_side: 'unknown',
+    color: '#2ecc71',
+  },
+  {
+    id: 'audio_pose_table_bounce',
+    title: 'Ljud: Bordsstuds',
+    final_label: 'not_racket_contact',
+    event_type: 'bounce',
+    class_label: 'table_bounce',
+    not_racket_kind: 'table_bounce',
+    color: '#4a9eff',
+  },
+  {
+    id: 'audio_pose_ignore',
+    title: 'Ljud: Ignorera',
+    final_label: 'ignore',
+    event_type: 'ignore',
+    class_label: 'ignore',
+    color: '#888',
+  },
+];
+
+const AUDIO_VIDEO_POSE_MOTION_LABEL_CHOICES: ReviewMotionChoice[] = [
+  { id: 'motion_forehand', title: 'Rörelse: Forehand', motion_label: 'forehand', color: '#35c7ff' },
+  { id: 'motion_backhand', title: 'Rörelse: Backhand', motion_label: 'backhand', color: '#7db7ff' },
+  { id: 'motion_unknown', title: 'Rörelse: Oklart', motion_label: 'unknown', color: '#aeb4be' },
+];
+
+const AUDIO_VIDEO_POSE_REVIEW_LABEL_CHOICES = AUDIO_VIDEO_POSE_AUDIO_LABEL_CHOICES;
+
 function markerMatchesChoice(marker: AudioReviewMarker | null, choice: ReviewLabelChoice): boolean {
   if (!marker) return false;
+  if (choice.event_type === 'motion') {
+    return marker.event_type === 'motion' && marker.motion_label === choice.motion_label;
+  }
   if (marker.final_label !== choice.final_label) return false;
   if (choice.final_label === 'racket_contact') {
     return (marker.class_label ?? marker.contact_kind ?? 'racket_bounce') === choice.class_label;
@@ -344,11 +473,102 @@ function markerMatchesChoice(marker: AudioReviewMarker | null, choice: ReviewLab
   if (choice.final_label === 'not_racket_contact') {
     return (marker.class_label ?? marker.not_racket_kind ?? 'other_impact') === choice.class_label;
   }
+  if (marker.event_type === 'motion') return false;
   return choice.final_label === 'ignore';
 }
 
-function markerDetailText(marker: AudioReviewMarker | null): string {
-  if (!marker) return 'Ingen marker vald';
+function hasConcreteMotionLabel(motionLabel?: AudioReviewMotionLabel): motionLabel is 'forehand' | 'backhand' {
+  return motionLabel === 'forehand' || motionLabel === 'backhand';
+}
+
+function markerMatchesAudioPoseAudioChoice(marker: AudioReviewMarker | null, choice: ReviewLabelChoice): boolean {
+  if (!marker || marker.final_label !== choice.final_label) return false;
+  if (choice.final_label === 'ignore') return true;
+  if (choice.final_label === 'racket_contact') {
+    return marker.contact_kind === 'racket_bounce' ||
+      ['racket_bounce', 'forehand', 'backhand', 'forehand_hit', 'backhand_hit'].includes(marker.class_label ?? '');
+  }
+  if (choice.final_label === 'not_racket_contact') {
+    return (marker.class_label ?? marker.not_racket_kind) === choice.class_label;
+  }
+  return false;
+}
+
+function markerMatchesAudioPoseMotionChoice(marker: AudioReviewMarker | null, choice: ReviewMotionChoice): boolean {
+  if (!marker) return false;
+  if (choice.motion_label === 'unknown') {
+    return !hasConcreteMotionLabel(marker.motion_label);
+  }
+  return marker.motion_label === choice.motion_label;
+}
+
+function audioPoseClassLabelFor(marker: AudioReviewMarker, choice: ReviewLabelChoice): AudioReviewClassLabel {
+  if (choice.final_label === 'ignore' && hasConcreteMotionLabel(marker.motion_label)) {
+    return marker.motion_label;
+  }
+  return choice.class_label;
+}
+
+function audioPoseEventTypeFor(finalLabel: AudioReviewLabel, eventType: AudioReviewEventType, motionLabel?: AudioReviewMotionLabel) {
+  if (finalLabel === 'ignore' && hasConcreteMotionLabel(motionLabel)) return 'motion';
+  return eventType;
+}
+
+function statusForAudioPoseMarker(marker: AudioReviewMarker, next: AudioReviewMarker): AudioReviewMarker['review_status'] {
+  if (next.final_label === 'ignore' && !hasConcreteMotionLabel(next.motion_label)) return 'ignored';
+  return marker.source === 'auto' &&
+    marker.suggested_label === next.final_label &&
+    marker.final_label === next.final_label &&
+    marker.motion_label === next.motion_label
+    ? 'confirmed'
+    : 'edited';
+}
+
+function applyAudioPoseAudioChoice(marker: AudioReviewMarker, choice: ReviewLabelChoice): AudioReviewMarker {
+  const next: AudioReviewMarker = {
+    ...marker,
+    final_label: choice.final_label,
+    event_type: audioPoseEventTypeFor(choice.final_label, choice.event_type, marker.motion_label),
+    class_label: audioPoseClassLabelFor(marker, choice),
+    contact_kind: choice.contact_kind,
+    not_racket_kind: choice.not_racket_kind,
+    bounce_side: choice.final_label === 'racket_contact' && hasConcreteMotionLabel(marker.motion_label)
+      ? marker.motion_label
+      : choice.bounce_side,
+  };
+  return {
+    ...next,
+    review_status: statusForAudioPoseMarker(marker, next),
+  };
+}
+
+function applyAudioPoseMotionChoice(marker: AudioReviewMarker, choice: ReviewMotionChoice): AudioReviewMarker {
+  const concreteMotionLabel = hasConcreteMotionLabel(choice.motion_label) ? choice.motion_label : undefined;
+  const concreteMotion = Boolean(concreteMotionLabel);
+  const finalLabel = marker.final_label;
+  const next: AudioReviewMarker = {
+    ...marker,
+    motion_label: choice.motion_label,
+    motion_confidence: concreteMotion ? marker.motion_confidence : undefined,
+    event_type: finalLabel === 'ignore'
+      ? (concreteMotion ? 'motion' : 'ignore')
+      : marker.event_type,
+    class_label: finalLabel === 'ignore'
+      ? (concreteMotionLabel ?? 'ignore')
+      : finalLabel === 'racket_contact'
+        ? 'racket_bounce'
+        : marker.class_label,
+    bounce_side: finalLabel === 'racket_contact'
+      ? (concreteMotionLabel ?? 'unknown')
+      : marker.bounce_side,
+  };
+  return {
+    ...next,
+    review_status: statusForAudioPoseMarker(marker, next),
+  };
+}
+
+function audioMarkerDetailText(marker: AudioReviewMarker): string {
   const classLabel = marker.class_label ?? marker.contact_kind ?? marker.not_racket_kind;
   if (classLabel === 'forehand_hit') return 'Racketträff forehand';
   if (classLabel === 'backhand_hit') return 'Racketträff backhand';
@@ -365,17 +585,65 @@ function markerDetailText(marker: AudioReviewMarker | null): string {
   return labelText(marker.final_label);
 }
 
+function motionMarkerDetailText(marker: AudioReviewMarker): string | null {
+  if (marker.motion_label === 'forehand') return 'Forehand-rörelse';
+  if (marker.motion_label === 'backhand') return 'Backhand-rörelse';
+  if (marker.motion_label === 'unknown') return 'Rörelse oklar';
+  return null;
+}
+
+function markerDetailText(marker: AudioReviewMarker | null): string {
+  if (!marker) return 'Ingen marker vald';
+  const audioText = audioMarkerDetailText(marker);
+  const motionText = motionMarkerDetailText(marker);
+  if (marker.final_label === 'ignore') return motionText ?? audioText;
+  return motionText ? `${audioText} + ${motionText}` : audioText;
+}
+
+function isMotionLayerMarker(marker: AudioReviewMarker): boolean {
+  return marker.event_type === 'motion' || (
+    marker.final_label === 'ignore' &&
+    hasConcreteMotionLabel(marker.motion_label)
+  );
+}
+
+function isAudioLayerMarker(marker: AudioReviewMarker): boolean {
+  return !isMotionLayerMarker(marker);
+}
+
+function markerLayer(marker: AudioReviewMarker): ReviewTimelineLayer {
+  return isMotionLayerMarker(marker) ? 'motion' : 'audio';
+}
+
 function markerConfidence(marker: AudioReviewMarker): number {
+  if (marker.motion_confidence && !marker.contact_confidence && !marker.surface_confidence) {
+    return marker.motion_confidence;
+  }
   if (marker.final_label === 'not_racket_contact' && marker.class_label === 'table_bounce') {
     return marker.surface_confidence ?? marker.contact_confidence ?? 0;
   }
-  return marker.contact_confidence ?? marker.surface_confidence ?? 0;
+  return Math.max(marker.contact_confidence ?? 0, marker.surface_confidence ?? 0, marker.motion_confidence ?? 0);
+}
+
+function markerConfidenceValue(marker: AudioReviewMarker): number | undefined {
+  if (isMotionLayerMarker(marker)) return marker.motion_confidence;
+  if (marker.final_label === 'racket_contact') return marker.contact_confidence ?? markerConfidence(marker);
+  if (marker.final_label === 'not_racket_contact') return marker.surface_confidence ?? marker.contact_confidence ?? markerConfidence(marker);
+  return markerConfidence(marker);
+}
+
+function markerConfidenceText(marker: AudioReviewMarker | null): string | null {
+  if (!marker) return null;
+  const confidence = markerConfidenceValue(marker);
+  if (typeof confidence !== 'number' || confidence <= 0) return null;
+  return `${markerDetailText(marker)} ${Math.round(confidence * 100)}%`;
 }
 
 function shouldAlwaysShowMarker(marker: AudioReviewMarker): boolean {
   const status = marker.review_status ?? 'pending';
   return (
     marker.source === 'manual' ||
+    Boolean(marker.linked_pose_candidate_id) ||
     status === 'confirmed' ||
     status === 'edited' ||
     status === 'ignored'
@@ -426,7 +694,7 @@ function modelCandidatesFromMarkers(
   detectionConfig: AudioDetectionConfigSnapshot,
 ): AudioModelCandidate[] {
   return markers
-    .filter(marker => marker.source === 'auto')
+    .filter(marker => marker.source === 'auto' && isAudioLayerMarker(marker))
     .map((marker, index) => ({
       id: marker.linked_candidate_id ?? `candidate_from_marker_${index}_${Math.round(marker.timestamp_ms)}`,
       timestamp_ms: marker.timestamp_ms,
@@ -445,21 +713,185 @@ function modelCandidatesFromMarkers(
     }));
 }
 
+function shouldKeepExistingReviewMarkersForPlayingRetro(markers: AudioReviewMarker[]): boolean {
+  return markers.some(marker => {
+    const status = marker.review_status ?? 'pending';
+    return marker.source === 'manual' ||
+      status === 'confirmed' ||
+      status === 'edited' ||
+      status === 'ignored' ||
+      status === 'deleted';
+  });
+}
+
+function markerFromPlayingRetroCandidate(
+  candidate: PlayingRetroAudioReviewCandidate,
+  index: number,
+  durationMs: number,
+): AudioReviewMarker | null {
+  if (!candidate.review_relevant || !candidate.suggested_label || !candidate.event_type || !candidate.class_label) {
+    return null;
+  }
+  return {
+    id: `auto_playing_retro_${index}_${candidate.source_candidate_id}_${Math.round(candidate.timestamp_ms)}`,
+    timestamp_ms: clampTimestamp(candidate.timestamp_ms, durationMs),
+    source: 'auto',
+    linked_candidate_id: candidate.id,
+    suggested_label: candidate.suggested_label,
+    final_label: candidate.suggested_label,
+    event_type: candidate.event_type,
+    class_label: candidate.class_label,
+    contact_kind: candidate.contact_kind,
+    not_racket_kind: candidate.not_racket_kind,
+    bounce_side: candidate.suggested_label === 'racket_contact' ? 'unknown' : candidate.bounce_side,
+    review_status: 'pending',
+    contact_confidence: candidate.contact_confidence,
+    surface_label: candidate.surface_label,
+    surface_confidence: candidate.surface_confidence,
+  };
+}
+
+function playingRetroMarkerKind(marker: AudioReviewMarker): 'racket' | 'table' | null {
+  if (
+    marker.final_label === 'racket_contact' ||
+    marker.event_type === 'racket_hit' ||
+    marker.contact_kind === 'racket_bounce' ||
+    marker.class_label === 'racket_bounce'
+  ) {
+    return 'racket';
+  }
+  if (
+    marker.final_label === 'not_racket_contact' ||
+    marker.event_type === 'bounce' ||
+    marker.not_racket_kind === 'table_bounce' ||
+    marker.class_label === 'table_bounce' ||
+    marker.surface_label === 'table_bounce'
+  ) {
+    return 'table';
+  }
+  return null;
+}
+
+function dedupePlayingRetroSameLabelMarkers(markers: AudioReviewMarker[]): AudioReviewMarker[] {
+  const kept: AudioReviewMarker[] = [];
+  for (const marker of sortMarkers(markers)) {
+    const markerKind = playingRetroMarkerKind(marker);
+    let duplicateIndex = -1;
+    if (markerKind) {
+      for (let index = kept.length - 1; index >= 0; index -= 1) {
+        const existing = kept[index];
+        if (Math.abs(existing.timestamp_ms - marker.timestamp_ms) > PLAYING_RETRO_SAME_LABEL_DUPLICATE_GAP_MS) {
+          break;
+        }
+        if (playingRetroMarkerKind(existing) === markerKind) {
+          duplicateIndex = index;
+          break;
+        }
+      }
+    }
+    if (duplicateIndex >= 0) {
+      kept[duplicateIndex] = marker;
+    } else {
+      kept.push(marker);
+    }
+  }
+  return sortMarkers(kept);
+}
+
+function markersFromPlayingRetroAnalysis(
+  candidates: PlayingRetroAudioReviewCandidate[],
+  durationMs: number,
+): AudioReviewMarker[] {
+  return dedupePlayingRetroSameLabelMarkers(candidates
+    .map((candidate, index) => markerFromPlayingRetroCandidate(candidate, index, durationMs))
+    .filter((marker): marker is AudioReviewMarker => marker !== null));
+}
+
+interface PlayingRetroPrimaryReviewSummary {
+  markerCount: number;
+  reviewCandidateCount: number;
+  reviewRacketCount: number;
+  reviewTableCount: number;
+  rawCandidateCount: number;
+  savedCandidateCount: number;
+  recoveryCandidateCount: number;
+  visibleRecoveryCandidateCount: number;
+  rawRacketCount: number;
+  rawTableCount: number;
+  rawNonTargetCount: number;
+  hiddenTargetCount: number;
+}
+
+function summarizePlayingRetroPrimaryReview(
+  analysis: PlayingRetroAudioAnalysisResult,
+  markerCount: number,
+): PlayingRetroPrimaryReviewSummary {
+  const reviewCandidates = analysis.candidates.filter(candidate => candidate.review_relevant);
+  const reviewRacketCount = reviewCandidates.filter(candidate => (
+    candidate.playing_retro_prediction.label === 'racket_contact'
+  )).length;
+  const reviewTableCount = reviewCandidates.filter(candidate => (
+    candidate.playing_retro_prediction.label === 'table_bounce'
+  )).length;
+  const rawRacketCount = analysis.candidates.filter(candidate => (
+    candidate.playing_retro_prediction.label === 'racket_contact'
+  )).length;
+  const rawTableCount = analysis.candidates.filter(candidate => (
+    candidate.playing_retro_prediction.label === 'table_bounce'
+  )).length;
+  const rawTargetCount = rawRacketCount + rawTableCount;
+  const reviewTargetCount = reviewRacketCount + reviewTableCount;
+  return {
+    markerCount,
+    reviewCandidateCount: reviewCandidates.length,
+    reviewRacketCount,
+    reviewTableCount,
+    rawCandidateCount: analysis.candidates.length,
+    savedCandidateCount: analysis.saved_candidate_count,
+    recoveryCandidateCount: analysis.recovery_candidate_count,
+    visibleRecoveryCandidateCount: analysis.visible_recovery_candidate_count,
+    rawRacketCount,
+    rawTableCount,
+    rawNonTargetCount: Math.max(0, analysis.candidates.length - rawTargetCount),
+    hiddenTargetCount: Math.max(0, rawTargetCount - reviewTargetCount),
+  };
+}
+
+function playingRetroPrimaryStatusText(summary: PlayingRetroPrimaryReviewSummary): string {
+  const mismatchText = summary.markerCount !== summary.reviewCandidateCount
+    ? `, ${summary.reviewCandidateCount} reviewkandidater`
+    : '';
+  const recoveryText = summary.recoveryCandidateCount > 0
+    ? `, recovery ${summary.visibleRecoveryCandidateCount}/${summary.recoveryCandidateCount} visas`
+    : '';
+  const hiddenTargetText = summary.hiddenTargetCount > 0
+    ? `, ${summary.hiddenTargetCount} target filtrerade`
+    : '';
+  return [
+    `Spel-retro aktiv: ${summary.markerCount} markers att granska (${summary.reviewRacketCount} racket, ${summary.reviewTableCount} bord${mismatchText}).`,
+    `Rådata: ${summary.rawCandidateCount} kandidater (${summary.rawRacketCount} racket, ${summary.rawTableCount} bord, ${summary.rawNonTargetCount} ej target), ${summary.savedCandidateCount} sparade${recoveryText}${hiddenTargetText}.`,
+  ].join(' ');
+}
+
 function applyReviewLabelChoice(marker: AudioReviewMarker, choice: ReviewLabelChoice): AudioReviewMarker {
   const wasSuggested = (
     marker.suggested_label === choice.final_label &&
     marker.final_label === choice.final_label &&
-    marker.class_label === choice.class_label
+    marker.class_label === choice.class_label &&
+    marker.motion_label === choice.motion_label
   );
   return {
     ...marker,
     final_label: choice.final_label,
     event_type: choice.event_type,
     class_label: choice.class_label,
+    motion_label: choice.motion_label,
     contact_kind: choice.contact_kind,
     not_racket_kind: choice.not_racket_kind,
     bounce_side: choice.bounce_side,
-    review_status: choice.final_label === 'ignore'
+    review_status: choice.event_type === 'motion'
+      ? (wasSuggested ? 'confirmed' : 'edited')
+      : choice.final_label === 'ignore'
       ? 'ignored'
       : wasSuggested
         ? 'confirmed'
@@ -473,6 +905,271 @@ function sortMarkers(markers: AudioReviewMarker[]) {
 
 function clampTimestamp(timestampMs: number, durationMs: number) {
   return Math.max(0, Math.min(durationMs, Math.round(timestampMs)));
+}
+
+function createAudioVideoPoseMotionMarker(
+  timestampMs: number,
+  durationMs: number,
+  motionLabel: 'forehand' | 'backhand' | 'unknown' = 'unknown',
+  candidate?: VideoPoseCandidate,
+): AudioReviewMarker {
+  return {
+    id: candidate?.id ? `pose_marker_${candidate.id}` : `manual_motion_${Date.now()}_${Math.round(timestampMs)}`,
+    timestamp_ms: clampTimestamp(timestampMs, durationMs),
+    source: candidate ? 'auto' : 'manual',
+    linked_pose_candidate_id: candidate?.id,
+    source_audio_marker_id: candidate?.source_audio_marker_id,
+    suggested_label: 'ignore',
+    final_label: 'ignore',
+    event_type: 'motion',
+    class_label: motionLabel === 'unknown' ? 'ignore' : motionLabel,
+    motion_label: motionLabel,
+    motion_confidence: candidate?.confidence,
+    review_status: candidate ? 'pending' : 'pending',
+  };
+}
+
+function splitAudioVideoPoseMarkers(markers: AudioReviewMarker[], durationMs: number): AudioReviewMarker[] {
+  const splitMarkers: AudioReviewMarker[] = [];
+  for (const marker of markers) {
+    const motionLabel = hasConcreteMotionLabel(marker.motion_label) ? marker.motion_label : undefined;
+    const hasAudioLayer = marker.final_label !== 'ignore' || marker.event_type !== 'motion';
+    const hasMotionLayer = Boolean(motionLabel || marker.linked_pose_candidate_id);
+    if (hasAudioLayer && hasMotionLayer) {
+      const audioMarker: AudioReviewMarker = {
+        ...marker,
+        id: marker.id,
+        linked_pose_candidate_id: undefined,
+        source_audio_marker_id: undefined,
+        motion_label: undefined,
+        motion_confidence: undefined,
+        class_label: marker.final_label === 'racket_contact'
+          ? 'racket_bounce'
+          : marker.class_label,
+        bounce_side: marker.final_label === 'racket_contact' ? 'unknown' : marker.bounce_side,
+      };
+      const motionMarker: AudioReviewMarker = {
+        id: `${marker.id}_motion`,
+        timestamp_ms: clampTimestamp(marker.timestamp_ms, durationMs),
+        source: marker.source,
+        linked_pose_candidate_id: marker.linked_pose_candidate_id,
+        source_audio_marker_id: marker.source_audio_marker_id,
+        suggested_label: 'ignore',
+        final_label: 'ignore',
+        event_type: 'motion',
+        class_label: motionLabel ?? 'ignore',
+        motion_label: motionLabel ?? 'unknown',
+        motion_confidence: marker.motion_confidence,
+        review_status: marker.review_status ?? 'pending',
+      };
+      splitMarkers.push(audioMarker, motionMarker);
+    } else {
+      splitMarkers.push(marker);
+    }
+  }
+  return sortMarkers(splitMarkers);
+}
+
+function normalizeAudioVideoPoseMarkerForSave(marker: AudioReviewMarker): AudioReviewMarker {
+  if (isMotionLayerMarker(marker)) {
+    return {
+      id: marker.id,
+      timestamp_ms: marker.timestamp_ms,
+      source: marker.source,
+      linked_pose_candidate_id: marker.linked_pose_candidate_id,
+      source_audio_marker_id: marker.source_audio_marker_id,
+      suggested_label: 'ignore',
+      final_label: 'ignore',
+      event_type: 'motion',
+      class_label: hasConcreteMotionLabel(marker.motion_label) ? marker.motion_label : 'ignore',
+      motion_label: marker.motion_label ?? 'unknown',
+      motion_confidence: marker.motion_confidence,
+      review_status: marker.review_status,
+    };
+  }
+  return {
+    ...marker,
+    linked_pose_candidate_id: undefined,
+    source_audio_marker_id: undefined,
+    motion_label: undefined,
+    motion_confidence: undefined,
+    class_label: marker.final_label === 'racket_contact' ? 'racket_bounce' : marker.class_label,
+    bounce_side: marker.final_label === 'racket_contact' ? 'unknown' : marker.bounce_side,
+  };
+}
+
+function shouldDropLowConfidenceAudioVideoPoseMarker(
+  marker: AudioReviewMarker,
+  minConfidence: number,
+): boolean {
+  const status = marker.review_status ?? 'pending';
+  return (
+    isAudioLayerMarker(marker) &&
+    marker.source === 'auto' &&
+    status === 'pending' &&
+    marker.final_label === 'racket_contact' &&
+    (marker.contact_confidence ?? 0) < minConfidence
+  );
+}
+
+function passesPoseMotionGate(featureResult: ReturnType<typeof buildVideoStrokeFeatures>): boolean {
+  if (!featureResult) return false;
+  const features = featureResult.features;
+  const wristTravel = Math.hypot(features.wrist_x_ptp, features.wrist_y_ptp);
+  const elbowTravel = Math.hypot(features.elbow_x_ptp, features.elbow_y_ptp);
+  const lateralTravel = Math.max(Math.abs(features.wrist_x_delta), features.wrist_x_ptp);
+  return (
+    featureResult.frame_count >= VIDEO_POSE_MIN_FRAME_COUNT &&
+    featureResult.avg_visibility >= VIDEO_POSE_MIN_AVG_VISIBILITY &&
+    features.wrist_speed_max >= VIDEO_POSE_MIN_WRIST_SPEED &&
+    wristTravel >= VIDEO_POSE_MIN_WRIST_TRAVEL &&
+    lateralTravel >= VIDEO_POSE_MIN_LATERAL_TRAVEL &&
+    elbowTravel >= VIDEO_POSE_MIN_ELBOW_TRAVEL
+  );
+}
+
+function hasUsableAnchoredPoseWindow(featureResult: ReturnType<typeof buildVideoStrokeFeatures>): boolean {
+  return Boolean(
+    featureResult &&
+    featureResult.frame_count >= VIDEO_POSE_MIN_FRAME_COUNT &&
+    featureResult.avg_visibility >= VIDEO_POSE_MIN_AVG_VISIBILITY,
+  );
+}
+
+async function buildVideoPoseCandidatesForReview(
+  videoFilePath: string,
+  durationMs: number,
+  handedness: 'right' | 'left',
+  anchors?: Array<{ id: string; timestamp_ms: number }>,
+): Promise<VideoPoseCandidate[]> {
+  if (!hasTrainedVideoStrokeModel()) {
+    return [];
+  }
+
+  const pose = await VideoPose.extractPose(videoFilePath, VIDEO_POSE_SAMPLE_FPS);
+  const scanDurationMs = Math.max(0, pose.duration_ms || durationMs);
+  // Spelaren i videon kan ha annan hänthet än profilen (importerad video av
+  // t.ex. Tomas). Racketarmen detekteras ur rörelsen - fel hand ger fel arm
+  // + spegelvänd x-axel och systematiskt fel FH/BH.
+  const playerHandedness = detectRacketHandedness(pose.frames, handedness).handedness;
+  if (anchors?.length) {
+    return anchors.map(anchor => {
+      const timestampMs = clampTimestamp(anchor.timestamp_ms, scanDurationMs || durationMs);
+      const baseCandidate = {
+        id: `pose_for_${anchor.id}`,
+        timestamp_ms: timestampMs,
+        source_audio_marker_id: anchor.id,
+        probabilities: {},
+        model_version: videoStrokeModelVersion(),
+        feature_spec: VIDEO_STROKE_FEATURE_SPEC,
+        wrist_speed_max: 0,
+        review_relevant: false,
+      } satisfies Omit<VideoPoseCandidate, 'predicted_stroke_type' | 'confidence' | 'status'>;
+      const featureResult = buildVideoStrokeFeatures(pose.frames, timestampMs, playerHandedness);
+      if (!featureResult || !hasUsableAnchoredPoseWindow(featureResult)) {
+        return {
+          ...baseCandidate,
+          predicted_stroke_type: 'uncertain',
+          confidence: 0,
+          status: 'insufficient_pose',
+        };
+      }
+      const prediction = predictVideoStroke(featureResult.features);
+      const wristSpeed = featureResult.features.wrist_speed_max;
+      if (
+        prediction.status !== 'ok' ||
+        (prediction.label !== 'forehand' && prediction.label !== 'backhand') ||
+        prediction.confidence < VIDEO_POSE_MIN_CONFIDENCE
+      ) {
+        return {
+          ...baseCandidate,
+          predicted_stroke_type: 'uncertain',
+          confidence: prediction.confidence ?? 0,
+          probabilities: prediction.probabilities ?? {},
+          model_version: prediction.model_version ?? videoStrokeModelVersion(),
+          status: prediction.status === 'ok' ? 'uncertain' : prediction.status,
+          wrist_speed_max: wristSpeed,
+          review_relevant: false,
+        };
+      }
+      return {
+        ...baseCandidate,
+        predicted_stroke_type: prediction.label,
+        confidence: prediction.confidence,
+        probabilities: prediction.probabilities,
+        model_version: prediction.model_version,
+        status: 'ok',
+        wrist_speed_max: wristSpeed,
+        review_relevant: true,
+      };
+    });
+  }
+
+  const candidates: Array<VideoPoseCandidate & { score: number }> = [];
+  for (
+    let timestampMs = 700;
+    timestampMs <= Math.max(700, scanDurationMs - 500);
+    timestampMs += VIDEO_POSE_SCAN_STEP_MS
+  ) {
+    const featureResult = buildVideoStrokeFeatures(pose.frames, timestampMs, playerHandedness);
+    if (!featureResult) continue;
+    if (!passesPoseMotionGate(featureResult)) continue;
+    const prediction = predictVideoStroke(featureResult.features);
+    if (prediction.status !== 'ok' || (prediction.label !== 'forehand' && prediction.label !== 'backhand')) continue;
+    const wristSpeed = featureResult.features.wrist_speed_max;
+    if (prediction.confidence < VIDEO_POSE_MIN_CONFIDENCE) continue;
+    candidates.push({
+      id: `pose_${Math.round(timestampMs)}`,
+      timestamp_ms: Math.round(timestampMs),
+      predicted_stroke_type: prediction.label,
+      confidence: prediction.confidence,
+      probabilities: prediction.probabilities,
+      model_version: prediction.model_version,
+      feature_spec: VIDEO_STROKE_FEATURE_SPEC,
+      status: 'ok',
+      wrist_speed_max: wristSpeed,
+      review_relevant: true,
+      score: prediction.confidence + Math.min(1, wristSpeed / 16) * 0.15,
+    });
+  }
+
+  const picked: Array<VideoPoseCandidate & { score: number }> = [];
+  for (const candidate of candidates.sort((left, right) => right.score - left.score)) {
+    if (picked.every(existing => Math.abs(existing.timestamp_ms - candidate.timestamp_ms) >= VIDEO_POSE_MIN_GAP_MS)) {
+      picked.push(candidate);
+    }
+  }
+  return picked
+    .sort((left, right) => left.timestamp_ms - right.timestamp_ms)
+    .map(({ score: _score, ...candidate }) => candidate);
+}
+
+function addPoseCandidatesAsMotionMarkers(
+  audioMarkers: AudioReviewMarker[],
+  poseCandidates: VideoPoseCandidate[],
+  durationMs: number,
+): AudioReviewMarker[] {
+  const nextMarkers = audioMarkers.map(marker => ({ ...marker }));
+  const linkedPoseIds = new Set(nextMarkers
+    .map(marker => marker.linked_pose_candidate_id)
+    .filter((candidateId): candidateId is string => Boolean(candidateId)));
+
+  for (const candidate of poseCandidates) {
+    if (linkedPoseIds.has(candidate.id)) continue;
+    if (!isConcretePoseStrokeCandidate(candidate)) continue;
+    const motionLabel = candidate.predicted_stroke_type === 'forehand' || candidate.predicted_stroke_type === 'backhand'
+      ? candidate.predicted_stroke_type
+      : 'unknown';
+    nextMarkers.push(createAudioVideoPoseMotionMarker(
+      candidate.timestamp_ms,
+      durationMs,
+      motionLabel,
+      candidate,
+    ));
+    linkedPoseIds.add(candidate.id);
+  }
+
+  return sortMarkers(nextMarkers);
 }
 
 function formatMs(ms: number) {
@@ -644,6 +1341,17 @@ function offsetFromVideoSyncAnchor(
   return Math.round(selectedVideoMs - baseVideoMsForAudio(event, audioMs, audioDurationMs));
 }
 
+function syncPointFromAudioMs(timestampMs: number, durationMs: number, confidence = 1): AudioSyncPoint {
+  const clampedTimestampMs = clampTimestamp(timestampMs, durationMs);
+  return {
+    timestamp_ms: clampedTimestampMs,
+    score: 0,
+    confidence,
+    window_start_ms: Math.max(0, clampedTimestampMs - 80),
+    window_end_ms: Math.min(durationMs, clampedTimestampMs + 80),
+  };
+}
+
 interface ImuLinePlotProps {
   samples: ImuSample[];
   keys: Array<{ key: ImuSeriesKey; axis: 'x' | 'y' | 'z'; color: string }>;
@@ -762,7 +1470,13 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const playheadLongPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const playheadLongPressStartPageXRef = useRef(0);
   const playheadLongPressHandledRef = useRef(false);
-  const createMarkerFromPlayheadRef = useRef<() => void>(() => {});
+  const createMarkerFromPlayheadRef = useRef<(layer?: ReviewTimelineLayer) => void>(() => {});
+  const videoPoseScanInFlightRef = useRef(false);
+  const videoPoseScanCompletedRef = useRef((event.video_pose_candidates?.length ?? 0) > 0);
+  const videoPoseAutoMarkersSeededRef = useRef(false);
+  const videoPoseDeferredForAudioRef = useRef(false);
+  const playingRetroPrimaryAppliedRef = useRef(false);
+  const reviewStartProfileRef = useRef<ReviewStartProfile | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -770,9 +1484,18 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const [overviewBins, setOverviewBins] = useState<number[]>([]);
   const [markers, setMarkers] = useState<AudioReviewMarker[]>(event.review?.markers ?? []);
   const [modelCandidates, setModelCandidates] = useState<AudioModelCandidate[]>(event.model_candidates ?? []);
+  const [videoPoseCandidates, setVideoPoseCandidates] = useState<VideoPoseCandidate[]>(event.video_pose_candidates ?? []);
   const [playingRetroAnalysis, setPlayingRetroAnalysis] = useState<PlayingRetroAudioAnalysisResult | null>(null);
   const [playingRetroRunning, setPlayingRetroRunning] = useState(false);
   const [playingRetroStatus, setPlayingRetroStatus] = useState<string | null>(null);
+  const [reviewStartProfileText, setReviewStartProfileText] = useState<string | null>(null);
+  const [poseAnalysisStatus, setPoseAnalysisStatus] = useState<string | null>(null);
+  const [poseAnalysisRunning, setPoseAnalysisRunning] = useState(false);
+  const [audioVideoReviewStage, setAudioVideoReviewStage] = useState<AudioVideoReviewStage>(() => (
+    event.collection_type === 'audio_video_pose' && event.review?.audio_completed_at && !event.review?.completed_at
+      ? 'motion'
+      : 'audio'
+  ));
   const [detectionConfigSnapshot, setDetectionConfigSnapshot] = useState<AudioDetectionConfigSnapshot>(
     event.detection_config_snapshot ?? getDefaultAudioDetectionConfigSnapshot(),
   );
@@ -784,6 +1507,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const [videoSyncOffsetMs, setVideoSyncOffsetMs] = useState(event.video_recording?.video_sync_offset_ms ?? 0);
   const [audioSyncPoint, setAudioSyncPoint] = useState<AudioSyncPoint | null>(null);
   const [syncCandidateVideoMs, setSyncCandidateVideoMs] = useState<number | null>(null);
+  const [videoSyncSource, setVideoSyncSource] = useState<AudioVideoSyncSource>(
+    event.video_recording?.video_sync_source ?? 'auto_peak',
+  );
   const [syncCalibrationActive, setSyncCalibrationActive] = useState(false);
   const [videoSyncExpanded, setVideoSyncExpanded] = useState(!event.video_recording?.video_sync_offset_ms);
   const [videoReady, setVideoReady] = useState(false);
@@ -826,7 +1552,19 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
       })
       .map(marker => marker.linked_candidate_id as string),
   ), [allOrderedMarkers]);
+  const visiblePoseCandidateIds = useMemo(() => new Set(
+    allOrderedMarkers
+      .filter(marker => {
+        const status = marker.review_status ?? 'pending';
+        return status !== 'deleted' && status !== 'filtered' && marker.linked_pose_candidate_id;
+      })
+      .map(marker => marker.linked_pose_candidate_id as string),
+  ), [allOrderedMarkers]);
+  const isAudioVideoPoseReview = event.recording_mode === 'audio_video_pose' || event.collection_type === 'audio_video_pose';
+  const isAudioVideoPoseAudioStage = isAudioVideoPoseReview && audioVideoReviewStage === 'audio';
+  const isAudioVideoPoseMotionStage = isAudioVideoPoseReview && audioVideoReviewStage === 'motion';
   const isPlayingReview = event.scenario === 'playing' || event.scenario_id === 'free_recording';
+  const usesPlayingRetroPrimaryReview = isPlayingReview && isAudioVideoPoseAudioStage;
   const isRacketBouncingReview = (
     event.scenario === 'racket_bouncing' ||
     event.scenario_id === 'racket_motion_no_bounce' ||
@@ -834,12 +1572,44 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   );
   const allowsMarkerlessNoBounceSave = event.scenario_id === 'racket_motion_no_bounce';
   const isAudioOnlyReview = event.scenario === 'audio_sound' || event.recording_mode === 'guided_audio_only' || event.recording_mode === 'imported_audio';
+  const startReviewStartProfile = useCallback((phase: string, detail?: string) => {
+    const startedAtMs = Date.now();
+    const key = `${event.scenario_id || event.scenario || 'audio'}:${event.take_index ?? 0}:${event.recorded_at ?? event.created_at ?? filePath}`;
+    const firstEntry: ReviewStartProfileEntry = {
+      phase,
+      elapsedMs: 0,
+      detail,
+    };
+    reviewStartProfileRef.current = {
+      key,
+      startedAtMs,
+      entries: [firstEntry],
+    };
+    setReviewStartProfileText(reviewStartProfileSummary([firstEntry]));
+    console.log(`${REVIEW_START_PROFILE_LOG_PREFIX} ${key} +0ms ${phase}${detail ? ` | ${detail}` : ''}`);
+  }, [event.created_at, event.recorded_at, event.scenario, event.scenario_id, event.take_index, filePath]);
+  const markReviewStartProfile = useCallback((phase: string, detail?: string, durationMs?: number) => {
+    const profile = reviewStartProfileRef.current;
+    if (!profile) return;
+    const elapsedMs = Date.now() - profile.startedAtMs;
+    const entry: ReviewStartProfileEntry = {
+      phase,
+      elapsedMs,
+      durationMs,
+      detail,
+    };
+    profile.entries.push(entry);
+    setReviewStartProfileText(reviewStartProfileSummary(profile.entries));
+    const durationText = typeof durationMs === 'number' ? ` duration=${durationMs}ms` : '';
+    console.log(`${REVIEW_START_PROFILE_LOG_PREFIX} ${profile.key} +${elapsedMs}ms ${phase}${durationText}${detail ? ` | ${detail}` : ''}`);
+  }, []);
   const quickLabelChoices = useMemo(() => {
+    if (isAudioVideoPoseReview) return AUDIO_VIDEO_POSE_REVIEW_LABEL_CHOICES;
     if (isPlayingReview) return PLAYING_REVIEW_LABEL_CHOICES;
     if (isRacketBouncingReview) return RACKET_BOUNCING_REVIEW_LABEL_CHOICES;
     if (isAudioOnlyReview) return BASE_REVIEW_LABEL_CHOICES;
     return [];
-  }, [isAudioOnlyReview, isPlayingReview, isRacketBouncingReview]);
+  }, [isAudioOnlyReview, isAudioVideoPoseReview, isPlayingReview, isRacketBouncingReview]);
   const supportsQuickLabels = quickLabelChoices.length > 0;
   const handleDetectionConfigChange = useCallback((
     nextSensitivity: AudioDetectionSensitivity,
@@ -848,9 +1618,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     const nextConfig = getAudioDetectionConfig(nextSensitivity, nextDetectionMode);
     const decoded = decodedRef.current;
     setDetectionConfigSnapshot(nextConfig);
-    setQuickLabelPrompt(null);
     setPlayingRetroAnalysis(null);
     setPlayingRetroStatus(null);
+    setQuickLabelPrompt(null);
 
     if (!decoded) {
       setModelCandidates([]);
@@ -862,8 +1632,14 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
       decoded.sampleRate,
       event.scenario_id,
       nextConfig,
+      isAudioVideoPoseReview
+        ? { min_contact_confidence: audioVideoPoseReviewConfidence(nextConfig) }
+        : undefined,
     );
-    const preservedMarkers = markers.filter(shouldPreserveMarkerWhenConfigChanges);
+    const preservedMarkers = markers.filter(marker => (
+      shouldPreserveMarkerWhenConfigChanges(marker) ||
+      (isAudioVideoPoseReview && isMotionLayerMarker(marker))
+    ));
     const preservedCandidateIds = new Set(
       preservedMarkers
         .map(marker => marker.linked_candidate_id)
@@ -885,13 +1661,42 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     setSelectedMarkerId(previousSelectedId => (
       previousSelectedId && mergedMarkers.some(marker => marker.id === previousSelectedId)
         ? previousSelectedId
-        : mergedMarkers[0]?.id ?? null
+      : mergedMarkers[0]?.id ?? null
     ));
-  }, [event.scenario_id, markers, modelCandidates]);
+  }, [event.scenario_id, isAudioVideoPoseReview, markers, modelCandidates]);
+  const handleShowModelInfo = useCallback(() => {
+    if (usesPlayingRetroPrimaryReview) {
+      Alert.alert(
+        'Spel-retro audio',
+        [
+          'Denna ljudreview anvander spel-retro som primar klassare for de ljudkandidater appen redan hittat.',
+          'Retro skapar vanliga editbara reviewforslag: rackettraff, bordsstuds eller dolda ej-target-kandidater.',
+          'T0014 skannar dessutom efter extra tata peaks som saknas bland sparade kandidater och visar bara starka racket/bord-recoveryforslag.',
+          'Bla ram betyder att markern ar lankad mellan ljud- och rorelselagret. Det ar inte en raderad marker.',
+          'T0020 tar bort tata dubletter av samma ljudtyp inom 80 ms, men behaller tata racket+bord-par.',
+          'Studsdetektor och vanlig upp/ner-studs ar oforandrade.',
+        ].join('\n\n'),
+      );
+      return;
+    }
+    const contactThreshold = Math.round(audioVideoPoseReviewConfidence(detectionConfigSnapshot) * 100);
+    const configContactThreshold = Math.round(detectionConfigSnapshot.contact_confidence_min * 100);
+    const surfaceThreshold = Math.round(detectionConfigSnapshot.surface_veto_confidence * 100);
+    Alert.alert(
+      detectionConfigTitle(detectionConfigSnapshot),
+      [
+        `Normal styr hur aggressivt appen skapar ljudkandidater. Den här konfigurationen har rackettröskel ${configContactThreshold}% och merge-window ${detectionConfigSnapshot.merge_window_ms} ms.`,
+        '4-klass betyder att varje ljudpeak klassas som racket, bord, golv eller brus/noise.',
+        `I Ljud + video ML blir auto-racket bara review-markers om de är minst ${contactThreshold}%.`,
+        `Bord/golv/noise visas som ytförslag när 4-klassmodellen är tydlig nog. Surface-veto i denna config är ${surfaceThreshold}%.`,
+        'Auto-förslag är bara förslag tills du bekräftar, ändrar, ignorerar eller tar bort dem.',
+      ].join('\n\n'),
+    );
+  }, [detectionConfigSnapshot, usesPlayingRetroPrimaryReview]);
   const handleRunPlayingRetroAudio = useCallback(() => {
     const decoded = decodedRef.current;
     if (!decoded) {
-      Alert.alert('Spel-retro audio', 'Waveform \u00e4r inte laddad \u00e4n.');
+      Alert.alert('Spel-retro audio', 'Waveform Ã¤r inte laddad Ã¤n.');
       return;
     }
     if (modelCandidates.length === 0) {
@@ -908,13 +1713,17 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
           decoded.sampleRate,
           modelCandidates,
         );
-        const racket = analysis.candidates.filter(candidate => candidate.playing_retro_prediction.label === 'racket_contact').length;
-        const table = analysis.candidates.filter(candidate => candidate.playing_retro_prediction.label === 'table_bounce').length;
+        const racket = analysis.candidates.filter(candidate => (
+          candidate.playing_retro_prediction.label === 'racket_contact'
+        )).length;
+        const table = analysis.candidates.filter(candidate => (
+          candidate.playing_retro_prediction.label === 'table_bounce'
+        )).length;
         const nonTarget = analysis.candidates.length - racket - table;
         setPlayingRetroAnalysis(analysis);
         setPlayingRetroStatus(`Klart: ${racket} racket, ${table} bord, ${nonTarget} ej target.`);
       } catch (error) {
-        setPlayingRetroStatus('Kunde inte k\u00f6ra spel-retro.');
+        setPlayingRetroStatus('Kunde inte kÃ¶ra spel-retro.');
         Alert.alert('Spel-retro audio', String(error));
       } finally {
         setPlayingRetroRunning(false);
@@ -945,12 +1754,12 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
       const status = marker.review_status ?? 'pending';
       return status !== 'deleted' && status !== 'filtered';
     });
-    if (!isPlayingReview) return nonDeletedMarkers;
+    if (!isPlayingReview || isAudioVideoPoseReview) return nonDeletedMarkers;
     return nonDeletedMarkers.filter(marker => markerPassesPlayingFilter(
       marker,
       activePlayingConfidenceFilter.minConfidence,
     ));
-  }, [activePlayingConfidenceFilter.minConfidence, allOrderedMarkers, isPlayingReview]);
+  }, [activePlayingConfidenceFilter.minConfidence, allOrderedMarkers, isAudioVideoPoseReview, isPlayingReview]);
   const playingAutoMarkerStats = useMemo(() => {
     const autoMarkers = allOrderedMarkers.filter(marker => (
       marker.source === 'auto' &&
@@ -970,17 +1779,66 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     () => orderedMarkers.find(marker => marker.id === selectedMarkerId) ?? null,
     [orderedMarkers, selectedMarkerId],
   );
+  const audioTimelineMarkers = useMemo(
+    () => orderedMarkers.filter(isAudioLayerMarker),
+    [orderedMarkers],
+  );
+  const motionTimelineMarkers = useMemo(
+    () => orderedMarkers.filter(isMotionLayerMarker),
+    [orderedMarkers],
+  );
+  const activeStageMarkers = useMemo(() => {
+    if (isAudioVideoPoseMotionStage) return motionTimelineMarkers;
+    if (isAudioVideoPoseAudioStage) return audioTimelineMarkers;
+    return orderedMarkers;
+  }, [
+    audioTimelineMarkers,
+    isAudioVideoPoseAudioStage,
+    isAudioVideoPoseMotionStage,
+    motionTimelineMarkers,
+    orderedMarkers,
+  ]);
+  const selectedMarkerLayer = selectedMarker ? markerLayer(selectedMarker) : null;
+  const selectedAudioMarker = selectedMarkerLayer === 'audio' && !isAudioVideoPoseMotionStage ? selectedMarker : null;
+  const selectedMotionMarker = selectedMarkerLayer === 'motion' && !isAudioVideoPoseAudioStage ? selectedMarker : null;
+  const linkedAudioMarkerIds = useMemo(() => {
+    const linkedIds = new Set<string>();
+    for (const audioMarker of audioTimelineMarkers) {
+      if (motionTimelineMarkers.some(motionMarker => (
+        Math.abs(motionMarker.timestamp_ms - audioMarker.timestamp_ms) <= VIDEO_POSE_AUDIO_MERGE_MS
+      ))) {
+        linkedIds.add(audioMarker.id);
+      }
+    }
+    return linkedIds;
+  }, [audioTimelineMarkers, motionTimelineMarkers]);
+  const linkedMotionMarkerIds = useMemo(() => {
+    const linkedIds = new Set<string>();
+    for (const motionMarker of motionTimelineMarkers) {
+      if (audioTimelineMarkers.some(audioMarker => (
+        Math.abs(audioMarker.timestamp_ms - motionMarker.timestamp_ms) <= VIDEO_POSE_AUDIO_MERGE_MS
+      ))) {
+        linkedIds.add(motionMarker.id);
+      }
+    }
+    return linkedIds;
+  }, [audioTimelineMarkers, motionTimelineMarkers]);
   const selectedMarkerIndex = useMemo(
     () => selectedMarker ? orderedMarkers.findIndex(marker => marker.id === selectedMarker.id) : -1,
     [orderedMarkers, selectedMarker],
   );
+  const selectedStageMarkerIndex = useMemo(
+    () => selectedMarker ? activeStageMarkers.findIndex(marker => marker.id === selectedMarker.id) : -1,
+    [activeStageMarkers, selectedMarker],
+  );
   const reviewLabelChoices = useMemo(
     () => {
+      if (isAudioVideoPoseReview) return AUDIO_VIDEO_POSE_REVIEW_LABEL_CHOICES;
       if (isPlayingReview) return PLAYING_REVIEW_LABEL_CHOICES;
       if (isRacketBouncingReview) return RACKET_BOUNCING_REVIEW_LABEL_CHOICES;
       return BASE_REVIEW_LABEL_CHOICES;
     },
-    [isPlayingReview, isRacketBouncingReview],
+    [isAudioVideoPoseReview, isPlayingReview, isRacketBouncingReview],
   );
 
   const detailFocusMs = playbackMode === 'playing_full_take'
@@ -1214,6 +2072,33 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     videoRef.current?.seek(clampedVideoMs / 1000);
   }, [event.video_recording]);
 
+  const setAudioSyncHere = useCallback(() => {
+    if (!event.video_recording) return;
+    stopForScrubIfNeeded();
+    stopTimelineEdgeScroll();
+    const syncAudioMs = clampTimestamp(playbackPositionRef.current, durationMs);
+    const nextSyncPoint = syncPointFromAudioMs(syncAudioMs, durationMs, 1);
+    const nextVideoMs = mapAudioPlayheadToVideoMs(event, syncAudioMs, durationMs, videoSyncOffsetMs);
+    setAudioSyncPoint(nextSyncPoint);
+    setVideoSyncSource('manual');
+    setVideoSyncExpanded(true);
+    setSyncCalibrationMode(true);
+    playbackPositionRef.current = syncAudioMs;
+    latestScrubMsRef.current = syncAudioMs;
+    setPlaybackPositionMs(syncAudioMs);
+    updateTimelineWindowForPlayhead(syncAudioMs);
+    seekVideoOnlyToMs(nextVideoMs);
+  }, [
+    durationMs,
+    event,
+    seekVideoOnlyToMs,
+    setSyncCalibrationMode,
+    stopForScrubIfNeeded,
+    stopTimelineEdgeScroll,
+    updateTimelineWindowForPlayhead,
+    videoSyncOffsetMs,
+  ]);
+
   const startSyncCalibration = useCallback(() => {
     if (!audioSyncPoint || !event.video_recording) return;
     stopForScrubIfNeeded();
@@ -1288,6 +2173,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     updateTimelineWindowForPlayhead(syncAudioMs);
     setSyncCalibrationMode(false);
     setManualVideoSyncOffset(nextOffsetMs);
+    setVideoSyncSource('manual');
     setVideoSyncExpanded(false);
   }, [
     audioSyncPoint,
@@ -1302,6 +2188,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const resetGuidedVideoSync = useCallback(() => {
     setSyncCalibrationMode(false);
     setManualVideoSyncOffset(0);
+    setVideoSyncSource('auto_peak');
     setVideoSyncExpanded(true);
     if (audioSyncPoint && event.video_recording) {
       const resetCandidateMs = mapAudioPlayheadToVideoMs(event, audioSyncPoint.timestamp_ms, durationMs, 0);
@@ -1315,12 +2202,27 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     setPlayheadMs(marker.timestamp_ms);
   }, [setPlayheadMs]);
 
+  const handleSelectPoseCandidate = useCallback((candidate: VideoPoseCandidate) => {
+    setQuickLabelPrompt(null);
+    const linkedMarker = orderedMarkers.find(marker => marker.linked_pose_candidate_id === candidate.id);
+    if (linkedMarker) {
+      handleSelectMarker(linkedMarker);
+      return;
+    }
+    setSelectedMarkerId(null);
+    setPlayheadMs(candidate.timestamp_ms);
+  }, [handleSelectMarker, orderedMarkers, setPlayheadMs]);
+
   const handleJumpToMarker = useCallback((direction: -1 | 1) => {
-    if (selectedMarkerIndex < 0) return;
-    const nextIndex = selectedMarkerIndex + direction;
-    if (nextIndex < 0 || nextIndex >= orderedMarkers.length) return;
-    handleSelectMarker(orderedMarkers[nextIndex]);
-  }, [handleSelectMarker, orderedMarkers, selectedMarkerIndex]);
+    if (activeStageMarkers.length === 0) return;
+    if (selectedStageMarkerIndex < 0) {
+      handleSelectMarker(direction > 0 ? activeStageMarkers[0] : activeStageMarkers[activeStageMarkers.length - 1]);
+      return;
+    }
+    const nextIndex = selectedStageMarkerIndex + direction;
+    if (nextIndex < 0 || nextIndex >= activeStageMarkers.length) return;
+    handleSelectMarker(activeStageMarkers[nextIndex]);
+  }, [activeStageMarkers, handleSelectMarker, selectedStageMarkerIndex]);
 
   const measureTimelineSurface = useCallback((onMeasured?: () => void) => {
     timelineSurfaceRef.current?.measureInWindow((pageX, _pageY, width) => {
@@ -1466,7 +2368,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     }
   }, []);
 
-  const startPlayheadLongPress = useCallback((pageX: number) => {
+  const startPlayheadLongPress = useCallback((pageX: number, layer: ReviewTimelineLayer = 'audio') => {
     clearPlayheadLongPress();
     playheadLongPressStartPageXRef.current = pageX;
     if (!supportsQuickLabels) return;
@@ -1474,11 +2376,11 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     playheadLongPressTimerRef.current = setTimeout(() => {
       playheadLongPressTimerRef.current = null;
       playheadLongPressHandledRef.current = true;
-      createMarkerFromPlayheadRef.current();
+      createMarkerFromPlayheadRef.current(layer);
     }, PLAYHEAD_LONG_PRESS_MS);
   }, [clearPlayheadLongPress, supportsQuickLabels]);
 
-  const overviewPlayheadResponder = useMemo(() => PanResponder.create({
+  const createTimelinePlayheadResponder = useCallback((layer: ReviewTimelineLayer) => PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: (_, gestureState) => (
       Math.abs(gestureState.dx) > TIMELINE_DRAG_THRESHOLD_PX ||
@@ -1486,7 +2388,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     ),
     onPanResponderGrant: eventData => {
       playheadLongPressHandledRef.current = false;
-      startPlayheadLongPress(eventData.nativeEvent.pageX);
+      startPlayheadLongPress(eventData.nativeEvent.pageX, layer);
       beginTimelineScrub(eventData.nativeEvent.pageX);
     },
     onPanResponderMove: eventData => {
@@ -1503,7 +2405,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
         timelineModeRef.current === 'scrubbing' &&
         !playheadLongPressHandledRef.current
       ) {
-        startPlayheadLongPress(pageX);
+        startPlayheadLongPress(pageX, layer);
       }
     },
     onPanResponderRelease: () => {
@@ -1524,6 +2426,16 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     startPlayheadLongPress,
     updateTimelineEdgeScrollFromPageX,
   ]);
+
+  const overviewPlayheadResponder = useMemo(
+    () => createTimelinePlayheadResponder('audio'),
+    [createTimelinePlayheadResponder],
+  );
+
+  const motionPlayheadResponder = useMemo(
+    () => createTimelinePlayheadResponder('motion'),
+    [createTimelinePlayheadResponder],
+  );
 
   const overviewMarkerResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => Boolean(selectedMarker),
@@ -1588,6 +2500,13 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   }, [allOrderedMarkers, quickLabelPrompt]);
 
   useEffect(() => {
+    playingRetroPrimaryAppliedRef.current = false;
+    videoPoseDeferredForAudioRef.current = false;
+    setPlayingRetroAnalysis(null);
+    setPlayingRetroStatus(null);
+  }, [event.recorded_at, event.take_index, filePath]);
+
+  useEffect(() => {
     if (orderedMarkers.length === 0) {
       setSelectedMarkerId(null);
       return;
@@ -1596,6 +2515,21 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
       setSelectedMarkerId(orderedMarkers[0].id);
     }
   }, [orderedMarkers, selectedMarkerId]);
+
+  useEffect(() => {
+    if (!isAudioVideoPoseReview) return;
+    const stageMarkers = audioVideoReviewStage === 'motion'
+      ? motionTimelineMarkers
+      : audioTimelineMarkers;
+    if (selectedMarkerId && stageMarkers.some(marker => marker.id === selectedMarkerId)) return;
+    setSelectedMarkerId(stageMarkers[0]?.id ?? null);
+  }, [
+    audioTimelineMarkers,
+    audioVideoReviewStage,
+    isAudioVideoPoseReview,
+    motionTimelineMarkers,
+    selectedMarkerId,
+  ]);
 
   useEffect(() => {
     if (!hasVideo || !videoRef.current) return;
@@ -1611,34 +2545,129 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
 
   useEffect(() => {
     let cancelled = false;
+    if (usesPlayingRetroPrimaryReview) {
+      startReviewStartProfile('load_start', `savedCandidates=${event.model_candidates?.length ?? 0}`);
+    } else {
+      reviewStartProfileRef.current = null;
+      setReviewStartProfileText(null);
+    }
     setLoading(true);
 
     decodeWavFile(filePath)
-      .then(decoded => {
+      .then(async decoded => {
         if (cancelled) return;
+        markReviewStartProfile(
+          'wav_decoded',
+          `duration=${Math.round(decoded.durationMs)}ms samples=${decoded.samples.length}`,
+        );
         decodedRef.current = { sampleRate: decoded.sampleRate, samples: decoded.samples };
         setDurationMs(decoded.durationMs);
-        setOverviewBins(buildWaveformBins(decoded.samples, overviewBinCount));
-        const syncPoint = detectAudioSyncPoint(decoded.samples, decoded.sampleRate);
+        const waveformStartedAt = Date.now();
+        const nextOverviewBins = buildWaveformBins(decoded.samples, overviewBinCount);
+        markReviewStartProfile(
+          'waveform_bins_ready',
+          `bins=${nextOverviewBins.length}`,
+          Date.now() - waveformStartedAt,
+        );
+        setOverviewBins(nextOverviewBins);
+        const syncStartedAt = Date.now();
+        const detectedSyncPoint = detectAudioSyncPoint(decoded.samples, decoded.sampleRate);
+        markReviewStartProfile(
+          'audio_sync_checked',
+          detectedSyncPoint ? `sync=${Math.round(detectedSyncPoint.timestamp_ms)}ms` : 'sync=none',
+          Date.now() - syncStartedAt,
+        );
         const savedVideoSyncOffsetMs = event.video_recording?.video_sync_offset_ms ?? 0;
+        const savedSyncAnchorAudioMs = event.video_recording?.video_sync_anchor_audio_ms;
+        const savedSyncAnchorVideoMs = event.video_recording?.video_sync_anchor_video_ms;
+        const savedSyncSource = event.video_recording?.video_sync_source;
+        const syncPoint = typeof savedSyncAnchorAudioMs === 'number'
+          ? syncPointFromAudioMs(savedSyncAnchorAudioMs, decoded.durationMs, savedSyncSource === 'manual' ? 1 : 0.9)
+          : detectedSyncPoint;
         const savedDetectionConfig = event.detection_config_snapshot ?? getDefaultAudioDetectionConfigSnapshot();
 
-        const reviewData = event.review?.markers?.length
+        const hasCompletedReview = Boolean(event.review?.completed_at || event.review?.audio_completed_at);
+        const hasSavedReviewMarkers = Boolean(
+          event.review?.markers &&
+            (event.review.markers.length > 0 || hasCompletedReview),
+        );
+        const reviewDataStartedAt = Date.now();
+        const reviewData = hasSavedReviewMarkers
           ? null
-          : buildSuggestedReviewData(decoded.samples, decoded.sampleRate, event.scenario_id, savedDetectionConfig);
-        const nextMarkers = event.review?.markers?.length
-          ? sortMarkers(event.review.markers.map(marker => ({
-              ...marker,
-              review_status: marker.review_status ?? 'confirmed',
-            })))
+          : buildSuggestedReviewData(
+              decoded.samples,
+              decoded.sampleRate,
+              event.scenario_id,
+              savedDetectionConfig,
+              isAudioVideoPoseReview
+                ? { min_contact_confidence: audioVideoPoseReviewConfidence(savedDetectionConfig) }
+                : undefined,
+            );
+        markReviewStartProfile(
+          hasSavedReviewMarkers ? 'saved_review_loaded' : 'suggested_review_data_ready',
+          hasSavedReviewMarkers
+            ? `markers=${event.review?.markers?.length ?? 0}`
+            : `markers=${reviewData?.markers.length ?? 0} candidates=${reviewData?.model_candidates.length ?? 0}`,
+          Date.now() - reviewDataStartedAt,
+        );
+        const reviewedMarkers = event.review?.markers?.map(marker => ({
+          ...marker,
+          review_status: marker.review_status ?? 'confirmed',
+        }));
+        const seedOnlyPlayingRetroCandidates = usesPlayingRetroPrimaryReview && !hasSavedReviewMarkers;
+        let nextMarkers = hasSavedReviewMarkers
+          ? isAudioVideoPoseReview
+            ? splitAudioVideoPoseMarkers(reviewedMarkers ?? [], decoded.durationMs)
+            : sortMarkers(reviewedMarkers ?? [])
+          : isAudioVideoPoseMotionStage && markers.length > 0
+            ? sortMarkers(markers)
+          : seedOnlyPlayingRetroCandidates
+            ? []
           : reviewData?.markers ?? [];
+        if (isAudioVideoPoseReview) {
+          const minAudioConfidence = audioVideoPoseReviewConfidence(savedDetectionConfig);
+          nextMarkers = nextMarkers.filter(marker => !shouldDropLowConfidenceAudioVideoPoseMarker(marker, minAudioConfidence));
+        }
         const nextModelCandidates = event.model_candidates?.length
           ? event.model_candidates
           : reviewData?.model_candidates ?? modelCandidatesFromMarkers(nextMarkers, savedDetectionConfig);
-        setMarkers(nextMarkers);
-        setModelCandidates(nextModelCandidates);
+        const nextVideoPoseCandidates = event.video_pose_candidates ?? [];
+        if (isAudioVideoPoseReview && videoFilePath) {
+          if (!nextMarkers.some(isMotionLayerMarker) && nextVideoPoseCandidates.length > 0) {
+            nextMarkers = addPoseCandidatesAsMotionMarkers(
+              nextMarkers.filter(isAudioLayerMarker),
+              nextVideoPoseCandidates,
+              decoded.durationMs,
+            );
+            videoPoseAutoMarkersSeededRef.current = true;
+          }
+          if (nextVideoPoseCandidates.length > 0) {
+            setPoseAnalysisStatus(poseCandidateReviewStatusText(nextVideoPoseCandidates, false));
+          } else if (!hasTrainedVideoStrokeModel()) {
+            setPoseAnalysisStatus(`Ingen posemodell exporterad (${videoStrokeModelVersion()}).`);
+          } else {
+            setPoseAnalysisStatus(isAudioVideoPoseAudioStage
+              ? 'Förbereder rörelseanalys i bakgrunden på hela videon...'
+              : 'Kör rörelseanalys på hela videon...');
+          }
+        } else {
+          setPoseAnalysisStatus(null);
+        }
+        const preservePlayingRetroPrimaryMarkers = seedOnlyPlayingRetroCandidates && playingRetroPrimaryAppliedRef.current;
+        if (!preservePlayingRetroPrimaryMarkers) {
+          setMarkers(nextMarkers);
+          setModelCandidates(nextModelCandidates);
+        }
+        setVideoPoseCandidates(nextVideoPoseCandidates);
         setDetectionConfigSnapshot(reviewData?.detection_config_snapshot ?? savedDetectionConfig);
-        setSelectedMarkerId(nextMarkers[0]?.id ?? null);
+        const nextStageMarkers = isAudioVideoPoseMotionStage
+          ? nextMarkers.filter(isMotionLayerMarker)
+          : isAudioVideoPoseAudioStage
+            ? nextMarkers.filter(isAudioLayerMarker)
+            : nextMarkers;
+        if (!preservePlayingRetroPrimaryMarkers) {
+          setSelectedMarkerId(nextStageMarkers[0]?.id ?? null);
+        }
         playbackPositionRef.current = 0;
         latestAudioCallbackPositionMsRef.current = 0;
         latestAudioCallbackWallClockMsRef.current = 0;
@@ -1647,23 +2676,222 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
         setTimelineWindowStartMs(0);
         setVideoSyncOffsetMs(savedVideoSyncOffsetMs);
         setVideoSyncExpanded(!savedVideoSyncOffsetMs);
+        setVideoSyncSource(savedSyncSource ?? (typeof savedSyncAnchorAudioMs === 'number' ? 'manual' : 'auto_peak'));
         setAudioSyncPoint(syncPoint);
         setSyncCandidateVideoMs(syncPoint && event.video_recording
-          ? mapAudioPlayheadToVideoMs(event, syncPoint.timestamp_ms, decoded.durationMs, savedVideoSyncOffsetMs)
+          ? typeof savedSyncAnchorVideoMs === 'number'
+            ? clampTimestamp(savedSyncAnchorVideoMs, event.video_recording.duration_ms)
+            : mapAudioPlayheadToVideoMs(event, syncPoint.timestamp_ms, decoded.durationMs, savedVideoSyncOffsetMs)
           : null);
         setSyncCalibrationMode(false);
+        markReviewStartProfile(
+          'audio_state_seeded',
+          `markers=${nextMarkers.length} candidates=${nextModelCandidates.length} poseCandidates=${nextVideoPoseCandidates.length}`,
+        );
       })
       .catch(error => {
+        markReviewStartProfile('load_failed', String(error));
         Alert.alert('Granskningsfel', `Kunde inte läsa tagningen: ${String(error)}`);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          markReviewStartProfile('loading_finished');
+          setLoading(false);
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [event, event.model_candidates, event.review?.markers, event.scenario_id, filePath, overviewBinCount, setSyncCalibrationMode]);
+  }, [
+    event,
+    event.model_candidates,
+    event.player_handedness,
+    event.review?.markers,
+    event.scenario_id,
+    event.video_pose_candidates,
+    filePath,
+    isAudioVideoPoseAudioStage,
+    isAudioVideoPoseMotionStage,
+    isAudioVideoPoseReview,
+    markReviewStartProfile,
+    overviewBinCount,
+    setSyncCalibrationMode,
+    startReviewStartProfile,
+    usesPlayingRetroPrimaryReview,
+    videoFilePath,
+  ]);
+
+  useEffect(() => {
+    if (!usesPlayingRetroPrimaryReview || loading || playingRetroPrimaryAppliedRef.current) return;
+    const decoded = decodedRef.current;
+    if (!decoded) return;
+    if (modelCandidates.length === 0) {
+      setPlayingRetroStatus('Spel-retro: inga ljudkandidater att klassa.');
+      return;
+    }
+    if (shouldKeepExistingReviewMarkersForPlayingRetro(allOrderedMarkers.filter(isAudioLayerMarker))) {
+      setPlayingRetroStatus('Spel-retro: befintliga granskade ljudmarkers bevaras.');
+      return;
+    }
+
+    playingRetroPrimaryAppliedRef.current = true;
+    setPlayingRetroRunning(true);
+    setPlayingRetroStatus('Spel-retro klassar ljudkandidater...');
+    markReviewStartProfile('playing_retro_primary_start', `savedCandidates=${modelCandidates.length}`);
+    const timer = setTimeout(() => {
+      try {
+        markReviewStartProfile('playing_retro_timer_start');
+        const retroStartedAt = Date.now();
+        const analysis = analyzePlayingRetroAudioCandidates(
+          decoded.samples,
+          decoded.sampleRate,
+          modelCandidates,
+          {
+            recoverMissingCandidates: true,
+            blockedTimestampsMs: allOrderedMarkers.filter(isAudioLayerMarker).map(marker => marker.timestamp_ms),
+            onProfileEvent: (phase, detail, durationMs) => {
+              markReviewStartProfile(`playing_retro_${phase}`, detail, durationMs);
+            },
+          },
+        );
+        markReviewStartProfile(
+          'playing_retro_analysis_ready',
+          `raw=${analysis.candidate_count} saved=${analysis.saved_candidate_count} recovery=${analysis.recovery_candidate_count} visibleRecovery=${analysis.visible_recovery_candidate_count}`,
+          Date.now() - retroStartedAt,
+        );
+        const retroMarkers = markersFromPlayingRetroAnalysis(analysis.candidates, durationMs);
+        const motionMarkersToKeep = allOrderedMarkers.filter(isMotionLayerMarker);
+        const mergedMarkers = sortMarkers([...retroMarkers, ...motionMarkersToKeep]);
+        const primarySummary = summarizePlayingRetroPrimaryReview(analysis, retroMarkers.length);
+        setPlayingRetroAnalysis(analysis);
+        setPlayingRetroStatus(playingRetroPrimaryStatusText(primarySummary));
+        setModelCandidates(analysis.candidates);
+        setMarkers(mergedMarkers);
+        setSelectedMarkerId(previousSelectedId => (
+          previousSelectedId && mergedMarkers.some(marker => marker.id === previousSelectedId)
+            ? previousSelectedId
+            : retroMarkers[0]?.id ?? motionMarkersToKeep[0]?.id ?? null
+        ));
+        markReviewStartProfile('playing_retro_markers_ready', `markers=${retroMarkers.length}`);
+      } catch (error) {
+        playingRetroPrimaryAppliedRef.current = false;
+        markReviewStartProfile('playing_retro_failed', String(error));
+        setPlayingRetroStatus(`Spel-retro misslyckades: ${String(error)}`);
+      } finally {
+        markReviewStartProfile('playing_retro_primary_done');
+        setPlayingRetroRunning(false);
+      }
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [
+    allOrderedMarkers,
+    durationMs,
+    loading,
+    markReviewStartProfile,
+    modelCandidates,
+    usesPlayingRetroPrimaryReview,
+  ]);
+
+  useEffect(() => {
+    if (!isAudioVideoPoseReview || !videoFilePath || loading || durationMs <= 0) return;
+    const hasMotionMarkers = allOrderedMarkers.some(isMotionLayerMarker);
+    if (videoPoseCandidates.length > 0) {
+      if (!hasMotionMarkers && !videoPoseAutoMarkersSeededRef.current) {
+        setMarkers(prev => {
+          const splitMarkers = splitAudioVideoPoseMarkers(prev, durationMs);
+          if (splitMarkers.some(isMotionLayerMarker)) return splitMarkers;
+          videoPoseAutoMarkersSeededRef.current = true;
+          return addPoseCandidatesAsMotionMarkers(
+            splitMarkers.filter(isAudioLayerMarker),
+            videoPoseCandidates,
+            durationMs,
+          );
+        });
+      }
+      setPoseAnalysisStatus(poseCandidateReviewStatusText(videoPoseCandidates, false));
+      return;
+    }
+    const shouldDelayPoseUntilAudioMarkersReady = usesPlayingRetroPrimaryReview &&
+      isAudioVideoPoseAudioStage &&
+      !playingRetroAnalysis &&
+      modelCandidates.length > 0 &&
+      !shouldKeepExistingReviewMarkersForPlayingRetro(allOrderedMarkers.filter(isAudioLayerMarker));
+    if (shouldDelayPoseUntilAudioMarkersReady) {
+      setPoseAnalysisStatus('Rörelseanalys väntar tills ljudmarkörer är klara...');
+      if (!videoPoseDeferredForAudioRef.current) {
+        videoPoseDeferredForAudioRef.current = true;
+        markReviewStartProfile('pose_scan_deferred', 'waiting_for_playing_retro_audio_markers');
+      }
+      return;
+    }
+    if (hasMotionMarkers || videoPoseScanInFlightRef.current || videoPoseScanCompletedRef.current) return;
+    if (!hasTrainedVideoStrokeModel()) {
+      setPoseAnalysisStatus(`Ingen posemodell exporterad (${videoStrokeModelVersion()}).`);
+      return;
+    }
+
+    let cancelled = false;
+    videoPoseScanInFlightRef.current = true;
+    setPoseAnalysisRunning(true);
+    markReviewStartProfile('pose_scan_start', isAudioVideoPoseAudioStage ? 'background_during_audio_stage' : 'motion_stage');
+    const poseStartedAt = Date.now();
+    setPoseAnalysisStatus(isAudioVideoPoseAudioStage
+      ? 'Förbereder rörelseanalys i bakgrunden på hela videon...'
+      : 'Kör rörelseanalys på hela videon...');
+    buildVideoPoseCandidatesForReview(
+      videoFilePath,
+      durationMs,
+      event.player_handedness ?? 'left',
+    )
+      .then(candidates => {
+        if (cancelled) return;
+        markReviewStartProfile('pose_scan_done', `candidates=${candidates.length}`, Date.now() - poseStartedAt);
+        videoPoseScanCompletedRef.current = true;
+        setVideoPoseCandidates(candidates);
+        setPoseAnalysisStatus(poseCandidateReviewStatusText(candidates, false));
+        setMarkers(prev => {
+          const splitMarkers = splitAudioVideoPoseMarkers(prev, durationMs);
+          if (splitMarkers.some(isMotionLayerMarker)) return splitMarkers;
+          videoPoseAutoMarkersSeededRef.current = true;
+          return addPoseCandidatesAsMotionMarkers(
+            splitMarkers.filter(isAudioLayerMarker),
+            candidates,
+            durationMs,
+          );
+        });
+      })
+      .catch(error => {
+        if (!cancelled) {
+          markReviewStartProfile('pose_scan_failed', String(error), Date.now() - poseStartedAt);
+          videoPoseScanCompletedRef.current = true;
+          setPoseAnalysisStatus(`Poseanalys misslyckades: ${String(error)}`);
+        }
+      })
+      .finally(() => {
+        videoPoseScanInFlightRef.current = false;
+        setPoseAnalysisRunning(false);
+        markReviewStartProfile('pose_scan_finished');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    allOrderedMarkers,
+    durationMs,
+    event.player_handedness,
+    isAudioVideoPoseReview,
+    isAudioVideoPoseAudioStage,
+    loading,
+    markReviewStartProfile,
+    modelCandidates.length,
+    playingRetroAnalysis,
+    usesPlayingRetroPrimaryReview,
+    videoFilePath,
+    videoPoseCandidates,
+  ]);
 
   useEffect(() => {
     void ReviewOrientation.lockPortrait();
@@ -1718,7 +2946,13 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     return clampTimestamp(safeTimelineWindowStartMs + ratio * timelineWindowSpanMs, durationMs);
   }, [durationMs, overviewWidth, safeTimelineWindowStartMs, timelineWindowSpanMs]);
 
-  const createReviewMarkerAtTimestamp = useCallback((timestampMs: number) => {
+  const createReviewMarkerAtTimestamp = useCallback((
+    timestampMs: number,
+    layer: ReviewTimelineLayer = 'audio',
+  ) => {
+    if (isAudioVideoPoseReview && layer === 'motion') {
+      return createAudioVideoPoseMotionMarker(timestampMs, durationMs);
+    }
     const baseMarker = createManualMarker(clampTimestamp(timestampMs, durationMs), event.scenario_id);
     return supportsQuickLabels
       ? {
@@ -1731,20 +2965,25 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
           bounce_side: undefined,
         }
       : baseMarker;
-  }, [durationMs, event.scenario_id, supportsQuickLabels]);
+  }, [durationMs, event.scenario_id, isAudioVideoPoseReview, supportsQuickLabels]);
 
-  const handleCreateMarkerAtTimestamp = useCallback((timestampMs: number) => {
-    const marker = createReviewMarkerAtTimestamp(timestampMs);
+  const handleCreateMarkerAtTimestamp = useCallback((
+    timestampMs: number,
+    layer: ReviewTimelineLayer = 'audio',
+  ) => {
+    const marker = createReviewMarkerAtTimestamp(timestampMs, layer);
     stopForScrubIfNeeded();
     setMarkers(prev => sortMarkers([...prev, marker]));
     setSelectedMarkerId(marker.id);
     setPlayheadMs(marker.timestamp_ms);
-    setQuickLabelPrompt(supportsQuickLabels ? { markerId: marker.id, timestampMs: marker.timestamp_ms } : null);
-  }, [createReviewMarkerAtTimestamp, setPlayheadMs, stopForScrubIfNeeded, supportsQuickLabels]);
+    setQuickLabelPrompt(supportsQuickLabels && !isAudioVideoPoseReview
+      ? { markerId: marker.id, timestampMs: marker.timestamp_ms, layer }
+      : null);
+  }, [createReviewMarkerAtTimestamp, isAudioVideoPoseReview, setPlayheadMs, stopForScrubIfNeeded, supportsQuickLabels]);
 
   useEffect(() => {
-    createMarkerFromPlayheadRef.current = () => {
-      handleCreateMarkerAtTimestamp(playbackPositionRef.current);
+    createMarkerFromPlayheadRef.current = (layer: ReviewTimelineLayer = 'audio') => {
+      handleCreateMarkerAtTimestamp(playbackPositionRef.current, layer);
     };
   }, [handleCreateMarkerAtTimestamp]);
 
@@ -2027,26 +3266,47 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     setQuickLabelPrompt(supportsQuickLabels ? { markerId: marker.id, timestampMs: marker.timestamp_ms } : null);
   }, [createReviewMarkerAtTimestamp, playbackPositionMs, supportsQuickLabels]);
 
+  const handleAddActiveStageMarkerHere = useCallback(() => {
+    if (!isAudioVideoPoseReview) {
+      handleAddMarkerHere();
+      return;
+    }
+    handleCreateMarkerAtTimestamp(
+      playbackPositionMs,
+      isAudioVideoPoseMotionStage ? 'motion' : 'audio',
+    );
+  }, [
+    handleAddMarkerHere,
+    handleCreateMarkerAtTimestamp,
+    isAudioVideoPoseMotionStage,
+    isAudioVideoPoseReview,
+    playbackPositionMs,
+  ]);
+
   const handleQuickLabelChoice = useCallback((choice: ReviewLabelChoice) => {
     const prompt = quickLabelPrompt;
     if (!prompt) return;
     setMarkers(prev => sortMarkers(prev.map(marker => (
       marker.id === prompt.markerId
-        ? applyReviewLabelChoice(marker, choice)
+        ? isAudioVideoPoseReview
+          ? applyAudioPoseAudioChoice(marker, choice)
+          : applyReviewLabelChoice(marker, choice)
         : marker
     ))));
     setSelectedMarkerId(prompt.markerId);
     setPlayheadMs(prompt.timestampMs);
     setQuickLabelPrompt(null);
-  }, [quickLabelPrompt, setPlayheadMs]);
+  }, [isAudioVideoPoseReview, quickLabelPrompt, setPlayheadMs]);
 
-  const approvableAutoMarkers = useMemo(() => orderedMarkers.filter(marker => (
-    !isPlayingReview &&
-    marker.source === 'auto' &&
-    (marker.review_status ?? 'pending') === 'pending' &&
-    marker.final_label === marker.suggested_label &&
-    marker.final_label !== 'ignore'
-  )), [isPlayingReview, orderedMarkers]);
+  const approvableAutoMarkers = useMemo(() => activeStageMarkers.filter(marker => {
+    const status = marker.review_status ?? 'pending';
+    if (marker.source !== 'auto' || status !== 'pending') return false;
+    if (isAudioVideoPoseMotionStage) return isMotionLayerMarker(marker);
+    if (isAudioVideoPoseAudioStage) return isAudioLayerMarker(marker) && marker.final_label !== 'ignore';
+    return !isPlayingReview &&
+      marker.final_label === marker.suggested_label &&
+      marker.final_label !== 'ignore';
+  }), [activeStageMarkers, isAudioVideoPoseAudioStage, isAudioVideoPoseMotionStage, isPlayingReview]);
 
   const handleApproveAllMarkers = useCallback(() => {
     if (approvableAutoMarkers.length === 0) return;
@@ -2062,7 +3322,12 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
             const approvableIds = new Set(approvableAutoMarkers.map(marker => marker.id));
             setMarkers(prev => sortMarkers(prev.map(marker => (
               approvableIds.has(marker.id)
-                ? { ...marker, review_status: 'confirmed' }
+                ? {
+                    ...marker,
+                    review_status: isMotionLayerMarker(marker) && !hasConcreteMotionLabel(marker.motion_label)
+                      ? 'ignored'
+                      : 'confirmed',
+                  }
                 : marker
             ))));
           },
@@ -2073,15 +3338,15 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
 
   const handleDeleteSelectedMarker = useCallback(() => {
     if (!selectedMarker) return;
-    const nextMarkers = orderedMarkers.filter(marker => marker.id !== selectedMarker.id);
+    const nextMarkers = activeStageMarkers.filter(marker => marker.id !== selectedMarker.id);
     setMarkers(prev => sortMarkers(prev.filter(marker => marker.id !== selectedMarker.id)));
     setQuickLabelPrompt(null);
-    const nextSelected = nextMarkers[Math.min(selectedMarkerIndex, nextMarkers.length - 1)] ?? null;
+    const nextSelected = nextMarkers[Math.min(selectedStageMarkerIndex, nextMarkers.length - 1)] ?? null;
     setSelectedMarkerId(nextSelected?.id ?? null);
     if (nextSelected) {
       setPlayheadMs(nextSelected.timestamp_ms);
     }
-  }, [orderedMarkers, selectedMarker, selectedMarkerIndex, setPlayheadMs]);
+  }, [activeStageMarkers, selectedMarker, selectedStageMarkerIndex, setPlayheadMs]);
 
   const handleNudgeMarker = useCallback((deltaMs: number) => {
     if (!selectedMarker) return;
@@ -2089,7 +3354,11 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     updateSelectedMarker(marker => ({
       ...marker,
       timestamp_ms: nextTimestampMs,
-      review_status: marker.final_label === 'ignore' ? 'ignored' : 'edited',
+      review_status: isMotionLayerMarker(marker)
+        ? 'edited'
+        : marker.final_label === 'ignore'
+          ? 'ignored'
+          : 'edited',
     }));
     setQuickLabelPrompt(prev => (
       prev?.markerId === selectedMarker.id
@@ -2109,13 +3378,152 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     updateSelectedMarker(marker => ({
       ...marker,
       timestamp_ms: snappedTimestampMs,
-      review_status: marker.final_label === 'ignore' ? 'ignored' : 'edited',
+      review_status: isMotionLayerMarker(marker)
+        ? 'edited'
+        : marker.final_label === 'ignore'
+          ? 'ignored'
+          : 'edited',
     }));
     setPlayheadMs(snappedTimestampMs);
   }, [selectedMarker, setPlayheadMs, updateSelectedMarker]);
 
+  const buildCurrentVideoSyncMetadata = useCallback((): AudioVideoSyncMetadata | undefined => {
+    if (!hasVideo) return undefined;
+    return {
+      video_sync_offset_ms: videoSyncOffsetMs,
+      video_sync_anchor_audio_ms: audioSyncPoint?.timestamp_ms,
+      video_sync_anchor_video_ms: syncCandidateVideoMs ?? undefined,
+      video_sync_source: audioSyncPoint ? videoSyncSource : undefined,
+    };
+  }, [audioSyncPoint, hasVideo, syncCandidateVideoMs, videoSyncOffsetMs, videoSyncSource]);
+
+  const handleReturnToAudioReview = useCallback(() => {
+    setAudioVideoReviewStage('audio');
+    setPoseAnalysisStatus('Ändra ljudreview och tryck Klar med ljud för att köra om rörelseförslag.');
+    const firstAudioMarker = audioTimelineMarkers[0];
+    setSelectedMarkerId(firstAudioMarker?.id ?? null);
+  }, [audioTimelineMarkers]);
+
+  const handleSkipAudioReview = useCallback(() => {
+    if (!isAudioVideoPoseReview || !videoFilePath) return;
+    Alert.alert(
+      'Hoppa över ljud?',
+      'Då går review direkt till rörelseanalys på hela videon. Använd detta när videon ska märkas utan ljudvåg.',
+      [
+        { text: 'Avbryt', style: 'cancel' },
+        {
+          text: 'Gå till video',
+          onPress: () => {
+            setSaving(true);
+            const motionMarkersToKeep = allOrderedMarkers.filter(isMotionLayerMarker);
+            setMarkers(motionMarkersToKeep);
+            setSelectedMarkerId(motionMarkersToKeep[0]?.id ?? null);
+            Promise.resolve(onSave(
+              [],
+              buildCurrentVideoSyncMetadata(),
+              modelCandidates,
+              detectionConfigSnapshot,
+              videoPoseCandidates,
+              { completion: 'audio' },
+            ))
+              .then(() => {
+                setAudioVideoReviewStage('motion');
+                setPoseAnalysisStatus('Ljud hoppades över. Kör rörelseanalys på hela videon...');
+              })
+              .catch((error: unknown) => {
+                Alert.alert('Kunde inte hoppa över ljud', String(error));
+              })
+              .finally(() => setSaving(false));
+          },
+        },
+      ],
+    );
+  }, [
+    allOrderedMarkers,
+    buildCurrentVideoSyncMetadata,
+    detectionConfigSnapshot,
+    isAudioVideoPoseReview,
+    modelCandidates,
+    onSave,
+    videoPoseCandidates,
+    videoFilePath,
+  ]);
+
+  const handleCompleteAudioReview = useCallback(async () => {
+    if (!isAudioVideoPoseReview) return;
+    if (!videoFilePath) {
+      Alert.alert('Video saknas', 'Rörelsereview kräver en sparad video.');
+      return;
+    }
+    const pendingAudioMarkers = audioTimelineMarkers.filter(marker => (marker.review_status ?? 'pending') === 'pending');
+    if (pendingAudioMarkers.length > 0) {
+      Alert.alert(
+        'Ljudreview ofullständig',
+        `Hantera ${pendingAudioMarkers.length} ljudmarkrar innan du går vidare.`,
+      );
+      return;
+    }
+    if (audioTimelineMarkers.length === 0) {
+      Alert.alert('Inga ljudmarkers', 'Lägg till minst en racketträff, bordsstuds eller ignorera-marker först.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const audioMarkersToSave = allOrderedMarkers
+        .filter(isAudioLayerMarker)
+        .map(marker => normalizeAudioVideoPoseMarkerForSave({
+          ...marker,
+          timestamp_ms: clampTimestamp(marker.timestamp_ms, durationMs),
+        }));
+      const motionMarkersToKeep = allOrderedMarkers
+        .filter(isMotionLayerMarker)
+        .map(marker => normalizeAudioVideoPoseMarkerForSave({
+          ...marker,
+          timestamp_ms: clampTimestamp(marker.timestamp_ms, durationMs),
+        }));
+      setMarkers(sortMarkers([...audioMarkersToSave, ...motionMarkersToKeep]));
+      await onSave(
+        audioMarkersToSave,
+        buildCurrentVideoSyncMetadata(),
+        modelCandidates,
+        detectionConfigSnapshot,
+        videoPoseCandidates,
+        { completion: 'audio' },
+      );
+      setAudioVideoReviewStage('motion');
+      setSelectedMarkerId(motionMarkersToKeep[0]?.id ?? null);
+      setPoseAnalysisStatus(videoPoseCandidates.length > 0
+        ? poseCandidateReviewStatusText(videoPoseCandidates, false)
+        : 'Kör rörelseanalys på hela videon...');
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    allOrderedMarkers,
+    audioTimelineMarkers,
+    buildCurrentVideoSyncMetadata,
+    detectionConfigSnapshot,
+    durationMs,
+    isAudioVideoPoseReview,
+    modelCandidates,
+    onSave,
+    videoPoseCandidates,
+    videoFilePath,
+  ]);
+
   const handleSave = useCallback(async () => {
-    if (orderedMarkers.length === 0 && !allowsMarkerlessNoBounceSave) {
+    if (isAudioVideoPoseAudioStage) {
+      await handleCompleteAudioReview();
+      return;
+    }
+
+    if (isAudioVideoPoseMotionStage && poseAnalysisRunning) {
+      Alert.alert('Rörelseanalys körs', 'Vänta tills videon är färdiganalyserad innan du sparar rörelsereviewen.');
+      return;
+    }
+
+    if (!isAudioVideoPoseMotionStage && orderedMarkers.length === 0 && !allowsMarkerlessNoBounceSave) {
       Alert.alert('Inga markers', 'Lägg till minst en marker eller kassera tagningen.');
       return;
     }
@@ -2131,19 +3539,24 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
 
     setSaving(true);
     try {
-      const markersToSave = allOrderedMarkers
+      const baseMarkersToSave = allOrderedMarkers
         .filter(marker => !(
           isPlayingReview &&
+          !isAudioVideoPoseReview &&
           shouldDropPlayingAutoMarkerOnSave(marker, activePlayingConfidenceFilter.minConfidence)
         ))
         .map(marker => ({
           ...marker,
           timestamp_ms: clampTimestamp(marker.timestamp_ms, durationMs),
         }));
+      const markersToSave = isAudioVideoPoseReview
+        ? splitAudioVideoPoseMarkers(baseMarkersToSave, durationMs).map(normalizeAudioVideoPoseMarkerForSave)
+        : baseMarkersToSave;
+      const videoSyncMetadata = buildCurrentVideoSyncMetadata();
       await onSave(markersToSave.map(marker => ({
         ...marker,
         timestamp_ms: clampTimestamp(marker.timestamp_ms, durationMs),
-      })), hasVideo ? videoSyncOffsetMs : undefined, modelCandidates, detectionConfigSnapshot);
+      })), videoSyncMetadata, modelCandidates, detectionConfigSnapshot, videoPoseCandidates, { completion: 'complete' });
     } finally {
       setSaving(false);
     }
@@ -2151,14 +3564,19 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     activePlayingConfidenceFilter.minConfidence,
     allowsMarkerlessNoBounceSave,
     allOrderedMarkers,
+    buildCurrentVideoSyncMetadata,
     durationMs,
-    hasVideo,
+    handleCompleteAudioReview,
+    isAudioVideoPoseAudioStage,
+    isAudioVideoPoseMotionStage,
+    isAudioVideoPoseReview,
     isPlayingReview,
     modelCandidates,
     onSave,
     orderedMarkers,
+    poseAnalysisRunning,
     detectionConfigSnapshot,
-    videoSyncOffsetMs,
+    videoPoseCandidates,
   ]);
 
   const handleDiscard = useCallback(() => {
@@ -2184,6 +3602,17 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
     ignore: orderedMarkers.filter(marker => marker.final_label === 'ignore').length,
     pending: orderedMarkers.filter(marker => (marker.review_status ?? 'pending') === 'pending').length,
   }), [orderedMarkers]);
+  const audioVideoStagePendingCount = activeStageMarkers.filter(marker => (
+    (marker.review_status ?? 'pending') === 'pending'
+  )).length;
+  const activeStageTitle = isAudioVideoPoseMotionStage ? 'Rörelse' : 'Ljud';
+  const activeStageMarkerCount = activeStageMarkers.length;
+  const playingRetroPrimaryPreservesExistingReview = usesPlayingRetroPrimaryReview &&
+    shouldKeepExistingReviewMarkersForPlayingRetro(audioTimelineMarkers);
+  const playingRetroPrimaryWaitingForMarkers = usesPlayingRetroPrimaryReview &&
+    !playingRetroAnalysis &&
+    !playingRetroPrimaryPreservesExistingReview &&
+    (playingRetroRunning || modelCandidates.length > 0);
   const reviewTruthSummary = useMemo(() => {
     const liveMarkers = allOrderedMarkers.filter(marker => {
       const status = marker.review_status ?? 'pending';
@@ -2210,17 +3639,87 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
       (marker.review_status === 'confirmed' || marker.review_status === 'edited') &&
       marker.final_label !== 'ignore'
     )).length;
+    const motionApproved = liveMarkers.filter(marker => (
+      (marker.review_status === 'confirmed' || marker.review_status === 'edited') &&
+      hasConcreteMotionLabel(marker.motion_label)
+    )).length;
     return {
       totalCandidates,
       modelFound,
       added,
       removedOrChanged: removed + changedAuto,
       approved,
+      motionApproved,
     };
   }, [allOrderedMarkers, modelCandidates]);
-  const canSave = markerCounts.pending === 0 && (orderedMarkers.length > 0 || allowsMarkerlessNoBounceSave);
+  const playingRetroPrimaryReviewSummary = useMemo(() => (
+    usesPlayingRetroPrimaryReview && playingRetroAnalysis
+      ? summarizePlayingRetroPrimaryReview(playingRetroAnalysis, audioTimelineMarkers.length)
+      : null
+  ), [audioTimelineMarkers.length, playingRetroAnalysis, usesPlayingRetroPrimaryReview]);
+  const algorithmMetaText = useMemo(() => {
+    if (usesPlayingRetroPrimaryReview && playingRetroPrimaryWaitingForMarkers) {
+      return [
+        `Peak-kandidater ${reviewTruthSummary.totalCandidates}`,
+        'spel-retro skapar review-markers',
+        `Love lade till ${reviewTruthSummary.added}`,
+        `ändrade/tog bort ${reviewTruthSummary.removedOrChanged}`,
+      ].join(' · ');
+    }
+    if (usesPlayingRetroPrimaryReview && playingRetroPrimaryReviewSummary) {
+      return [
+        `Review-markers ${playingRetroPrimaryReviewSummary.markerCount}`,
+        `kandidater ${playingRetroPrimaryReviewSummary.rawCandidateCount}`,
+        `Love lade till ${reviewTruthSummary.added}`,
+        `ändrade/tog bort ${reviewTruthSummary.removedOrChanged}`,
+      ].join(' · ');
+    }
+    return [
+      `Kandidater ${reviewTruthSummary.totalCandidates}`,
+      `review ${reviewTruthSummary.modelFound}`,
+      `Love lade till ${reviewTruthSummary.added}`,
+      `ändrade/tog bort ${reviewTruthSummary.removedOrChanged}`,
+    ].join(' · ');
+  }, [
+    playingRetroPrimaryReviewSummary,
+    playingRetroPrimaryWaitingForMarkers,
+    reviewTruthSummary,
+    usesPlayingRetroPrimaryReview,
+  ]);
+  const algorithmSaveHint = useMemo(() => {
+    if (usesPlayingRetroPrimaryReview) {
+      if (reviewTruthSummary.approved > 0 || reviewTruthSummary.motionApproved > 0) {
+        return `Save tränar på ${reviewTruthSummary.approved} ljudmarkers och ${reviewTruthSummary.motionApproved} rörelsemarkers. Kandidater sparas bara för analys.`;
+      }
+      return 'Bekräfta eller ändra markers först. Råa kandidater sparas bara för analys.';
+    }
+    return isAudioVideoPoseReview
+      ? `Save tränar på ${reviewTruthSummary.approved} ljudmarkers och ${reviewTruthSummary.motionApproved} rörelsemarkers. Kandidater sparas bara för analys.`
+      : `Save tränar på ${reviewTruthSummary.approved} mänskligt godkända/ändrade markers. Kandidater sparas bara för analys.`;
+  }, [isAudioVideoPoseReview, reviewTruthSummary, usesPlayingRetroPrimaryReview]);
+  const canSave = isAudioVideoPoseReview
+    ? !playingRetroPrimaryWaitingForMarkers && audioVideoStagePendingCount === 0 && (
+        isAudioVideoPoseMotionStage
+          ? !poseAnalysisRunning
+          : audioTimelineMarkers.length > 0
+      )
+    : markerCounts.pending === 0 && (orderedMarkers.length > 0 || allowsMarkerlessNoBounceSave);
   const saveButtonText = saving
     ? 'Sparar...'
+    : isAudioVideoPoseAudioStage
+      ? playingRetroPrimaryWaitingForMarkers
+        ? 'Vänta på spel-retro'
+        : audioVideoStagePendingCount > 0
+        ? `Hantera ${audioVideoStagePendingCount} ljudmarkrar`
+        : audioTimelineMarkers.length > 0
+          ? 'Klar med ljud'
+          : 'Lägg till ljudmarker'
+    : isAudioVideoPoseMotionStage
+      ? poseAnalysisRunning
+        ? 'Analyserar rörelse...'
+        : audioVideoStagePendingCount > 0
+        ? `Hantera ${audioVideoStagePendingCount} rörelsemarkrar`
+        : 'Klar med rörelse'
     : canSave
       ? allowsMarkerlessNoBounceSave && orderedMarkers.length === 0
         ? 'Spara utan studs'
@@ -2265,11 +3764,29 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
   const syncCandidateLabel = syncCandidateVideoMs !== null
     ? formatTimelineShort(syncCandidateVideoMs)
     : 'ej vald';
+  const syncSourceLabel = videoSyncSource === 'manual' ? 'manuell ljudpunkt' : 'auto-förslag';
+  const reviewTimelineLayer: ReviewTimelineLayer = isAudioVideoPoseMotionStage ? 'motion' : 'audio';
+  const reviewTimelineMarkers = isAudioVideoPoseMotionStage
+    ? motionTimelineMarkers
+    : isAudioVideoPoseReview
+      ? audioTimelineMarkers
+      : orderedMarkers;
+  const reviewTimelinePlayheadResponder = isAudioVideoPoseMotionStage
+    ? motionPlayheadResponder
+    : overviewPlayheadResponder;
+  const showPlayingRetroPreparation = isAudioVideoPoseAudioStage && playingRetroPrimaryWaitingForMarkers;
+  const showFullScreenPreparation = loading || showPlayingRetroPreparation;
+  const loadingTitle = showPlayingRetroPreparation
+    ? 'Analyserar spel-retro audio'
+    : 'Förbereder review';
+  const loadingSubtitle = showPlayingRetroPreparation
+    ? 'Appen hittar ljudpeakar, klassar dem med retro-modellen och skapar editable racket/bord-markers.'
+    : 'Laddar ljudvåg, video och kandidater.';
 
   return (
     <View style={styles.root}>
       <StatusBar hidden barStyle="light-content" backgroundColor="#0d0d0d" />
-      {loading && hasVideo && videoFilePath && (
+      {showFullScreenPreparation && hasVideo && videoFilePath && (
         <View style={styles.preloadVideoMount} pointerEvents="none">
           <Video
             source={{ uri: `file://${videoFilePath}` }}
@@ -2292,10 +3809,25 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
           />
         </View>
       )}
-      {loading ? (
+      {showFullScreenPreparation ? (
         <View style={styles.loadingBox}>
+          <TouchableOpacity onPress={onBack} style={styles.loadingBackBtn}>
+            <Text style={styles.loadingBackTxt}>Tillbaka</Text>
+          </TouchableOpacity>
           <ActivityIndicator color="#f5c76d" />
-          <Text style={styles.loadingTxt}>Förbereder waveform och markers...</Text>
+          <Text style={styles.loadingTitle}>{loadingTitle}</Text>
+          <Text style={styles.loadingTxt}>{loadingSubtitle}</Text>
+          {showPlayingRetroPreparation && (
+            <View style={styles.retroPrepCard}>
+              <Text style={styles.retroPrepLine}>1. Råa peak-kandidater: {reviewTruthSummary.totalCandidates}</Text>
+              <Text style={styles.retroPrepLine}>2. Multi-window/context ML klassar racket, bord och ej target.</Text>
+              <Text style={styles.retroPrepLine}>3. Bara racket + bord blir markers i ljudvågen.</Text>
+              <Text style={styles.retroPrepMeta}>{playingRetroStatus ?? 'Skapar review-listan...'}</Text>
+              {reviewStartProfileText && (
+                <Text style={styles.retroPrepTiming}>Timing: {reviewStartProfileText}</Text>
+              )}
+            </View>
+          )}
         </View>
       ) : (
         <ScrollView
@@ -2332,7 +3864,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   <Text style={styles.videoSyncTitle}>{videoSyncStatusTitle}</Text>
                   <Text style={styles.videoSyncMeta}>
                     {audioSyncPoint
-                      ? `Sync-punkt ${formatTimelineShort(audioSyncPoint!.timestamp_ms)} | video ${syncCandidateLabel}`
+                      ? `Sync-punkt ${formatTimelineShort(audioSyncPoint!.timestamp_ms)} | video ${syncCandidateLabel} | ${syncSourceLabel}`
                       : 'Ingen tydlig sync-spik hittad i början.'}
                   </Text>
                 </View>
@@ -2351,9 +3883,12 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               {videoSyncExpanded && (
                 <>
                   <Text style={styles.videoSyncHelp}>
-                    Klappa eller tappa i början. Gå till sync-punkten, stega videon tills klappen syns och tryck Synka här.
+                    Dra playhead till rätt klapp i ljudet, tryck Sätt ljudsync här, stega videon tills klappen syns och tryck Synka här.
                   </Text>
                   <View style={styles.videoSyncControls}>
+                    <TouchableOpacity style={styles.videoSyncApplyBtn} onPress={setAudioSyncHere}>
+                      <Text style={styles.videoSyncApplyTxt}>Sätt ljudsync här</Text>
+                    </TouchableOpacity>
                     <TouchableOpacity
                       style={[styles.videoSyncBtn, !audioSyncPoint && styles.disabledBtn]}
                       onPress={startSyncCalibration}
@@ -2676,35 +4211,87 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               </Text>
             </View>
 
-            <View style={[styles.labelSegment, isPlayingReview && styles.playingLabelSegment]}>
-              {reviewLabelChoices.map(choice => {
-                const active = markerMatchesChoice(selectedMarker, choice);
-                return (
-                  <TouchableOpacity
-                    key={choice.id}
-                    style={[
-                      styles.segmentBtn,
-                      isPlayingReview && styles.playingSegmentBtn,
-                      active && {
-                        backgroundColor: choice.color,
-                        borderColor: choice.color,
-                      },
-                    ]}
-                    disabled={!selectedMarker}
-                    onPress={() => {
-                      setQuickLabelPrompt(null);
-                      updateSelectedMarker(marker => applyReviewLabelChoice(marker, choice));
-                    }}
-                  >
-                    <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            {isAudioVideoPoseReview ? (
+              <View style={styles.audioPoseLayerPanel}>
+                <Text style={styles.audioPoseLayerTitle}>Ljud</Text>
+                <View style={styles.labelSegment}>
+                  {AUDIO_VIDEO_POSE_AUDIO_LABEL_CHOICES.map(choice => {
+                    const active = markerMatchesAudioPoseAudioChoice(selectedMarker, choice);
+                    return (
+                      <TouchableOpacity
+                        key={choice.id}
+                        style={[
+                          styles.segmentBtn,
+                          active && { backgroundColor: choice.color, borderColor: choice.color },
+                        ]}
+                        disabled={!selectedMarker}
+                        onPress={() => {
+                          setQuickLabelPrompt(null);
+                          updateSelectedMarker(marker => applyAudioPoseAudioChoice(marker, choice));
+                        }}
+                      >
+                        <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <Text style={styles.audioPoseLayerTitle}>Rörelse</Text>
+                <View style={styles.labelSegment}>
+                  {AUDIO_VIDEO_POSE_MOTION_LABEL_CHOICES.map(choice => {
+                    const active = markerMatchesAudioPoseMotionChoice(selectedMarker, choice);
+                    return (
+                      <TouchableOpacity
+                        key={choice.id}
+                        style={[
+                          styles.segmentBtn,
+                          active && { backgroundColor: choice.color, borderColor: choice.color },
+                        ]}
+                        disabled={!selectedMarker}
+                        onPress={() => {
+                          setQuickLabelPrompt(null);
+                          updateSelectedMarker(marker => applyAudioPoseMotionChoice(marker, choice));
+                        }}
+                      >
+                        <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : (
+              <View style={[styles.labelSegment, isPlayingReview && styles.playingLabelSegment]}>
+                {reviewLabelChoices.map(choice => {
+                  const active = markerMatchesChoice(selectedMarker, choice);
+                  return (
+                    <TouchableOpacity
+                      key={choice.id}
+                      style={[
+                        styles.segmentBtn,
+                        isPlayingReview && styles.playingSegmentBtn,
+                        active && {
+                          backgroundColor: choice.color,
+                          borderColor: choice.color,
+                        },
+                      ]}
+                      disabled={!selectedMarker}
+                      onPress={() => {
+                        setQuickLabelPrompt(null);
+                        updateSelectedMarker(marker => applyReviewLabelChoice(marker, choice));
+                      }}
+                    >
+                      <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
 
             <View style={styles.markerUtilityRow}>
               <TouchableOpacity style={styles.utilityBtn} onPress={handleSnapSelectedMarker} disabled={!selectedMarker}>
                 <Text style={styles.utilityTxt}>Snappa</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-EXTRA_LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
+                <Text style={styles.utilityTxt}>-50 ms</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
                 <Text style={styles.utilityTxt}>-20 ms</Text>
@@ -2718,6 +4305,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
                 <Text style={styles.utilityTxt}>+20 ms</Text>
               </TouchableOpacity>
+              <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(EXTRA_LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
+                <Text style={styles.utilityTxt}>+50 ms</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={[styles.utilityBtn, styles.utilityDeleteBtn]} onPress={handleDeleteSelectedMarker} disabled={!selectedMarker}>
                 <Text style={styles.utilityDeleteTxt}>Ta bort</Text>
               </TouchableOpacity>
@@ -2726,7 +4316,13 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
 
           <View style={styles.waveformCard}>
             <View style={styles.timelineHeaderRow}>
-              <Text style={styles.timelineTitle}>Audio + IMU</Text>
+              <Text style={styles.timelineTitle}>
+                {isAudioVideoPoseAudioStage
+                  ? 'Steg 1: ljudreview'
+                  : isAudioVideoPoseMotionStage
+                    ? 'Steg 2: rörelsereview'
+                    : 'Ljudreview'}
+              </Text>
               <View style={styles.zoomControlsRow}>
                 {TIMELINE_ZOOM_LEVELS.map(level => (
                   <TouchableOpacity
@@ -2739,6 +4335,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                 ))}
               </View>
             </View>
+            <>
             <View style={styles.timeTicksRow}>
               {[0, 0.25, 0.5, 0.75, 1].map(ratio => (
                 <Text key={`tick-${ratio}`} style={styles.tickTxt}>
@@ -2759,6 +4356,13 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               <Pressable
                 style={StyleSheet.absoluteFill}
                 onPress={eventData => handleFullOverviewPress(eventData.nativeEvent.locationX)}
+                onLongPress={eventData => {
+                  const timestampMs = timestampFromTimelineLocation(eventData.nativeEvent.locationX);
+                  if (timestampMs !== null) {
+                    handleCreateMarkerAtTimestamp(timestampMs, reviewTimelineLayer);
+                  }
+                }}
+                delayLongPress={PLAYHEAD_LONG_PRESS_MS}
               />
               <View style={styles.fullWaveformRow}>
                 {timelineBins.map((bin, index) => {
@@ -2777,9 +4381,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   );
                 })}
               </View>
-              {modelCandidates.filter(candidate => (
+              {!isAudioVideoPoseMotionStage && modelCandidates.filter(candidate => (
                 !visibleMarkerCandidateIds.has(candidate.id) &&
-                shouldShowCandidatePin(candidate, detectionConfigSnapshot) &&
+                shouldShowCandidatePin(candidate) &&
                 isTimestampVisible(candidate.timestamp_ms, safeTimelineWindowStartMs, timelineWindowEndMs)
               )).map(candidate => {
                 const left = ratioToLeft(
@@ -2802,7 +4406,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   />
                 );
               })}
-              {isPlayingReview && playingRetroAnalysis?.candidates.filter(candidate => (
+              {!usesPlayingRetroPrimaryReview && !isAudioVideoPoseMotionStage && playingRetroAnalysis?.candidates.filter(candidate => (
                 candidate.review_relevant &&
                 isTimestampVisible(candidate.timestamp_ms, safeTimelineWindowStartMs, timelineWindowEndMs)
               )).map(candidate => {
@@ -2826,7 +4430,31 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   />
                 );
               })}
-              {orderedMarkers.filter(marker => isTimestampVisible(
+              {(!isAudioVideoPoseReview || isAudioVideoPoseMotionStage) && videoPoseCandidates.filter(candidate => (
+                !visiblePoseCandidateIds.has(candidate.id) &&
+                shouldShowPoseCandidatePin(candidate) &&
+                isTimestampVisible(candidate.timestamp_ms, safeTimelineWindowStartMs, timelineWindowEndMs)
+              )).map(candidate => {
+                const left = ratioToLeft(
+                  candidate.timestamp_ms,
+                  safeTimelineWindowStartMs,
+                  timelineWindowEndMs,
+                  overviewWidth,
+                );
+                return (
+                  <View
+                    key={`pose-candidate-pin-${candidate.id}`}
+                    style={[
+                      styles.poseCandidatePin,
+                      {
+                        left: Math.max(0, left - 5),
+                        backgroundColor: poseCandidateColor(candidate),
+                      },
+                    ]}
+                  />
+                );
+              })}
+              {reviewTimelineMarkers.filter(marker => isTimestampVisible(
                 marker.timestamp_ms,
                 safeTimelineWindowStartMs,
                 timelineWindowEndMs,
@@ -2849,6 +4477,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                       style={[
                         styles.fullMarkerPin,
                         { backgroundColor: markerColor(marker) },
+                        isAudioVideoPoseReview &&
+                          (isAudioVideoPoseMotionStage ? linkedMotionMarkerIds : linkedAudioMarkerIds).has(marker.id) &&
+                          styles.fullMarkerPinLinked,
                         isSelected && styles.fullMarkerPinActive,
                       ]}
                     />
@@ -2863,7 +4494,7 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               )}
               <View
                 style={[styles.fullPlayheadHitbox, { left: Math.max(0, timelinePlayheadLeft - TIMELINE_EDGE_PX / 2) }]}
-                {...overviewPlayheadResponder.panHandlers}
+                {...reviewTimelinePlayheadResponder.panHandlers}
               >
                 <View
                   style={[
@@ -2883,13 +4514,43 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               Dra playhead till träffen. Håll på den vita markeringen i 2 sekunder för att skapa marker.
             </Text>
 
+            {(!isAudioVideoPoseReview || isAudioVideoPoseMotionStage) && activeStageMarkerCount > 0 && (
+              <View style={styles.timelineMarkerNav}>
+                <TouchableOpacity
+                  style={[styles.timelineMarkerNavBtn, selectedStageMarkerIndex === 0 && styles.disabledBtn]}
+                  onPress={() => handleJumpToMarker(-1)}
+                  disabled={selectedStageMarkerIndex === 0}
+                >
+                  <Text style={styles.timelineMarkerNavTxt}>Föregående</Text>
+                </TouchableOpacity>
+                <View style={styles.timelineMarkerNavCenter}>
+                  <Text style={styles.timelineMarkerNavTitle}>
+                    Marker {selectedStageMarkerIndex >= 0 ? selectedStageMarkerIndex + 1 : 0} av {activeStageMarkerCount}
+                  </Text>
+                  <Text style={styles.timelineMarkerNavSub}>
+                    {selectedMarker ? formatTimelineShort(selectedMarker.timestamp_ms) : formatTimelineShort(playbackPositionMs)}
+                  </Text>
+                </View>
+                <TouchableOpacity
+                  style={[
+                    styles.timelineMarkerNavBtn,
+                    selectedStageMarkerIndex >= activeStageMarkerCount - 1 && styles.disabledBtn,
+                  ]}
+                  onPress={() => handleJumpToMarker(1)}
+                  disabled={selectedStageMarkerIndex >= activeStageMarkerCount - 1}
+                >
+                  <Text style={styles.timelineMarkerNavTxt}>Nästa</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+
             {allowsMarkerlessNoBounceSave && orderedMarkers.length === 0 && (
               <Text style={styles.waveHelpTxt}>
                 Denna tagning kan sparas utan markers. Hela IMU-sekvensen används som negativ no-bounce-data.
               </Text>
             )}
 
-            {quickLabelPrompt && supportsQuickLabels && (
+            {quickLabelPrompt && supportsQuickLabels && !isAudioVideoPoseReview && (
               <View style={styles.quickLabelPanel}>
                 <View style={styles.quickLabelCopy}>
                   <Text style={styles.quickLabelTitle}>Ny marker {formatTimelineShort(quickLabelPrompt.timestampMs)}</Text>
@@ -2910,6 +4571,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   </TouchableOpacity>
                 </View>
                 <View style={styles.quickLabelTools}>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-EXTRA_LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
+                    <Text style={styles.utilityTxt}>-50 ms</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
                     <Text style={styles.utilityTxt}>-20 ms</Text>
                   </TouchableOpacity>
@@ -2922,6 +4586,9 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
                     <Text style={styles.utilityTxt}>+20 ms</Text>
                   </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(EXTRA_LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
+                    <Text style={styles.utilityTxt}>+50 ms</Text>
+                  </TouchableOpacity>
                   <TouchableOpacity style={[styles.utilityBtn, styles.utilityDeleteBtn]} onPress={handleDeleteSelectedMarker} disabled={!selectedMarker}>
                     <Text style={styles.utilityDeleteTxt}>Ta bort</Text>
                   </TouchableOpacity>
@@ -2929,6 +4596,144 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               </View>
             )}
 
+            {isAudioVideoPoseReview && selectedAudioMarker && (
+              <View style={styles.layerEditorPanel}>
+                <View style={styles.layerEditorHeader}>
+                  <Text style={styles.layerEditorTitle}>Ljud {formatTimelineShort(selectedAudioMarker.timestamp_ms)}</Text>
+                  <Text style={styles.layerEditorMeta}>
+                    {markerConfidenceText(selectedAudioMarker) ?? markerDetailText(selectedAudioMarker)}
+                  </Text>
+                </View>
+                <View style={styles.labelSegment}>
+                  {AUDIO_VIDEO_POSE_AUDIO_LABEL_CHOICES.map(choice => {
+                    const active = markerMatchesAudioPoseAudioChoice(selectedAudioMarker, choice);
+                    return (
+                      <TouchableOpacity
+                        key={`inline-audio-${choice.id}`}
+                        style={[
+                          styles.segmentBtn,
+                          active && { backgroundColor: choice.color, borderColor: choice.color },
+                        ]}
+                        onPress={() => {
+                          setQuickLabelPrompt(null);
+                          updateSelectedMarker(marker => applyAudioPoseAudioChoice(marker, choice));
+                        }}
+                      >
+                        <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <View style={styles.markerUtilityRow}>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={handlePlaySelectedMarker}>
+                    <Text style={styles.utilityTxt}>Spela</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={handleSnapSelectedMarker}>
+                    <Text style={styles.utilityTxt}>Snappa</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-EXTRA_LARGE_NUDGE_STEP_MS)}>
+                    <Text style={styles.utilityTxt}>-50 ms</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-LARGE_NUDGE_STEP_MS)}>
+                    <Text style={styles.utilityTxt}>-20 ms</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-NUDGE_STEP_MS)}>
+                    <Text style={styles.utilityTxt}>-10 ms</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(NUDGE_STEP_MS)}>
+                    <Text style={styles.utilityTxt}>+10 ms</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(LARGE_NUDGE_STEP_MS)}>
+                    <Text style={styles.utilityTxt}>+20 ms</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(EXTRA_LARGE_NUDGE_STEP_MS)}>
+                    <Text style={styles.utilityTxt}>+50 ms</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={[styles.utilityBtn, styles.utilityDeleteBtn]} onPress={handleDeleteSelectedMarker}>
+                    <Text style={styles.utilityDeleteTxt}>Ta bort</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+            </>
+
+            {isAudioVideoPoseReview ? (
+              isAudioVideoPoseMotionStage ? (
+              <View style={styles.motionTimelinePanel}>
+                <View style={styles.motionTimelineTitleRow}>
+                  <Text style={styles.motionTimelineTitle}>Rörelse</Text>
+                  <Text style={styles.motionTimelineMeta}>
+                    {poseAnalysisRunning ? 'Analyserar...' : `${motionTimelineMarkers.length} markers`}
+                  </Text>
+                </View>
+                {poseAnalysisStatus && (
+                  <Text style={styles.motionStatus}>{poseAnalysisStatus}</Text>
+                )}
+                <Text style={styles.motionHelpText}>
+                  Video analyserar hela klippet. Justera FH/BH/Oklart direkt i tidslinjen ovan.
+                </Text>
+                {motionTimelineMarkers.length === 0 && !poseAnalysisRunning && (
+                  <Text style={styles.motionEmpty}>Inga tydliga FH/BH-markers. Långtryck på linjen om du vill lägga till Forehand, Backhand eller Oklart manuellt.</Text>
+                )}
+                {selectedMotionMarker && (
+                  <View style={styles.layerEditorPanel}>
+                    <View style={styles.layerEditorHeader}>
+                      <Text style={styles.layerEditorTitle}>Rörelse {formatTimelineShort(selectedMotionMarker.timestamp_ms)}</Text>
+                      <Text style={styles.layerEditorMeta}>
+                        {markerConfidenceText(selectedMotionMarker) ?? markerDetailText(selectedMotionMarker)}
+                      </Text>
+                    </View>
+                    <View style={styles.labelSegment}>
+                      {AUDIO_VIDEO_POSE_MOTION_LABEL_CHOICES.map(choice => {
+                        const active = markerMatchesAudioPoseMotionChoice(selectedMotionMarker, choice);
+                        return (
+                          <TouchableOpacity
+                            key={`inline-motion-${choice.id}`}
+                            style={[
+                              styles.segmentBtn,
+                              active && { backgroundColor: choice.color, borderColor: choice.color },
+                            ]}
+                            onPress={() => {
+                              setQuickLabelPrompt(null);
+                              updateSelectedMarker(marker => applyAudioPoseMotionChoice(marker, choice));
+                            }}
+                          >
+                            <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                    <View style={styles.markerUtilityRow}>
+                      <TouchableOpacity style={styles.utilityBtn} onPress={handlePlaySelectedMarker}>
+                        <Text style={styles.utilityTxt}>Spela</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-EXTRA_LARGE_NUDGE_STEP_MS)}>
+                        <Text style={styles.utilityTxt}>-50 ms</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-LARGE_NUDGE_STEP_MS)}>
+                        <Text style={styles.utilityTxt}>-20 ms</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-NUDGE_STEP_MS)}>
+                        <Text style={styles.utilityTxt}>-10 ms</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(NUDGE_STEP_MS)}>
+                        <Text style={styles.utilityTxt}>+10 ms</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(LARGE_NUDGE_STEP_MS)}>
+                        <Text style={styles.utilityTxt}>+20 ms</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(EXTRA_LARGE_NUDGE_STEP_MS)}>
+                        <Text style={styles.utilityTxt}>+50 ms</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity style={[styles.utilityBtn, styles.utilityDeleteBtn]} onPress={handleDeleteSelectedMarker}>
+                        <Text style={styles.utilityDeleteTxt}>Ta bort</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                )}
+              </View>
+              ) : null
+            ) : (
             <View style={styles.imuPanel}>
               <View style={styles.imuTitleRow}>
                 <Text style={styles.imuTitle}>IMU-förhandsvisning</Text>
@@ -3002,8 +4807,10 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                 <Text style={styles.imuEmpty}>Ingen IMU sparad för denna tagning.</Text>
               )}
             </View>
+            )}
           </View>
 
+          {!isAudioVideoPoseReview && (
           <View style={styles.markerPanel}>
             <View style={styles.markerTopRow}>
               <View>
@@ -3081,35 +4888,87 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               </View>
             )}
 
-            <View style={[styles.labelSegment, isPlayingReview && styles.playingLabelSegment]}>
-              {reviewLabelChoices.map(choice => {
-                const active = markerMatchesChoice(selectedMarker, choice);
-                return (
-                  <TouchableOpacity
-                    key={choice.id}
-                    style={[
-                      styles.segmentBtn,
-                      isPlayingReview && styles.playingSegmentBtn,
-                      active && {
-                        backgroundColor: choice.color,
-                        borderColor: choice.color,
-                      },
-                    ]}
-                    disabled={!selectedMarker}
-                    onPress={() => {
-                      setQuickLabelPrompt(null);
-                      updateSelectedMarker(marker => applyReviewLabelChoice(marker, choice));
-                    }}
-                  >
-                    <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            {isAudioVideoPoseReview ? (
+              <View style={styles.audioPoseLayerPanel}>
+                <Text style={styles.audioPoseLayerTitle}>Ljud</Text>
+                <View style={styles.labelSegment}>
+                  {AUDIO_VIDEO_POSE_AUDIO_LABEL_CHOICES.map(choice => {
+                    const active = markerMatchesAudioPoseAudioChoice(selectedMarker, choice);
+                    return (
+                      <TouchableOpacity
+                        key={choice.id}
+                        style={[
+                          styles.segmentBtn,
+                          active && { backgroundColor: choice.color, borderColor: choice.color },
+                        ]}
+                        disabled={!selectedMarker}
+                        onPress={() => {
+                          setQuickLabelPrompt(null);
+                          updateSelectedMarker(marker => applyAudioPoseAudioChoice(marker, choice));
+                        }}
+                      >
+                        <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <Text style={styles.audioPoseLayerTitle}>Rörelse</Text>
+                <View style={styles.labelSegment}>
+                  {AUDIO_VIDEO_POSE_MOTION_LABEL_CHOICES.map(choice => {
+                    const active = markerMatchesAudioPoseMotionChoice(selectedMarker, choice);
+                    return (
+                      <TouchableOpacity
+                        key={choice.id}
+                        style={[
+                          styles.segmentBtn,
+                          active && { backgroundColor: choice.color, borderColor: choice.color },
+                        ]}
+                        disabled={!selectedMarker}
+                        onPress={() => {
+                          setQuickLabelPrompt(null);
+                          updateSelectedMarker(marker => applyAudioPoseMotionChoice(marker, choice));
+                        }}
+                      >
+                        <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            ) : (
+              <View style={[styles.labelSegment, isPlayingReview && styles.playingLabelSegment]}>
+                {reviewLabelChoices.map(choice => {
+                  const active = markerMatchesChoice(selectedMarker, choice);
+                  return (
+                    <TouchableOpacity
+                      key={choice.id}
+                      style={[
+                        styles.segmentBtn,
+                        isPlayingReview && styles.playingSegmentBtn,
+                        active && {
+                          backgroundColor: choice.color,
+                          borderColor: choice.color,
+                        },
+                      ]}
+                      disabled={!selectedMarker}
+                      onPress={() => {
+                        setQuickLabelPrompt(null);
+                        updateSelectedMarker(marker => applyReviewLabelChoice(marker, choice));
+                      }}
+                    >
+                      <Text style={[styles.segmentTxt, active && styles.segmentTxtActive]}>{choice.title}</Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
 
             <View style={styles.markerUtilityRow}>
               <TouchableOpacity style={styles.utilityBtn} onPress={handleSnapSelectedMarker} disabled={!selectedMarker}>
                 <Text style={styles.utilityTxt}>Snappa</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-EXTRA_LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
+                <Text style={styles.utilityTxt}>-50 ms</Text>
               </TouchableOpacity>
               <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(-LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
                 <Text style={styles.utilityTxt}>-20 ms</Text>
@@ -3123,29 +4982,121 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
               <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
                 <Text style={styles.utilityTxt}>+20 ms</Text>
               </TouchableOpacity>
+              <TouchableOpacity style={styles.utilityBtn} onPress={() => handleNudgeMarker(EXTRA_LARGE_NUDGE_STEP_MS)} disabled={!selectedMarker}>
+                <Text style={styles.utilityTxt}>+50 ms</Text>
+              </TouchableOpacity>
               <TouchableOpacity style={[styles.utilityBtn, styles.utilityDeleteBtn]} onPress={handleDeleteSelectedMarker} disabled={!selectedMarker}>
                 <Text style={styles.utilityDeleteTxt}>Ta bort</Text>
               </TouchableOpacity>
             </View>
           </View>
+          )}
+
+          {isAudioVideoPoseReview && (
+          <View style={styles.stageControlPanel}>
+            <View style={styles.stageControlTopRow}>
+              <View style={styles.stageControlCopy}>
+                <Text style={styles.markerPanelTitle}>
+                  {playingRetroPrimaryWaitingForMarkers
+                    ? 'Spel-retro analyserar'
+                    : `${activeStageTitle} ${selectedStageMarkerIndex >= 0 ? selectedStageMarkerIndex + 1 : 0} av ${activeStageMarkerCount}`}
+                </Text>
+                <Text style={styles.markerPanelSub}>
+                  {playingRetroPrimaryWaitingForMarkers
+                    ? 'Gamla ljudförslag visas inte medan retro skapar review-listan.'
+                    : selectedMarker
+                    ? `${formatTimelineShort(selectedMarker.timestamp_ms)} · ${markerDetailText(selectedMarker)}`
+                    : `${formatTimelineShort(playbackPositionMs)} · ingen marker vald`}
+                </Text>
+                {selectedMarker?.source === 'auto' && markerConfidenceText(selectedMarker) && (
+                  <Text style={styles.markerConfidenceTxt}>{markerConfidenceText(selectedMarker)}</Text>
+                )}
+                <Text style={styles.stageControlMeta}>
+                  {playingRetroPrimaryWaitingForMarkers
+                    ? 'Vänta tills retro-markers finns i ljudvågen.'
+                    : audioVideoStagePendingCount > 0
+                    ? `${audioVideoStagePendingCount} pending auto-förslag kvar i detta steg.`
+                    : 'Alla förslag i detta steg är hanterade.'}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.approveAllBtn, approvableAutoMarkers.length === 0 && styles.disabledBtn]}
+                onPress={handleApproveAllMarkers}
+                disabled={approvableAutoMarkers.length === 0}
+              >
+                <Text style={styles.approveAllTxt}>Godkänn alla</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.markerControlsRow}>
+              <TouchableOpacity
+                style={[styles.roundControlBtn, selectedStageMarkerIndex <= 0 && styles.disabledBtn]}
+                onPress={() => handleJumpToMarker(-1)}
+                disabled={selectedStageMarkerIndex <= 0}
+              >
+                <Text style={styles.roundControlTxt}>Föreg.</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.centerPlayBtn, !selectedMarker && styles.disabledBtn]}
+                onPress={handlePlaySelectedMarker}
+                disabled={!selectedMarker}
+              >
+                <Text style={styles.centerPlayTxt}>Spela</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.roundControlBtn,
+                  (selectedStageMarkerIndex < 0 || selectedStageMarkerIndex >= activeStageMarkerCount - 1) && styles.disabledBtn,
+                ]}
+                onPress={() => handleJumpToMarker(1)}
+                disabled={selectedStageMarkerIndex < 0 || selectedStageMarkerIndex >= activeStageMarkerCount - 1}
+              >
+                <Text style={styles.roundControlTxt}>Nästa</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.addMarkerBtn} onPress={handleAddActiveStageMarkerHere}>
+                <Text style={styles.addMarkerTxt}>+ Lägg till</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+          )}
 
           <View style={styles.algorithmPanel}>
             <View style={styles.algorithmHeaderRow}>
-              <Text style={styles.algorithmTitle}>{detectionConfigTitle(detectionConfigSnapshot)}</Text>
+              <View style={styles.algorithmTitleRow}>
+                <Text style={styles.algorithmTitle}>
+                  {usesPlayingRetroPrimaryReview ? 'Spel-retro audio' : detectionConfigTitle(detectionConfigSnapshot)}
+                </Text>
+                <TouchableOpacity style={styles.algorithmInfoBtn} onPress={handleShowModelInfo}>
+                  <Text style={styles.algorithmInfoTxt}>i</Text>
+                </TouchableOpacity>
+              </View>
               <Text style={styles.algorithmMeta}>
-                Kandidater {reviewTruthSummary.totalCandidates} · review {reviewTruthSummary.modelFound} · Love lade till {reviewTruthSummary.added} · ändrade/tog bort {reviewTruthSummary.removedOrChanged}
+                {algorithmMetaText}
               </Text>
             </View>
+            {usesPlayingRetroPrimaryReview ? (
+              <Text style={styles.algorithmThresholdHint}>
+                {playingRetroStatus ?? `Auto: ${playingRetroModelMetadata.selected_variant} (${playingRetroModelMetadata.windows.length} fonster).`}
+              </Text>
+            ) : isAudioVideoPoseReview && (
+              <Text style={styles.algorithmThresholdHint}>
+                Racketförslag kräver minst {Math.round(audioVideoPoseReviewConfidence(detectionConfigSnapshot) * 100)}% · merge-window {detectionConfigSnapshot.merge_window_ms} ms.
+              </Text>
+            )}
+            {usesPlayingRetroPrimaryReview && reviewStartProfileText && (
+              <Text style={styles.reviewStartTimingText}>
+                Timing: {reviewStartProfileText}
+              </Text>
+            )}
             <Text style={styles.algorithmSaveHint}>
-              Save tränar på {reviewTruthSummary.approved} mänskligt godkända/ändrade markers. Kandidater sparas bara för analys.
+              {algorithmSaveHint}
             </Text>
-            {isPlayingReview && (
+            {isPlayingReview && !isAudioVideoPoseMotionStage && !usesPlayingRetroPrimaryReview && (
               <View style={styles.playingRetroPanel}>
                 <View style={styles.playingRetroHeaderRow}>
                   <View style={styles.playingRetroTitleBlock}>
                     <Text style={styles.playingRetroTitle}>Spel-retro audio</Text>
                     <Text style={styles.playingRetroMeta}>
-                      {`${playingRetroModelMetadata.selected_variant} - ${playingRetroModelMetadata.windows.length} f\u00f6nster`}
+                      {playingRetroModelMetadata.selected_variant} · {playingRetroModelMetadata.windows.length} fönster
                     </Text>
                   </View>
                   <TouchableOpacity
@@ -3157,12 +5108,12 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                     disabled={playingRetroRunning || loading || modelCandidates.length === 0}
                   >
                     <Text style={styles.playingRetroRunTxt}>
-                      {playingRetroRunning ? 'K\u00f6r...' : 'K\u00f6r retro'}
+                      {playingRetroRunning ? 'Kör...' : 'Kör retro'}
                     </Text>
                   </TouchableOpacity>
                 </View>
                 <Text style={styles.playingRetroHint}>
-                  {'Separat post-review test. Skapar inte markers och p\u00e5verkar inte Save.'}
+                  Separat post-review test. Skapar inte markers och påverkar inte Save.
                 </Text>
                 <View style={styles.playingRetroStatsRow}>
                   <View style={styles.playingRetroStat}>
@@ -3183,49 +5134,67 @@ export function AudioTakeReviewScreen({ event, filePath, videoFilePath, onSave, 
                   </View>
                 </View>
                 <Text style={styles.playingRetroStatus}>
-                  {playingRetroStatus ?? 'K\u00f6r f\u00f6r att visa retro-racket/bord som extra pinnar ovanf\u00f6r waveformen.'}
+                  {playingRetroStatus ?? 'Kör för att visa retro-racket/bord som extra pinnar ovanför waveformen.'}
                 </Text>
               </View>
             )}
-            <Text style={styles.algorithmLabel}>Känslighet</Text>
-            <View style={styles.algorithmOptionRow}>
-              {REVIEW_SENSITIVITY_OPTIONS.map(option => {
-                const active = detectionConfigSnapshot.sensitivity === option;
-                return (
-                  <TouchableOpacity
-                    key={`review-sensitivity-${option}`}
-                    style={[styles.algorithmOptionBtn, active && styles.algorithmOptionBtnActive]}
-                    onPress={() => handleDetectionConfigChange(option, detectionConfigSnapshot.detection_mode)}
-                    disabled={loading}
-                  >
-                    <Text style={[styles.algorithmOptionTxt, active && styles.algorithmOptionTxtActive]}>
-                      {sensitivityTitle(option)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            <Text style={styles.algorithmLabel}>Modelläge</Text>
-            <View style={styles.algorithmOptionRow}>
-              {REVIEW_DETECTION_MODE_OPTIONS.map(option => {
-                const active = detectionConfigSnapshot.detection_mode === option;
-                return (
-                  <TouchableOpacity
-                    key={`review-mode-${option}`}
-                    style={[styles.algorithmOptionBtn, active && styles.algorithmOptionBtnActive]}
-                    onPress={() => handleDetectionConfigChange(detectionConfigSnapshot.sensitivity, option)}
-                    disabled={loading}
-                  >
-                    <Text style={[styles.algorithmOptionTxt, active && styles.algorithmOptionTxtActive]}>
-                      {detectionModeTitle(option)}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            {!usesPlayingRetroPrimaryReview && (
+              <>
+                <Text style={styles.algorithmLabel}>Känslighet</Text>
+                <View style={styles.algorithmOptionRow}>
+                  {REVIEW_SENSITIVITY_OPTIONS.map(option => {
+                    const active = detectionConfigSnapshot.sensitivity === option;
+                    return (
+                      <TouchableOpacity
+                        key={`review-sensitivity-${option}`}
+                        style={[styles.algorithmOptionBtn, active && styles.algorithmOptionBtnActive]}
+                        onPress={() => handleDetectionConfigChange(option, detectionConfigSnapshot.detection_mode)}
+                        disabled={loading}
+                      >
+                        <Text style={[styles.algorithmOptionTxt, active && styles.algorithmOptionTxtActive]}>
+                          {sensitivityTitle(option)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                <Text style={styles.algorithmLabel}>Modelläge</Text>
+                <View style={styles.algorithmOptionRow}>
+                  {REVIEW_DETECTION_MODE_OPTIONS.map(option => {
+                    const active = detectionConfigSnapshot.detection_mode === option;
+                    return (
+                      <TouchableOpacity
+                        key={`review-mode-${option}`}
+                        style={[styles.algorithmOptionBtn, active && styles.algorithmOptionBtnActive]}
+                        onPress={() => handleDetectionConfigChange(detectionConfigSnapshot.sensitivity, option)}
+                        disabled={loading}
+                      >
+                        <Text style={[styles.algorithmOptionTxt, active && styles.algorithmOptionTxtActive]}>
+                          {detectionModeTitle(option)}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </>
+            )}
           </View>
 
           <View style={styles.footerActions}>
+            {isAudioVideoPoseMotionStage && (
+              <TouchableOpacity style={[styles.footerBtn, styles.discardBtn]} onPress={handleReturnToAudioReview}>
+                <Text style={styles.discardBtnTxt}>Tillbaka till ljud</Text>
+              </TouchableOpacity>
+            )}
+            {isAudioVideoPoseAudioStage && (
+              <TouchableOpacity
+                style={[styles.footerBtn, styles.discardBtn]}
+                onPress={handleSkipAudioReview}
+                disabled={saving}
+              >
+                <Text style={styles.discardBtnTxt}>Hoppa över ljud</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity
               style={[styles.footerBtn, styles.saveBtn, (!canSave || saving) && styles.saveBtnDisabled]}
               onPress={handleSave}
@@ -3467,6 +5436,22 @@ const styles = StyleSheet.create({
     padding: 10,
     gap: 10,
   },
+  stageControlPanel: {
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#25303a',
+    backgroundColor: '#101417',
+    padding: 10,
+    gap: 10,
+  },
+  stageControlTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  stageControlCopy: { flex: 1 },
+  stageControlMeta: { color: '#7f8993', fontSize: 11, fontWeight: '800', marginTop: 4 },
   markerTopRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3478,6 +5463,31 @@ const styles = StyleSheet.create({
   markerPanelSub: { color: '#a9b0ba', fontSize: 12, marginTop: 2 },
   markerConfidenceTxt: { color: '#f5c76d', fontSize: 11, fontWeight: '800', marginTop: 2 },
   markerControlsRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  timelineMarkerNav: {
+    marginTop: 10,
+    padding: 8,
+    borderRadius: 12,
+    backgroundColor: '#11161a',
+    borderWidth: 1,
+    borderColor: '#252c33',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  timelineMarkerNavBtn: {
+    minWidth: 92,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: '#202225',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+  },
+  timelineMarkerNavTxt: { color: '#fff', fontSize: 11, fontWeight: '900' },
+  timelineMarkerNavCenter: { flex: 1, alignItems: 'center' },
+  timelineMarkerNavTitle: { color: '#fff', fontSize: 12, fontWeight: '900' },
+  timelineMarkerNavSub: { color: '#9ca4ad', fontSize: 11, marginTop: 2, fontWeight: '700' },
   roundControlBtn: {
     width: 44,
     height: 38,
@@ -3552,6 +5562,16 @@ const styles = StyleSheet.create({
   },
   reviewLayerTitle: { color: '#2ee678', fontSize: 12, fontWeight: '900' },
   reviewLayerText: { color: '#aeb4be', fontSize: 11, fontWeight: '700' },
+  audioPoseLayerPanel: {
+    gap: 7,
+  },
+  audioPoseLayerTitle: {
+    color: '#727b86',
+    fontSize: 10,
+    fontWeight: '900',
+    letterSpacing: 1.1,
+    textTransform: 'uppercase',
+  },
   algorithmPanel: {
     borderRadius: 14,
     borderWidth: 1,
@@ -3563,8 +5583,22 @@ const styles = StyleSheet.create({
   algorithmHeaderRow: {
     gap: 2,
   },
+  algorithmTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   algorithmTitle: { color: '#2ee678', fontSize: 12, fontWeight: '900' },
+  algorithmInfoBtn: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    borderWidth: 1,
+    borderColor: '#2ecc71',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#12351f',
+  },
+  algorithmInfoTxt: { color: '#2ee678', fontSize: 12, fontWeight: '900' },
   algorithmMeta: { color: '#aeb4be', fontSize: 11, fontWeight: '700' },
+  algorithmThresholdHint: { color: '#f5c76d', fontSize: 11, lineHeight: 15, fontWeight: '800' },
+  reviewStartTimingText: { color: '#7f8993', fontSize: 10, lineHeight: 14, fontWeight: '800' },
   algorithmSaveHint: { color: '#7f8993', fontSize: 10, lineHeight: 14, fontWeight: '700' },
   playingRetroPanel: {
     borderRadius: 12,
@@ -3752,7 +5786,18 @@ const styles = StyleSheet.create({
     width: 12,
     height: 12,
     borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#e8f8ff',
     zIndex: 3,
+  },
+  poseCandidatePin: {
+    position: 'absolute',
+    top: 13,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    zIndex: 2,
+    opacity: 0.72,
   },
   fullMarkerPin: {
     width: 10,
@@ -3762,6 +5807,13 @@ const styles = StyleSheet.create({
   fullMarkerPinActive: {
     borderWidth: 2,
     borderColor: '#ffffff',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+  },
+  fullMarkerPinLinked: {
+    borderWidth: 2,
+    borderColor: '#35c7ff',
     width: 14,
     height: 14,
     borderRadius: 7,
@@ -3867,6 +5919,23 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   quickLabelCancelTxt: { color: '#aeb4be', fontSize: 11, fontWeight: '900' },
+  layerEditorPanel: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#24303a',
+    backgroundColor: '#0b1115',
+    padding: 8,
+    gap: 8,
+  },
+  layerEditorHeader: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'space-between',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  layerEditorTitle: { color: '#fff', fontSize: 12, fontWeight: '900' },
+  layerEditorMeta: { color: '#aeb4be', fontSize: 11, fontWeight: '800' },
   imuCard: {
     borderRadius: 16,
     borderWidth: 1,
@@ -3897,6 +5966,172 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
     marginTop: 2,
   },
+  motionPanel: {
+    borderRadius: 12,
+    backgroundColor: '#151719',
+    overflow: 'hidden',
+    marginTop: 2,
+  },
+  motionTimelinePanel: {
+    borderRadius: 12,
+    backgroundColor: '#151719',
+    overflow: 'hidden',
+    marginTop: 2,
+  },
+  motionTimelineTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  motionTimelineTitle: { color: '#dce2eb', fontSize: 14, fontWeight: '900' },
+  motionTimelineMeta: { color: '#2ee678', fontSize: 11, fontWeight: '900' },
+  motionTimelineSurface: {
+    height: 82,
+    borderTopWidth: 1,
+    borderTopColor: '#2a3036',
+    backgroundColor: '#0f1113',
+    overflow: 'hidden',
+  },
+  motionTimelineBaseLine: {
+    position: 'absolute',
+    left: 8,
+    right: 8,
+    top: 41,
+    height: 2,
+    borderRadius: 2,
+    backgroundColor: '#2a3036',
+  },
+  motionCandidateHitbox: {
+    position: 'absolute',
+    top: 12,
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 2,
+    elevation: 2,
+  },
+  motionCandidatePin: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    opacity: 0.58,
+  },
+  motionMarkerHitbox: {
+    position: 'absolute',
+    top: 29,
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 4,
+    elevation: 4,
+  },
+  motionMarkerPin: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+  },
+  motionMarkerPinLinked: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    borderWidth: 2,
+    borderColor: '#2ee678',
+  },
+  motionMarkerPinActive: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 3,
+    borderColor: '#fff',
+  },
+  motionPlayheadHitbox: {
+    position: 'absolute',
+    top: -8,
+    bottom: 0,
+    width: TIMELINE_EDGE_PX,
+    alignItems: 'center',
+    zIndex: 5,
+    elevation: 5,
+  },
+  motionPlayheadLine: {
+    position: 'absolute',
+    top: 8,
+    bottom: 0,
+    width: 2,
+    backgroundColor: '#fff',
+  },
+  motionPlayheadLineActive: {
+    width: 3,
+    backgroundColor: '#f8fff9',
+  },
+  motionPlayheadKnob: {
+    position: 'absolute',
+    top: 22,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#fff',
+  },
+  motionPlayheadKnobActive: {
+    top: 19,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 3,
+    borderColor: '#2ecc71',
+  },
+  motionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  motionTitle: { color: '#dce2eb', fontSize: 14, fontWeight: '900' },
+  motionMeta: { color: '#2ee678', fontSize: 11, fontWeight: '900' },
+  motionStatus: {
+    color: '#aeb4be',
+    fontSize: 12,
+    fontWeight: '700',
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+  },
+  motionHelpText: {
+    color: '#7f8791',
+    fontSize: 11,
+    fontWeight: '700',
+    lineHeight: 15,
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+  },
+  motionList: {
+    borderTopWidth: 1,
+    borderTopColor: '#2a3036',
+  },
+  motionRow: {
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: '#242a30',
+  },
+  motionRowActive: { backgroundColor: '#102019' },
+  motionDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  motionCopy: { flex: 1, minWidth: 0 },
+  motionRowTitle: { color: '#fff', fontSize: 13, fontWeight: '900' },
+  motionRowMeta: { color: '#9aa2ad', fontSize: 11, fontWeight: '700', marginTop: 2 },
+  motionEmpty: { color: '#8e949d', fontSize: 13, padding: 14 },
   imuTitle: { color: '#aeb4be', fontSize: 14, fontWeight: '800' },
   imuSyncedTxt: { color: '#2ee678', fontSize: 11, fontWeight: '900' },
   imuRow: {
@@ -3976,8 +6211,38 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 12,
+    paddingHorizontal: 28,
   },
-  loadingTxt: { color: '#aaa', fontSize: 13 },
+  loadingBackBtn: {
+    position: 'absolute',
+    top: 48,
+    left: 18,
+    minWidth: 78,
+    height: 40,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#2d3238',
+    backgroundColor: '#101417',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingBackTxt: { color: '#dce2eb', fontSize: 13, fontWeight: '900' },
+  loadingTitle: { color: '#fff', fontSize: 20, fontWeight: '900', textAlign: 'center' },
+  loadingTxt: { color: '#aaa', fontSize: 13, textAlign: 'center', lineHeight: 18 },
+  retroPrepCard: {
+    width: '100%',
+    maxWidth: 420,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: '#24303a',
+    backgroundColor: '#0b1115',
+    padding: 14,
+    gap: 8,
+    marginTop: 4,
+  },
+  retroPrepLine: { color: '#dce2eb', fontSize: 12, fontWeight: '800', lineHeight: 17 },
+  retroPrepMeta: { color: '#f5c76d', fontSize: 12, fontWeight: '900', lineHeight: 17, marginTop: 2 },
+  retroPrepTiming: { color: '#7f8993', fontSize: 10, fontWeight: '800', lineHeight: 14 },
   header: {
     flexDirection: 'column',
     alignItems: 'flex-start',

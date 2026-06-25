@@ -1,4 +1,5 @@
 import { extractFeatures } from './audioFeatures';
+import { detectDenseAudioReviewCandidatePeaks, type AudioReviewCandidatePeak } from './audioReview';
 import playingRetroAudioModelJson from './models/playing_retro_audio_model.json';
 import { predictWithRfModel, type RfJsonModel, type RfPrediction } from './rfRuntime';
 import type {
@@ -30,6 +31,12 @@ export interface PlayingRetroAudioMetadata {
   sample_rate_hz: number;
   windows: PlayingRetroAudioWindowSpec[];
   context_feature_names: string[];
+  review_thresholds?: {
+    racket_contact?: number;
+    table_bounce?: number;
+    same_label_dedupe_ms?: number;
+    source_ticket?: string;
+  };
 }
 
 type PlayingRetroAudioModel = RfJsonModel & {
@@ -47,6 +54,9 @@ export interface PlayingRetroAudioPrediction {
 export interface PlayingRetroAudioReviewCandidate extends AudioModelCandidate {
   source_candidate_id: string;
   playing_retro_prediction: PlayingRetroAudioPrediction;
+  playing_retro_candidate_source?: 'saved_candidate' | 'recovery_candidate';
+  playing_retro_recovery_score?: number;
+  playing_retro_nearest_saved_gap_ms?: number | null;
 }
 
 export interface PlayingRetroAudioAnalysisResult {
@@ -54,11 +64,27 @@ export interface PlayingRetroAudioAnalysisResult {
   feature_version: string;
   feature_count: number;
   candidate_count: number;
+  saved_candidate_count: number;
+  recovery_candidate_count: number;
+  visible_recovery_candidate_count: number;
   candidates: PlayingRetroAudioReviewCandidate[];
 }
 
 const MODEL = playingRetroAudioModelJson as PlayingRetroAudioModel;
 const WINDOWS = MODEL.metadata.windows;
+const REVIEW_THRESHOLDS = {
+  racket_contact: MODEL.metadata.review_thresholds?.racket_contact ?? 0.0,
+  table_bounce: MODEL.metadata.review_thresholds?.table_bounce ?? 0.5,
+};
+const RECOVERY_MIN_GAP_FROM_KNOWN_MS = 32;
+const RECOVERY_MIN_GAP_FROM_RECOVERY_MS = 48;
+const RECOVERY_MAX_GAP_FROM_SAVED_MS = 520;
+const RECOVERY_DENSE_CANDIDATE_GAP_MS = 28;
+const RECOVERY_MAX_CANDIDATES = 220;
+const RECOVERY_RACKET_MIN_CONFIDENCE = 0.8;
+const RECOVERY_TABLE_MIN_CONFIDENCE = 0.54;
+const RECOVERY_RACKET_MIN_SAVED_GAP_MS = 120;
+const RECOVERY_TABLE_MIN_SAVED_GAP_MS = 60;
 
 function assertTargetSampleRate(sampleRate: number): void {
   if (Math.round(sampleRate) !== PLAYING_RETRO_AUDIO_SAMPLE_RATE) {
@@ -103,16 +129,29 @@ function uniqueSortedTimestamps(timestamps: number[]): number[] {
   return Array.from(new Set(timestamps.map(timestamp => Math.round(timestamp)))).sort((a, b) => a - b);
 }
 
+function nearestGapMs(anchorMs: number, timestamps: number[]): number | null {
+  if (timestamps.length === 0) return null;
+  let nearest = Number.POSITIVE_INFINITY;
+  for (const timestamp of timestamps) {
+    nearest = Math.min(nearest, Math.abs(Math.round(anchorMs) - Math.round(timestamp)));
+  }
+  return Number.isFinite(nearest) ? nearest : null;
+}
+
+function isFarEnough(anchorMs: number, timestamps: number[], minGapMs: number): boolean {
+  const gap = nearestGapMs(anchorMs, timestamps);
+  return gap === null || gap >= minGapMs;
+}
+
 function clippedGap(value: number | null): number {
   return value === null ? 1.0 : Math.min(value, 1000) / 1000;
 }
 
-export function buildPlayingRetroAudioContextFeatures(
+function buildPlayingRetroAudioContextFeaturesFromSorted(
   anchorMs: number,
-  candidateTimestampsMs: number[],
+  timestamps: number[],
   isSavedCandidate = true,
 ): Record<string, number> {
-  const timestamps = uniqueSortedTimestamps(candidateTimestampsMs);
   const roundedAnchor = Math.round(anchorMs);
   const prevGaps = timestamps
     .filter(timestamp => timestamp < roundedAnchor)
@@ -152,12 +191,25 @@ export function buildPlayingRetroAudioContextFeatures(
   };
 }
 
+export function buildPlayingRetroAudioContextFeatures(
+  anchorMs: number,
+  candidateTimestampsMs: number[],
+  isSavedCandidate = true,
+): Record<string, number> {
+  return buildPlayingRetroAudioContextFeaturesFromSorted(
+    anchorMs,
+    uniqueSortedTimestamps(candidateTimestampsMs),
+    isSavedCandidate,
+  );
+}
+
 export function buildPlayingRetroAudioFeatureVector(
   samples: Float32Array,
   sampleRate: number,
   anchorMs: number,
   candidateTimestampsMs: number[],
   isSavedCandidate = true,
+  candidateTimestampsAlreadySorted = false,
 ): Record<string, number> {
   assertTargetSampleRate(sampleRate);
   const features: Record<string, number> = {};
@@ -173,7 +225,11 @@ export function buildPlayingRetroAudioFeatureVector(
   }
   Object.assign(
     features,
-    buildPlayingRetroAudioContextFeatures(anchorMs, candidateTimestampsMs, isSavedCandidate),
+    buildPlayingRetroAudioContextFeaturesFromSorted(
+      anchorMs,
+      candidateTimestampsAlreadySorted ? candidateTimestampsMs : uniqueSortedTimestamps(candidateTimestampsMs),
+      isSavedCandidate,
+    ),
   );
   return features;
 }
@@ -205,6 +261,7 @@ export function predictPlayingRetroAudioAt(
   anchorMs: number,
   candidateTimestampsMs: number[],
   isSavedCandidate = true,
+  candidateTimestampsAlreadySorted = false,
 ): PlayingRetroAudioPrediction {
   return predictPlayingRetroAudioFeatures(
     buildPlayingRetroAudioFeatureVector(
@@ -213,11 +270,44 @@ export function predictPlayingRetroAudioAt(
       anchorMs,
       candidateTimestampsMs,
       isSavedCandidate,
+      candidateTimestampsAlreadySorted,
     ),
   );
 }
 
-function reviewFieldsForPrediction(prediction: PlayingRetroAudioPrediction): {
+function predictionClearsReviewThresholds(
+  prediction: PlayingRetroAudioPrediction,
+  options: { recovery?: boolean; nearestSavedGapMs?: number | null } = {},
+): boolean {
+  if (
+    prediction.label === 'racket_contact' &&
+    prediction.confidence < REVIEW_THRESHOLDS.racket_contact
+  ) {
+    return false;
+  }
+  if (
+    prediction.label === 'table_bounce' &&
+    prediction.confidence < REVIEW_THRESHOLDS.table_bounce
+  ) {
+    return false;
+  }
+  if (!options.recovery) return true;
+  const nearestSavedGapMs = options.nearestSavedGapMs ?? null;
+  if (prediction.label === 'racket_contact') {
+    return prediction.confidence >= RECOVERY_RACKET_MIN_CONFIDENCE &&
+      (nearestSavedGapMs === null || nearestSavedGapMs >= RECOVERY_RACKET_MIN_SAVED_GAP_MS);
+  }
+  if (prediction.label === 'table_bounce') {
+    return prediction.confidence >= RECOVERY_TABLE_MIN_CONFIDENCE &&
+      (nearestSavedGapMs === null || nearestSavedGapMs >= RECOVERY_TABLE_MIN_SAVED_GAP_MS);
+  }
+  return true;
+}
+
+function reviewFieldsForPrediction(
+  prediction: PlayingRetroAudioPrediction,
+  options: { recovery?: boolean; nearestSavedGapMs?: number | null } = {},
+): {
   review_relevant: boolean;
   suggested_label: AudioReviewLabel;
   event_type: AudioReviewEventType;
@@ -226,6 +316,14 @@ function reviewFieldsForPrediction(prediction: PlayingRetroAudioPrediction): {
   not_racket_kind?: AudioNotRacketKind;
   surface_label?: AudioLabel;
 } {
+  if (!predictionClearsReviewThresholds(prediction, options)) {
+    return {
+      review_relevant: false,
+      suggested_label: 'ignore',
+      event_type: 'ignore',
+      class_label: 'ignore',
+    };
+  }
   if (prediction.label === 'racket_contact') {
     return {
       review_relevant: true,
@@ -256,10 +354,19 @@ function reviewFieldsForPrediction(prediction: PlayingRetroAudioPrediction): {
 export function buildPlayingRetroAudioReviewCandidate(
   candidate: AudioModelCandidate,
   prediction: PlayingRetroAudioPrediction,
+  options: {
+    source?: 'saved_candidate' | 'recovery_candidate';
+    recoveryScore?: number;
+    nearestSavedGapMs?: number | null;
+  } = {},
 ): PlayingRetroAudioReviewCandidate {
-  const reviewFields = reviewFieldsForPrediction(prediction);
+  const source = options.source ?? 'saved_candidate';
+  const reviewFields = reviewFieldsForPrediction(prediction, {
+    recovery: source === 'recovery_candidate',
+    nearestSavedGapMs: options.nearestSavedGapMs,
+  });
   return {
-    id: `playing_retro_${candidate.id}`,
+    id: source === 'recovery_candidate' ? candidate.id : `playing_retro_${candidate.id}`,
     timestamp_ms: candidate.timestamp_ms,
     ...reviewFields,
     contact_confidence: prediction.label === 'racket_contact' ? prediction.confidence : undefined,
@@ -267,30 +374,127 @@ export function buildPlayingRetroAudioReviewCandidate(
     detection_config_id: MODEL.metadata.model_version,
     source_candidate_id: candidate.id,
     playing_retro_prediction: prediction,
+    playing_retro_candidate_source: source,
+    playing_retro_recovery_score: options.recoveryScore,
+    playing_retro_nearest_saved_gap_ms: options.nearestSavedGapMs,
   };
+}
+
+function candidateFromRecoveryPeak(
+  peak: AudioReviewCandidatePeak,
+  index: number,
+  nearestSavedGapMs: number | null,
+): AudioModelCandidate & { playing_retro_nearest_saved_gap_ms?: number | null } {
+  const timestampMs = Math.round(peak.refined_timestamp_ms);
+  return {
+    id: `playing_retro_recovery_${index}_${timestampMs}`,
+    timestamp_ms: timestampMs,
+    review_relevant: false,
+    suggested_label: 'ignore',
+    event_type: 'ignore',
+    class_label: 'ignore',
+    detection_config_id: `${MODEL.metadata.model_version}:recovery_v1`,
+    playing_retro_nearest_saved_gap_ms: nearestSavedGapMs,
+  };
+}
+
+export function findPlayingRetroAudioRecoveryCandidates(
+  samples: Float32Array,
+  sampleRate: number,
+  savedCandidates: AudioModelCandidate[],
+  blockedTimestampsMs: number[] = [],
+): AudioModelCandidate[] {
+  assertTargetSampleRate(sampleRate);
+  const savedTimestamps = uniqueSortedTimestamps(savedCandidates.map(candidate => candidate.timestamp_ms));
+  const knownTimestamps = uniqueSortedTimestamps([...savedTimestamps, ...blockedTimestampsMs]);
+  const peaks = detectDenseAudioReviewCandidatePeaks(samples, sampleRate, {
+    minCandidateGapMs: RECOVERY_DENSE_CANDIDATE_GAP_MS,
+  })
+    .map((peak, index) => ({ ...peak, index, refined_timestamp_ms: Math.round(peak.refined_timestamp_ms) }))
+    .filter(peak => isFarEnough(peak.refined_timestamp_ms, knownTimestamps, RECOVERY_MIN_GAP_FROM_KNOWN_MS))
+    .filter(peak => {
+      const savedGap = nearestGapMs(peak.refined_timestamp_ms, savedTimestamps);
+      return savedGap === null || savedGap <= RECOVERY_MAX_GAP_FROM_SAVED_MS;
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, RECOVERY_MAX_CANDIDATES);
+
+  const selected: typeof peaks = [];
+  for (const peak of peaks) {
+    if (isFarEnough(peak.refined_timestamp_ms, selected.map(item => item.refined_timestamp_ms), RECOVERY_MIN_GAP_FROM_RECOVERY_MS)) {
+      selected.push(peak);
+    }
+  }
+
+  return selected
+    .sort((a, b) => a.refined_timestamp_ms - b.refined_timestamp_ms)
+    .map((peak, index) => ({
+      ...candidateFromRecoveryPeak(peak, index, nearestGapMs(peak.refined_timestamp_ms, savedTimestamps)),
+      playing_retro_recovery_score: peak.score,
+    } as AudioModelCandidate));
 }
 
 export function analyzePlayingRetroAudioCandidates(
   samples: Float32Array,
   sampleRate: number,
   candidates: AudioModelCandidate[],
+  options: {
+    recoverMissingCandidates?: boolean;
+    blockedTimestampsMs?: number[];
+    onProfileEvent?: (phase: string, detail?: string, durationMs?: number) => void;
+  } = {},
 ): PlayingRetroAudioAnalysisResult {
-  const candidateTimestamps = uniqueSortedTimestamps(candidates.map(candidate => candidate.timestamp_ms));
-  const retroCandidates = candidates.map(candidate => {
+  const recoveryStartedAt = Date.now();
+  const recoveryCandidates = options.recoverMissingCandidates
+    ? findPlayingRetroAudioRecoveryCandidates(
+      samples,
+      sampleRate,
+      candidates,
+      options.blockedTimestampsMs ?? [],
+    )
+    : [];
+  options.onProfileEvent?.(
+    'recovery_candidates_ready',
+    `saved=${candidates.length} recovery=${recoveryCandidates.length}`,
+    Date.now() - recoveryStartedAt,
+  );
+  const allCandidateInputs = [...candidates, ...recoveryCandidates];
+  const candidateTimestamps = uniqueSortedTimestamps(allCandidateInputs.map(candidate => candidate.timestamp_ms));
+  const predictionStartedAt = Date.now();
+  const retroCandidates = allCandidateInputs.map(candidate => {
+    const source = candidate.id.startsWith('playing_retro_recovery_') ? 'recovery_candidate' : 'saved_candidate';
     const prediction = predictPlayingRetroAudioAt(
       samples,
       sampleRate,
       candidate.timestamp_ms,
       candidateTimestamps,
+      source === 'saved_candidate',
       true,
     );
-    return buildPlayingRetroAudioReviewCandidate(candidate, prediction);
+    return buildPlayingRetroAudioReviewCandidate(candidate, prediction, {
+      source,
+      recoveryScore: (candidate as AudioModelCandidate & { playing_retro_recovery_score?: number }).playing_retro_recovery_score,
+      nearestSavedGapMs: (
+        candidate as AudioModelCandidate & { playing_retro_nearest_saved_gap_ms?: number | null }
+      ).playing_retro_nearest_saved_gap_ms,
+    });
   });
+  options.onProfileEvent?.(
+    'rf_predictions_ready',
+    `classified=${retroCandidates.length}`,
+    Date.now() - predictionStartedAt,
+  );
+  const visibleRecoveryCount = retroCandidates.filter(candidate => (
+    candidate.playing_retro_candidate_source === 'recovery_candidate' && candidate.review_relevant
+  )).length;
   return {
     model_version: MODEL.metadata.model_version,
     feature_version: MODEL.metadata.feature_version,
     feature_count: MODEL.feature_names.length,
-    candidate_count: candidates.length,
+    candidate_count: retroCandidates.length,
+    saved_candidate_count: candidates.length,
+    recovery_candidate_count: recoveryCandidates.length,
+    visible_recovery_candidate_count: visibleRecoveryCount,
     candidates: retroCandidates,
   };
 }

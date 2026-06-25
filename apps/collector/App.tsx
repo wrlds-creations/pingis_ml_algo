@@ -7,20 +7,26 @@ import { CalibrationScreen } from './src/CalibrationScreen';
 import { DataCollectionScreen } from './src/DataCollectionScreen';
 import { AudioCollectionScreen } from './src/AudioCollectionScreen';
 import { LiveClassificationScreen } from './src/LiveClassificationScreen';
+import { FableLiveScreen } from './src/FableLiveScreen';
+import { BounceSideLiveScreen } from './src/BounceSideLiveScreen';
 import { BounceTestScreen } from './src/BounceTestScreen';
+import { VideoOnlyStrokeCollectionScreen } from './src/VideoOnlyStrokeCollectionScreen';
 
 type Screen =
   | 'setup'
   | 'calibration'
   | 'collection'
-  | 'audio_collection'
-  | 'bounce_audio_imu_collection'
+  | 'audio_video_pose_collection'
+  | 'video_only_stroke_collection'
+  | 'video_bounce_side_collection'
   | 'free_recording'
   | 'live_classification'
+  | 'fable_live'
+  | 'bounce_side_live'
   | 'bounce_free'
   | 'bounce_alternating';
 
-type CalibrationTarget = 'collection' | 'bounce_audio_imu_collection' | 'free_recording' | 'bounce_free' | 'bounce_alternating';
+type CalibrationTarget = 'collection' | 'free_recording' | 'bounce_free' | 'bounce_alternating';
 
 interface AppState {
   screen: Screen;
@@ -31,8 +37,7 @@ interface AppState {
 }
 
 function calibrationModeForTarget(target: CalibrationTarget): CalibrationMode {
-  return target === 'bounce_audio_imu_collection' ||
-    target === 'free_recording' ||
+  return target === 'free_recording' ||
     target === 'bounce_free' ||
     target === 'bounce_alternating'
     ? 'bounce_sides'
@@ -46,11 +51,12 @@ export default function App() {
     return (
       <SafeAreaProvider>
         <SetupScreen
-          onAudioMode={setup => setState({ screen: 'audio_collection', setup })}
-          onBounceAudioImuMode={setup =>
-            setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_audio_imu_collection' })
-          }
+          onAudioVideoPoseMode={setup => setState({ screen: 'audio_video_pose_collection', setup })}
+          onVideoOnlyStrokeMode={setup => setState({ screen: 'video_only_stroke_collection', setup })}
+          onVideoBounceSideMode={setup => setState({ screen: 'video_bounce_side_collection', setup })}
           onLiveMode={setup => setState({ screen: 'live_classification', setup })}
+          onFableLiveMode={setup => setState({ screen: 'fable_live', setup })}
+          onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
           onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
           onBounceAlternatingMode={setup =>
             setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_alternating' })
@@ -60,29 +66,18 @@ export default function App() {
     );
   }
 
-  if (state.screen === 'audio_collection' && state.setup) {
+  if (state.screen === 'fable_live' && state.setup) {
     return (
       <SafeAreaProvider>
-        <AudioCollectionScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
+        <FableLiveScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
       </SafeAreaProvider>
     );
   }
 
-  if (
-    state.screen === 'bounce_audio_imu_collection' &&
-    state.setup &&
-    state.calibration &&
-    state.bleDevice
-  ) {
+  if (state.screen === 'bounce_side_live' && state.setup) {
     return (
       <SafeAreaProvider>
-        <AudioCollectionScreen
-          setup={state.setup}
-          calibration={state.calibration}
-          device={state.bleDevice}
-          mode="audio_imu"
-          onDone={() => setState({ screen: 'setup' })}
-        />
+        <BounceSideLiveScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
       </SafeAreaProvider>
     );
   }
@@ -105,6 +100,41 @@ export default function App() {
     return (
       <SafeAreaProvider>
         <LiveClassificationScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'audio_video_pose_collection' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <AudioCollectionScreen
+          setup={state.setup}
+          mode="audio_video_pose"
+          onDone={() => setState({ screen: 'setup' })}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'video_only_stroke_collection' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <VideoOnlyStrokeCollectionScreen
+          setup={state.setup}
+          onDone={() => setState({ screen: 'setup' })}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'video_bounce_side_collection' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <VideoOnlyStrokeCollectionScreen
+          setup={state.setup}
+          mode="bounce_side"
+          onDone={() => setState({ screen: 'setup' })}
+        />
       </SafeAreaProvider>
     );
   }
@@ -173,11 +203,12 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <SetupScreen
-        onAudioMode={setup => setState({ screen: 'audio_collection', setup })}
-        onBounceAudioImuMode={setup =>
-          setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_audio_imu_collection' })
-        }
+        onAudioVideoPoseMode={setup => setState({ screen: 'audio_video_pose_collection', setup })}
+        onVideoOnlyStrokeMode={setup => setState({ screen: 'video_only_stroke_collection', setup })}
+        onVideoBounceSideMode={setup => setState({ screen: 'video_bounce_side_collection', setup })}
         onLiveMode={setup => setState({ screen: 'live_classification', setup })}
+        onFableLiveMode={setup => setState({ screen: 'fable_live', setup })}
+        onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
         onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
         onBounceAlternatingMode={setup =>
           setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_alternating' })

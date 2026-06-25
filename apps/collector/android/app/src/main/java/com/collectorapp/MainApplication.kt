@@ -17,6 +17,7 @@ class MainApplication : Application(), ReactApplication {
           add(AudioCapturePackage())
           add(AudioStreamPackage())
           add(ReviewOrientationPackage())
+          add(VideoPosePackage())
         },
     )
   }

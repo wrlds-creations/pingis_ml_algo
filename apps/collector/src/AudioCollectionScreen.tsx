@@ -25,6 +25,7 @@ import {
 import { AudioTakeReviewScreen } from './AudioTakeReviewScreen';
 import { getDefaultAudioDetectionConfigSnapshot } from './audioDetectionConfig';
 import { requiresAudioReview } from './audioReview';
+import { VideoSegment } from './NativeVideoSegment';
 import {
   ACCEL_UUID,
   ACCEL_UUID_ALT,
@@ -47,11 +48,14 @@ import type {
   AudioRecordingScenario,
   AudioDetectionConfigSnapshot,
   AudioReviewMarker,
+  AudioTakeReviewSaveOptions,
   AudioScenarioId,
   AudioSessionFile,
+  AudioVideoSyncMetadata,
   CalibrationData,
   ImuSample,
   PlayerSetup,
+  VideoPoseCandidate,
 } from './types';
 
 const APP_VERSION = '1.7';
@@ -71,7 +75,7 @@ const PROGRESS_RING_SIZE = 62;
 const PROGRESS_RING_RADIUS = 25;
 type CameraFacing = 'front' | 'back';
 type RecordingPhase = 'ready' | 'countdown' | 'recording' | 'finalizing' | 'done';
-type AudioCollectionMode = 'audio_only' | 'audio_imu' | 'free_recording';
+type AudioCollectionMode = 'audio_only' | 'audio_imu' | 'free_recording' | 'audio_video_pose';
 type MusicLevel = 'music_low' | 'music_mid' | 'music_high';
 
 const MUSIC_LEVEL_OPTIONS: Array<{ id: MusicLevel; title: string }> = [
@@ -287,6 +291,20 @@ const FREE_RECORDING_SCENARIOS: AudioScenarioDefinition[] = [
   },
 ];
 
+const AUDIO_VIDEO_POSE_SCENARIOS: AudioScenarioDefinition[] = [
+  {
+    id: 'free_recording',
+    title: 'Ljud + video ML',
+    prompt: 'Spela in en längre pingissekvens eller importera MP4. Review börjar med ljud och går sedan vidare till rörelseförslag.',
+    label: 'unlabeled',
+    background_condition: 'mixed',
+    target_takes: 999,
+    color: '#35c7ff',
+    bg: '#0d2633',
+    scenario: 'playing',
+  },
+];
+
 interface ScenarioGroupDefinition {
   id: 'racket' | 'table' | 'floor' | 'noise' | 'free' | 'playing';
   title: string;
@@ -324,19 +342,26 @@ const FREE_RECORDING_GROUPS: ScenarioGroupDefinition[] = [
   { id: 'free', title: 'Fri', icon: 'F', color: '#b06cff', scenarioIds: ['free_recording'] },
 ];
 
+const AUDIO_VIDEO_POSE_GROUPS: ScenarioGroupDefinition[] = [
+  { id: 'playing', title: 'ML', icon: 'M', color: '#35c7ff', scenarioIds: ['free_recording'] },
+];
+
 function scenariosForMode(mode: AudioCollectionMode): AudioScenarioDefinition[] {
+  if (mode === 'audio_video_pose') return AUDIO_VIDEO_POSE_SCENARIOS;
   if (mode === 'audio_imu') return AUDIO_IMU_SCENARIOS;
   if (mode === 'free_recording') return FREE_RECORDING_SCENARIOS;
   return AUDIO_ONLY_SCENARIOS;
 }
 
 function scenarioGroupsForMode(mode: AudioCollectionMode): ScenarioGroupDefinition[] {
+  if (mode === 'audio_video_pose') return AUDIO_VIDEO_POSE_GROUPS;
   if (mode === 'audio_imu') return AUDIO_IMU_GROUPS;
   if (mode === 'free_recording') return FREE_RECORDING_GROUPS;
   return AUDIO_ONLY_GROUPS;
 }
 
 function initialScenarioIdForMode(mode: AudioCollectionMode): AudioScenarioId {
+  if (mode === 'audio_video_pose') return 'free_recording';
   if (mode === 'audio_imu') return 'racket_bounce_fh';
   if (mode === 'free_recording') return 'free_recording';
   return 'racket_quiet';
@@ -487,7 +512,9 @@ function buildSessionFile(
   calibration?: CalibrationData,
   scenarios = scenariosForMode(mode),
 ): AudioSessionFile {
-  const collectionType = mode === 'audio_imu'
+  const collectionType = mode === 'audio_video_pose'
+    ? 'audio_video_pose'
+    : mode === 'audio_imu'
     ? 'audio_video_imu'
     : mode === 'free_recording' && calibration
       ? 'audio_video_imu'
@@ -501,12 +528,16 @@ function buildSessionFile(
       session_date: sessionDate,
       app_version: APP_VERSION,
       clip_duration_ms: 0,
-      collection_mode: mode === 'free_recording'
+      collection_mode: mode === 'audio_video_pose'
+        ? 'audio_video_pose'
+        : mode === 'free_recording'
         ? 'free_recording'
         : mode === 'audio_imu'
           ? 'guided_scenarios_audio_imu'
           : 'guided_scenarios',
-      recording_mode: mode === 'free_recording'
+      recording_mode: mode === 'audio_video_pose'
+        ? 'audio_video_pose'
+        : mode === 'free_recording'
         ? 'free_recording'
         : mode === 'audio_imu'
           ? 'audio_imu'
@@ -515,7 +546,7 @@ function buildSessionFile(
       scenarios: Array.from(new Set(scenarios.map(scenario => scenario.scenario))),
       calibration_status: calibrationStatusFor(calibration, collectionType === 'audio_video_imu'),
       detection_config_snapshot: getDefaultAudioDetectionConfigSnapshot(),
-      target_duration_s: mode === 'free_recording' || scenarios.some(scenario => scenario.scenario === 'playing')
+      target_duration_s: mode === 'audio_video_pose' || mode === 'free_recording' || scenarios.some(scenario => scenario.scenario === 'playing')
         ? 0
         : TARGET_DURATION_S,
       planned_takes: scenarios.reduce((sum, scenario) => sum + scenario.target_takes, 0),
@@ -588,6 +619,7 @@ export function AudioCollectionScreen({
   const insets = useSafeAreaInsets();
   const scenarioDefinitions = useMemo(() => scenariosForMode(mode), [mode]);
   const scenarioGroups = useMemo(() => scenarioGroupsForMode(mode), [mode]);
+  const isAudioVideoPoseMode = mode === 'audio_video_pose';
   const recordsImu = (mode === 'audio_imu' || mode === 'free_recording') && !!device && !!calibration;
   const calibrationStatus = calibrationStatusFor(calibration, recordsImu);
   const { hasPermission: hasCameraPermission, requestPermission: requestCameraPermission } = useCameraPermission();
@@ -672,7 +704,7 @@ export function AudioCollectionScreen({
   const selectedBackgroundCondition: AudioBackgroundCondition = selectedScenario?.id === 'racket_music'
     ? selectedMusicLevel
     : selectedScenario?.background_condition ?? 'quiet';
-  const isFreeRecording = mode === 'free_recording' || selectedScenario?.scenario === 'playing';
+  const isFreeRecording = isAudioVideoPoseMode || mode === 'free_recording' || selectedScenario?.scenario === 'playing';
   const isBusyWithTake = isRecording || isStartingRecording || isImportingAudio || recordingPhase === 'countdown' || recordingPhase === 'finalizing';
   const selectedSummary =
     scenarioSummaries.find(item => item.scenario_id === selectedScenarioId) ?? scenarioSummaries[0];
@@ -991,6 +1023,63 @@ export function AudioCollectionScreen({
         }
       : undefined;
     const recordedAtIso = new Date(startTimeRef.current).toISOString();
+
+    if (isAudioVideoPoseMode) {
+      const sessionDir = sessionDirRef.current;
+      if (!sessionDir) {
+        throw new Error('Session directory missing while saving audio+video pose take.');
+      }
+
+      const takeIndex = activeTake.take_index;
+      const event: AudioEvent = {
+        label: 'unlabeled',
+        recorded_at: recordedAtIso,
+        created_at: recordedAtIso,
+        wav_filename: activeTake.filename,
+        duration_ms: durationMs,
+        scenario_id: 'free_recording',
+        background_condition: 'mixed',
+        take_index: takeIndex,
+        target_duration_s: 0,
+        recording_mode: 'audio_video_pose',
+        collection_type: 'audio_video_pose',
+        scenario: 'playing',
+        bounce_context: 'mixed',
+        calibration_status: 'skipped',
+        has_audio: true,
+        has_video: Boolean(videoRecording),
+        has_imu: false,
+        player_handedness: setup.handedness,
+        camera_facing: effectiveCameraFacing ?? undefined,
+        detection_config_snapshot: getDefaultAudioDetectionConfigSnapshot(),
+        review: {
+          required: true,
+          anchor_rule: 'attack_start',
+          review_stage: 'audio',
+          markers: [],
+        },
+        video_recording: videoRecording,
+      };
+
+      const nextEvents = [...eventsRef.current, event];
+      eventsRef.current = nextEvents;
+      setEvents(nextEvents);
+      await persistCurrentSession(nextEvents);
+
+      if (sessionJsonPathRef.current) {
+        setRecordingPhase('done');
+        setReviewTarget({
+          sessionJsonPath: sessionJsonPathRef.current,
+          sessionDir,
+          eventIndex: nextEvents.length - 1,
+          event,
+        });
+      }
+      setFeedback('Ljud+video sparad som en hel tagning. Börja med ljudreview.');
+      await refreshPendingReviews();
+      return;
+    }
+
     const event: AudioEvent = {
       label: scenario.label,
       recorded_at: recordedAtIso,
@@ -1063,7 +1152,9 @@ export function AudioCollectionScreen({
     setRemainingMs(isFreeRecording ? 0 : TARGET_DURATION_MS);
   }, [
     calibrationStatus,
+    effectiveCameraFacing,
     finalizeVideoRecording,
+    isAudioVideoPoseMode,
     isFreeRecording,
     mode,
     persistCurrentSession,
@@ -1071,6 +1162,7 @@ export function AudioCollectionScreen({
     refreshPendingReviews,
     scenarioDefinitions,
     selectedMusicLevel,
+    setup.handedness,
   ]);
 
   const stopRecording = useCallback(async (autoStopped: boolean) => {
@@ -1172,9 +1264,10 @@ export function AudioCollectionScreen({
       }
 
       const takeIndex = (selectedSummary?.completed_takes ?? 0) + 1;
-      const filename = `${selectedScenario.id}_${String(takeIndex).padStart(3, '0')}.wav`;
+      const sourcePrefix = isAudioVideoPoseMode ? 'audio_video_pose_source' : selectedScenario.id;
+      const filename = `${sourcePrefix}_${String(takeIndex).padStart(3, '0')}.wav`;
       const filePath = `${sessionDirRef.current}/${filename}`;
-      const videoFilename = `${selectedScenario.id}_${String(takeIndex).padStart(3, '0')}.mp4`;
+      const videoFilename = `${sourcePrefix}_${String(takeIndex).padStart(3, '0')}.mp4`;
       const videoPath = `${sessionDirRef.current}/${videoFilename}`;
       const recorder = await videoOutput.createRecorder({});
       let resolveFinish!: (path: string) => void;
@@ -1274,6 +1367,7 @@ export function AudioCollectionScreen({
     hasCameraPermission,
     cameraReady,
     isFreeRecording,
+    isAudioVideoPoseMode,
     isRecording,
     isSensorConnected,
     permissionGranted,
@@ -1412,6 +1506,121 @@ export function AudioCollectionScreen({
     }
   }, [isBusyWithTake, mode, persistCurrentSession, prepareNewSession, refreshPendingReviews]);
 
+  const importAudioVideoFileForReview = useCallback(async () => {
+    if (!isAudioVideoPoseMode || isBusyWithTake) return;
+    if (!sessionDirRef.current || !sessionJsonPathRef.current) {
+      await prepareNewSession();
+    }
+    const sessionDir = sessionDirRef.current;
+    const sessionJsonPath = sessionJsonPathRef.current;
+    if (!sessionDir || !sessionJsonPath) {
+      Alert.alert('Importfel', 'Kunde inte skapa sessionsmapp för videoimport.');
+      return;
+    }
+
+    setIsImportingAudio(true);
+    setFeedback('Välj en MP4/video från telefonen...');
+
+    const takeIndex = eventsRef.current.filter(event => event.collection_type === 'audio_video_pose').length + 1;
+    const prefix = `audio_video_pose_import_${String(takeIndex).padStart(3, '0')}`;
+    const videoFilename = `${prefix}.mp4`;
+    const wavFilename = `${prefix}.wav`;
+    const videoPath = `${sessionDir}/${videoFilename}`;
+    const wavPath = `${sessionDir}/${wavFilename}`;
+
+    try {
+      const importedVideo = await VideoSegment.importVideoFile(videoPath);
+      setFeedback('Video importerad. Extraherar ljudspår...');
+      const importedAudio = await AudioCapture.extractAudioFromVideoFile(
+        importedVideo.outputPath || videoPath,
+        wavPath,
+      ) as ImportedAudioFile;
+      const nowIso = new Date().toISOString();
+      const durationMs = Math.max(0, Math.round(Number(importedAudio.durationMs ?? importedVideo.durationMs ?? 0)));
+      const videoDurationMs = Math.max(0, Math.round(Number(importedVideo.durationMs ?? durationMs)));
+      const event: AudioEvent = {
+        label: 'unlabeled',
+        recorded_at: nowIso,
+        created_at: nowIso,
+        imported_at: nowIso,
+        wav_filename: wavFilename,
+        duration_ms: durationMs,
+        scenario_id: 'free_recording',
+        background_condition: 'mixed',
+        take_index: takeIndex,
+        target_duration_s: 0,
+        recording_mode: 'audio_video_pose_import',
+        collection_type: 'audio_video_pose',
+        scenario: 'playing',
+        bounce_context: 'mixed',
+        calibration_status: 'skipped',
+        has_audio: true,
+        has_video: true,
+        has_imu: false,
+        imported_source_filename: importedVideo.displayName,
+        imported_source_uri: importedVideo.sourceUri,
+        player_handedness: setup.handedness,
+        camera_facing: effectiveCameraFacing ?? undefined,
+        detection_config_snapshot: getDefaultAudioDetectionConfigSnapshot(),
+        review: {
+          required: true,
+          anchor_rule: 'attack_start',
+          review_stage: 'audio',
+          markers: [],
+        },
+        video_recording: {
+          video_filename: videoFilename,
+          started_at_ms: Date.now(),
+          ended_at_ms: Date.now() + videoDurationMs,
+          duration_ms: videoDurationMs || durationMs,
+          audio_origin_in_video_ms: 0,
+        },
+      };
+
+      await Promise.all([
+        RNFS.scanFile(videoPath).catch(() => {}),
+        RNFS.scanFile(wavPath).catch(() => {}),
+      ]);
+      const nextEvents = [...eventsRef.current, event];
+      eventsRef.current = nextEvents;
+      setEvents(nextEvents);
+      await persistCurrentSession(nextEvents);
+      setReviewTarget({
+        sessionJsonPath,
+        sessionDir,
+        eventIndex: nextEvents.length - 1,
+        event,
+      });
+      setFeedback(`Importerade ${importedVideo.displayName ?? videoFilename}. Börja med ljudreview.`);
+    } catch (error: any) {
+      await Promise.all([
+        RNFS.exists(videoPath).then(exists => exists ? RNFS.unlink(videoPath).catch(() => {}) : undefined),
+        RNFS.exists(wavPath).then(exists => exists ? RNFS.unlink(wavPath).catch(() => {}) : undefined),
+      ]).catch(() => {});
+      const message = String(error?.message ?? error ?? '');
+      if (String(error?.code ?? '').includes('IMPORT_CANCELLED') || message.includes('cancel')) {
+        setFeedback('Videoimport avbruten.');
+      } else if (message.includes('No audio track')) {
+        Alert.alert('Importfel', 'Videon saknar ljudspår. Välj en MP4 med inspelat ljud.');
+        setFeedback('Videoimporten saknade ljudspår.');
+      } else {
+        Alert.alert('Importfel', `Kunde inte importera videon: ${message || 'okänt fel'}`);
+        setFeedback('Videoimporten misslyckades.');
+      }
+    } finally {
+      setIsImportingAudio(false);
+      await refreshPendingReviews();
+    }
+  }, [
+    effectiveCameraFacing,
+    isAudioVideoPoseMode,
+    isBusyWithTake,
+    persistCurrentSession,
+    prepareNewSession,
+    refreshPendingReviews,
+    setup.handedness,
+  ]);
+
   const openPendingReview = useCallback(async (item: PendingReviewItem) => {
     const session = await readSessionFile(item.sessionJsonPath);
     const eventFromDisk = session?.events[item.eventIndex]
@@ -1453,9 +1662,11 @@ export function AudioCollectionScreen({
 
   const saveReview = useCallback(async (
     markers: AudioReviewMarker[],
-    videoSyncOffsetMs?: number,
+    videoSyncMetadata?: AudioVideoSyncMetadata,
     modelCandidates?: AudioModelCandidate[],
     detectionConfigSnapshot?: AudioDetectionConfigSnapshot,
+    videoPoseCandidates?: VideoPoseCandidate[],
+    saveOptions?: AudioTakeReviewSaveOptions,
   ) => {
     const target = reviewTarget;
     if (!target) return;
@@ -1467,23 +1678,37 @@ export function AudioCollectionScreen({
 
     const nextEvents = [...session.events];
     const eventToSave = nextEvents[target.eventIndex];
-    const nextVideoRecording = eventToSave.video_recording && typeof videoSyncOffsetMs === 'number'
+    const nextVideoRecording = eventToSave.video_recording && videoSyncMetadata
       ? {
           ...eventToSave.video_recording,
-          video_sync_offset_ms: videoSyncOffsetMs,
+          ...videoSyncMetadata,
         }
       : eventToSave.video_recording;
+    const nowIso = new Date().toISOString();
+    const isAudioVideoPoseReview = eventToSave.collection_type === 'audio_video_pose';
+    const isPartialAudioReview = isAudioVideoPoseReview && saveOptions?.completion === 'audio';
+    const nextReview = {
+      required: true,
+      anchor_rule: 'attack_start' as const,
+      review_stage: isAudioVideoPoseReview
+        ? (isPartialAudioReview ? 'motion' as const : 'complete' as const)
+        : eventToSave.review?.review_stage,
+      audio_completed_at: isAudioVideoPoseReview
+        ? (eventToSave.review?.audio_completed_at ?? nowIso)
+        : eventToSave.review?.audio_completed_at,
+      motion_completed_at: isAudioVideoPoseReview && !isPartialAudioReview
+        ? nowIso
+        : eventToSave.review?.motion_completed_at,
+      completed_at: isPartialAudioReview ? undefined : nowIso,
+      markers: [...markers].sort((a, b) => a.timestamp_ms - b.timestamp_ms),
+    };
     nextEvents[target.eventIndex] = {
       ...eventToSave,
       video_recording: nextVideoRecording,
       detection_config_snapshot: detectionConfigSnapshot ?? eventToSave.detection_config_snapshot,
       model_candidates: modelCandidates ?? eventToSave.model_candidates,
-      review: {
-        required: true,
-        anchor_rule: 'attack_start',
-        completed_at: new Date().toISOString(),
-        markers: [...markers].sort((a, b) => a.timestamp_ms - b.timestamp_ms),
-      },
+      video_pose_candidates: videoPoseCandidates ?? eventToSave.video_pose_candidates,
+      review: nextReview,
     };
 
     const nextSession = {
@@ -1497,8 +1722,16 @@ export function AudioCollectionScreen({
       setEvents(nextEvents);
     }
 
-    setReviewTarget(null);
-    setFeedback(`Granskning sparad: ${target.event.scenario_id} #${target.event.take_index}`);
+    if (isPartialAudioReview) {
+      setReviewTarget({
+        ...target,
+        event: nextEvents[target.eventIndex],
+      });
+      setFeedback('Ljudreview sparad. Rörelsereview startar från racketträffarna.');
+    } else {
+      setReviewTarget(null);
+      setFeedback(`Granskning sparad: ${target.event.scenario_id} #${target.event.take_index}`);
+    }
     await refreshPendingReviews();
   }, [refreshPendingReviews, reviewTarget]);
 
@@ -1669,16 +1902,23 @@ export function AudioCollectionScreen({
           <View style={styles.dashboardTitleBlock}>
             <Text style={styles.dashboardTitle}>Datainsamling</Text>
             <Text style={styles.dashboardSubtitle}>
-              {isFreeRecording
+              {isAudioVideoPoseMode
+                ? 'Ljud + video ML: en hel tagning, först ljudreview och sedan rörelsereview.'
+                : isFreeRecording
                 ? 'Playing: spela längre sekvenser och märk händelser i efterhand.'
                 : mode === 'audio_imu'
-                  ? 'Audio plus IMU: racketstuds eller playing med synkad rörelsedata.'
-                  : 'Spela in ljudklasser utan IMU: racket, bord, golv och brus.'}
+                  ? 'Äldre synkad ljudinsamling: racketstuds eller playing.'
+                  : 'Äldre ljudinsamling: racket, bord, golv och brus.'}
             </Text>
           </View>
           <TouchableOpacity
             style={styles.infoBtn}
-            onPress={() => Alert.alert('Info', 'Video är bara stöd för granskning. Ljud och granskade markers är träningsfacit.')}
+            onPress={() => Alert.alert(
+              'Info',
+              isAudioVideoPoseMode
+                ? 'Ljudtruth och rörelsetruth sparas som separata rader. Pose körs efter ljudreview.'
+                : 'Video är bara stöd för granskning. Ljud och granskade markers är träningsfacit.',
+            )}
           >
             <Text style={styles.infoBtnTxt}>Info</Text>
           </TouchableOpacity>
@@ -1696,7 +1936,9 @@ export function AudioCollectionScreen({
           </View>
           <View style={styles.statDivider} />
           <View style={styles.statBlock}>
-            <Text style={styles.statMain}>{collectionSummary.completed_takes}/{collectionSummary.total_takes}</Text>
+            <Text style={styles.statMain}>
+              {isAudioVideoPoseMode ? events.length : `${collectionSummary.completed_takes}/${collectionSummary.total_takes}`}
+            </Text>
             <Text style={styles.mutedSmall}>tag</Text>
           </View>
           <View style={styles.statDivider} />
@@ -1726,7 +1968,7 @@ export function AudioCollectionScreen({
 
       <View style={styles.dashboardCard}>
         <Text style={styles.cardLabel}>AKTIVT SCENARIO</Text>
-        {mode !== 'free_recording' && (
+        {mode !== 'free_recording' && !isAudioVideoPoseMode && (
           <View style={styles.groupTabs}>
             {scenarioGroups.map(group => {
               const active = selectedGroup.id === group.id;
@@ -1764,7 +2006,7 @@ export function AudioCollectionScreen({
                   ? `musik ${musicLevelTitle(selectedMusicLevel).toLowerCase()}`
                   : selectedBackgroundCondition}
               </Text>
-              <Text style={styles.tagPill}>{recordsImu ? 'audio + IMU' : 'video + ljud'}</Text>
+              <Text style={styles.tagPill}>{isAudioVideoPoseMode ? 'audio + video + pose' : recordsImu ? 'synkad ljuddata' : 'video + ljud'}</Text>
               <Text style={styles.tagPill}>{selectedScenario.scenario}</Text>
               <Text style={styles.tagPill}>granska efter tagning</Text>
             </View>
@@ -1797,9 +2039,16 @@ export function AudioCollectionScreen({
                 Playing kräver ingen förvald label. Markera forehand, backhand och bordsstudsar i Review.
               </Text>
             )}
+            {isAudioVideoPoseMode && (
+              <Text style={styles.scenarioModeHint}>
+                Efter stopp sparas en hel WAV + MP4. Review 1 märker ljud, Review 2 kör pose runt bekräftade racketträffar.
+              </Text>
+            )}
           </View>
           <View style={styles.remainingBlock}>
-            <Text style={styles.remainingMain}>{selectedSummary?.completed_takes ?? 0}/{selectedScenario.target_takes}</Text>
+            <Text style={styles.remainingMain}>
+              {isAudioVideoPoseMode ? `${events.length}` : `${selectedSummary?.completed_takes ?? 0}/${selectedScenario.target_takes}`}
+            </Text>
             <Text style={styles.mutedSmall}>{isFreeRecording ? 'sekvens' : 'tag kvar'}</Text>
             {groupScenarioIds.length > 1 && <Text style={styles.changeScenarioTxt}>Byt</Text>}
           </View>
@@ -1880,7 +2129,7 @@ export function AudioCollectionScreen({
               <Text style={styles.cameraMeta}>AirHive {isSensorConnected ? `${sampleHz} Hz` : 'frånkopplad'} | mål 150</Text>
             )}
             {isFreeRecording && !recordsImu && (
-              <Text style={styles.cameraMeta}>IMU saknas: sparar video + ljud</Text>
+              <Text style={styles.cameraMeta}>{isAudioVideoPoseMode ? 'Pose körs i review' : 'IMU saknas: sparar video + ljud'}</Text>
             )}
             {recordsImu && (
               <Text style={styles.cameraMeta}>
@@ -1918,7 +2167,7 @@ export function AudioCollectionScreen({
               : recordingPhase === 'finalizing'
                 ? 'SPARAR...'
                 : selectedRemaining > 0
-                  ? (isFreeRecording ? 'STARTA PLAYING' : 'STARTA 30 S TAGNING')
+                  ? (isAudioVideoPoseMode ? 'STARTA LJUD + VIDEO ML' : isFreeRecording ? 'STARTA PLAYING' : 'STARTA 30 S TAGNING')
                   : 'SCENARIO KLART'}
           </Text>
           <Text style={[styles.dashboardStartSub, startDisabled && styles.dashboardStartSubDisabled]}>{instruction}</Text>
@@ -1939,6 +2188,24 @@ export function AudioCollectionScreen({
           </Text>
           <Text style={styles.importAudioSub}>
             Välj en iPhone-inspelning. Appen konverterar till WAV och öppnar audio-review utan video.
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {isAudioVideoPoseMode && (
+        <TouchableOpacity
+          style={[styles.importAudioBtn, isBusyWithTake && styles.disabledBtn]}
+          onPress={() => importAudioVideoFileForReview().catch(error => {
+            Alert.alert('Importfel', String(error));
+          })}
+          disabled={isBusyWithTake}
+          activeOpacity={0.82}
+        >
+          <Text style={styles.importAudioTitle}>
+            {isImportingAudio ? 'IMPORTERAR VIDEO...' : 'IMPORTERA VIDEO'}
+          </Text>
+          <Text style={styles.importAudioSub}>
+            Välj en MP4 från iPhone/Drive. Appen extraherar ljud och öppnar tvåstegsreview.
           </Text>
         </TouchableOpacity>
       )}

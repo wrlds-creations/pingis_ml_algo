@@ -11,9 +11,15 @@ import {
   View, Text, TouchableOpacity, ScrollView, Pressable,
   StyleSheet, StatusBar, PanResponder,
 } from 'react-native';
+import RNFS from 'react-native-fs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { decodeBase64PCM } from './NativeAudioCapture';
-import { AudioStream, AudioStreamEmitter } from './NativeAudioStream';
+import {
+  AudioStream,
+  AudioStreamEmitter,
+  type NativeAudioBounceEvent,
+  type NativeAudioOnsetDebug,
+} from './NativeAudioStream';
 import { detectionConfigTitle, getAudioDetectionConfig } from './audioDetectionConfig';
 import { detectAudioContact } from './audioContactEngine';
 import type { AudioDetectionEvent, AudioDetectionMode, AudioDetectionSensitivity, PlayerSetup } from './types';
@@ -29,6 +35,7 @@ const CONF_MAX = 0.95;
 const DEFAULT_MERGE_WINDOW_MS = DEFAULT_LIVE_CONFIG.merge_window_ms;
 const DEFAULT_RETRIGGER_WINDOW_MS = 220;
 const DEFAULT_GROUP_WINDOW_MS = 80;
+const LIVE_DEBUG_DIR = `${RNFS.ExternalStorageDirectoryPath}/Download/pingis_sessions/live_debug`;
 
 const LABEL_CONFIG: Record<string, { name: string; color: string; bg: string }> = {
   racket_contact: { name: 'CONTACT', color: '#2ecc71', bg: '#0a2018' },
@@ -66,9 +73,64 @@ interface RecentEvent {
   groupStatus?: AudioDetectionEvent['group_status'];
 }
 
+interface LiveDebugEvent {
+  index: number;
+  received_at_ms: number;
+  native_onset_time_ms?: number;
+  native_onset_pos?: number;
+  native_rms?: number;
+  native_background_rms?: number;
+  native_adaptive_threshold?: number;
+  native_onset_ratio?: number;
+  native_retrigger_ms?: number;
+  native_spectral_passed?: boolean;
+  native_ball_ratio?: number;
+  native_flatness?: number;
+  native_reject_reason?: string | null;
+  model_label?: string;
+  model_confidence?: number;
+  model_probabilities?: Record<string, number>;
+  surface_label?: string;
+  surface_confidence?: number;
+  surface_probabilities?: Record<string, number>;
+  counted: boolean;
+  ignored_reason: string;
+  group_id?: number;
+  group_status?: AudioDetectionEvent['group_status'];
+  config_id: string;
+  sensitivity: AudioDetectionSensitivity;
+  detection_mode: AudioDetectionMode;
+  confidence_threshold: number;
+  onset_threshold: number;
+  retrigger_window_ms: number;
+  group_window_ms: number;
+  merge_window_ms: number;
+}
+
 interface ContactGroupState {
   id: number;
   startedAtMs: number;
+}
+
+function parseNativeAudioEvent(event: NativeAudioBounceEvent): {
+  audioB64?: string;
+  nativeDebug?: NativeAudioOnsetDebug;
+} {
+  if (typeof event === 'string') {
+    return { audioB64: event };
+  }
+  return {
+    audioB64: event.audio_b64 ?? undefined,
+    nativeDebug: event.native_debug,
+  };
+}
+
+function debugNumber(value?: number): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function safeSessionStamp(iso: string): string {
+  return iso.replace(/[:.]/g, '-');
 }
 
 function surfaceLabelName(label?: string) {
@@ -110,6 +172,7 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
   const [eventCount, setEventCount] = useState(0);
   const [hitCount, setHitCount] = useState(0);
   const [showIgnored, setShowIgnored] = useState(false);
+  const [savedLiveDebugPath, setSavedLiveDebugPath] = useState<string | null>(null);
 
   const confRef = useRef(DEFAULT_CONF);
   confRef.current = confidence;
@@ -123,6 +186,86 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
   const lastQualifiedTsRef = useRef<number | undefined>(undefined);
   const contactGroupRef = useRef<ContactGroupState | null>(null);
   const groupCounterRef = useRef(0);
+  const liveEventsRef = useRef<LiveDebugEvent[]>([]);
+  const liveStartedAtRef = useRef<string | null>(null);
+
+  const appendLiveDebugEvent = useCallback((params: {
+    nativeDebug?: NativeAudioOnsetDebug;
+    result?: AudioDetectionEvent;
+    counted: boolean;
+    ignoredReason: string;
+    receivedAtMs: number;
+  }) => {
+    const { nativeDebug, result, counted, ignoredReason, receivedAtMs } = params;
+    liveEventsRef.current.push({
+      index: liveEventsRef.current.length + 1,
+      received_at_ms: receivedAtMs,
+      native_onset_time_ms: debugNumber(nativeDebug?.onset_time_ms),
+      native_onset_pos: debugNumber(nativeDebug?.onset_pos),
+      native_rms: debugNumber(nativeDebug?.rms),
+      native_background_rms: debugNumber(nativeDebug?.background_rms),
+      native_adaptive_threshold: debugNumber(nativeDebug?.adaptive_threshold),
+      native_onset_ratio: debugNumber(nativeDebug?.onset_ratio),
+      native_retrigger_ms: debugNumber(nativeDebug?.retrigger_ms),
+      native_spectral_passed: nativeDebug?.spectral_passed,
+      native_ball_ratio: debugNumber(nativeDebug?.ball_ratio),
+      native_flatness: debugNumber(nativeDebug?.flatness),
+      native_reject_reason: nativeDebug?.native_reject_reason ?? null,
+      model_label: result?.label,
+      model_confidence: result?.confidence,
+      model_probabilities: result?.probabilities,
+      surface_label: result?.surface_label,
+      surface_confidence: result?.surface_confidence,
+      surface_probabilities: result?.surface_probabilities,
+      counted,
+      ignored_reason: ignoredReason,
+      group_id: result?.group_id,
+      group_status: result?.group_status,
+      config_id: activeDetectionConfig.config_id,
+      sensitivity,
+      detection_mode: detectionMode,
+      confidence_threshold: confRef.current,
+      onset_threshold: threshold,
+      retrigger_window_ms: retriggerWindowRef.current,
+      group_window_ms: groupWindowRef.current,
+      merge_window_ms: mergeWindowRef.current,
+    });
+  }, [activeDetectionConfig.config_id, detectionMode, sensitivity, threshold]);
+
+  const saveLiveDebugSession = useCallback(async () => {
+    if (liveEventsRef.current.length === 0) return;
+    const stoppedAt = new Date().toISOString();
+    const startedAt = liveStartedAtRef.current ?? stoppedAt;
+    const path = `${LIVE_DEBUG_DIR}/live_bounce_session_${safeSessionStamp(stoppedAt)}.json`;
+    const payload = {
+      type: 'live_bounce_debug_session',
+      player: setup,
+      started_at: startedAt,
+      stopped_at: stoppedAt,
+      baseline_id: activeDetectionConfig.model_versions?.bundle_id,
+      config_snapshot: {
+        ...activeDetectionConfig,
+        contact_confidence_min: confidence,
+        onset_threshold: threshold,
+        retrigger_window_ms: retriggerWindowMs,
+        group_window_ms: groupWindowMs,
+        merge_window_ms: mergeWindowMs,
+      },
+      counts: {
+        native_candidates: liveEventsRef.current.length,
+        counted: liveEventsRef.current.filter(item => item.counted).length,
+        ignored: liveEventsRef.current.filter(item => !item.counted).length,
+      },
+      events: liveEventsRef.current,
+    };
+    try {
+      await RNFS.mkdir(LIVE_DEBUG_DIR);
+      await RNFS.writeFile(path, JSON.stringify(payload, null, 2), 'utf8');
+      setSavedLiveDebugPath(path);
+    } catch {
+      setSavedLiveDebugPath('Kunde inte spara live-debug.');
+    }
+  }, [activeDetectionConfig, confidence, groupWindowMs, mergeWindowMs, retriggerWindowMs, setup, threshold]);
 
   function makeSlider(
     value: number,
@@ -178,24 +321,63 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
     if (isListening) {
       AudioStream.stopStreaming();
       setIsListening(false);
+      void saveLiveDebugSession();
       return;
     }
 
     lastQualifiedTsRef.current = undefined;
     contactGroupRef.current = null;
     groupCounterRef.current = 0;
+    liveEventsRef.current = [];
+    liveStartedAtRef.current = new Date().toISOString();
+    setSavedLiveDebugPath(null);
     AudioStream.setRetriggerMs(retriggerWindowRef.current);
     AudioStream.startStreaming(threshold);
     setIsListening(true);
-  }, [isListening, threshold]);
+  }, [isListening, saveLiveDebugSession, threshold]);
 
   useEffect(() => {
     if (!isListening) return;
 
-    const sub = AudioStreamEmitter.addListener('onBounceDetected', (audioB64: string) => {
+    const sub = AudioStreamEmitter.addListener('onBounceDetected', (event: NativeAudioBounceEvent) => {
       setEventCount(n => n + 1);
+      const { audioB64, nativeDebug } = parseNativeAudioEvent(event);
+      const receivedAtMs = Date.now();
+      const ts = new Date().toLocaleTimeString('sv-SE', {
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+
+      if (!audioB64) {
+        const reason = nativeDebug?.native_reject_reason ?? 'native_reject';
+        setDebug({
+          label: 'not_racket_contact',
+          conf: 0,
+          reason,
+          probs: {},
+          surfaceLabel: '-',
+          surfaceConf: 0,
+        });
+        setRecentEvents(prev => [{
+          ts,
+          label: 'not_racket_contact',
+          confidence: 0,
+          surfaceLabel: '-',
+          surfaceConfidence: 0,
+          counted: false,
+          reason,
+          groupStatus: 'standalone',
+        }, ...prev.slice(0, 29)]);
+        appendLiveDebugEvent({
+          nativeDebug,
+          counted: false,
+          ignoredReason: reason,
+          receivedAtMs,
+        });
+        return;
+      }
+
       try {
-        const detectedAtMs = Date.now();
+        const detectedAtMs = nativeDebug?.onset_time_ms ?? receivedAtMs;
         const pcm = decodeBase64PCM(audioB64);
         const result = detectAudioContact({
           detectedAtMs,
@@ -230,10 +412,6 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           result.group_status = 'standalone';
         }
 
-        const ts = new Date().toLocaleTimeString('sv-SE', {
-          hour: '2-digit', minute: '2-digit', second: '2-digit',
-        });
-
         const appendRecent = (counted: boolean, reason: string) => {
           setRecentEvents(prev => [{
             ts,
@@ -260,6 +438,13 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
             groupStatus: result.group_status,
           });
           appendRecent(false, reasonLabel(result.ignored_reason ?? 'ignored'));
+          appendLiveDebugEvent({
+            nativeDebug,
+            result,
+            counted: false,
+            ignoredReason: reasonLabel(result.ignored_reason ?? 'ignored'),
+            receivedAtMs,
+          });
           return;
         }
 
@@ -275,6 +460,13 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           groupStatus: result.group_status,
         });
         appendRecent(true, 'counted');
+        appendLiveDebugEvent({
+          nativeDebug,
+          result,
+          counted: true,
+          ignoredReason: 'counted',
+          receivedAtMs,
+        });
         setHitCount(n => n + 1);
         const contact: DetectedContact = {
           label: result.label,
@@ -292,11 +484,17 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
           surfaceLabel: '-',
           surfaceConf: 0,
         });
+        appendLiveDebugEvent({
+          nativeDebug,
+          counted: false,
+          ignoredReason: 'decode_error',
+          receivedAtMs,
+        });
       }
     });
 
     return () => sub.remove();
-  }, [activeDetectionConfig, isListening, threshold]);
+  }, [activeDetectionConfig, appendLiveDebugEvent, isListening, threshold]);
 
   useEffect(() => () => { AudioStream.stopStreaming(); }, []);
 
@@ -545,6 +743,9 @@ export function LiveClassificationScreen({ setup, onDone }: Props) {
         <Text style={styles.debugHelp}>
           If floor bounce still counts, send me one row that shows `counted` and one row that shows `surface`.
         </Text>
+        {savedLiveDebugPath && (
+          <Text style={styles.debugHelp}>Live-debug: {savedLiveDebugPath}</Text>
+        )}
         {(showIgnored ? recentEvents : recentEvents.filter(item => item.counted)).length === 0 ? (
           <Text style={styles.emptyTxt}>No audio events in current view.</Text>
         ) : (

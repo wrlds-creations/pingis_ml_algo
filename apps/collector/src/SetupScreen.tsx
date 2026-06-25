@@ -15,27 +15,33 @@ import type { PlayerSetup } from './types';
 
 interface Props {
   onCollectionMode?: (setup: PlayerSetup) => void;
-  onAudioMode?: (setup: PlayerSetup) => void;
-  onBounceAudioImuMode?: (setup: PlayerSetup) => void;
   onFreeRecordingMode?: (setup: PlayerSetup) => void;
   onFreeRecordingImuMode?: (setup: PlayerSetup) => void;
+  onAudioVideoPoseMode?: (setup: PlayerSetup) => void;
+  onVideoOnlyStrokeMode?: (setup: PlayerSetup) => void;
+  onVideoBounceSideMode?: (setup: PlayerSetup) => void;
   onLiveMode?: (setup: PlayerSetup) => void;
+  onFableLiveMode?: (setup: PlayerSetup) => void;
+  onBounceSideLiveMode?: (setup: PlayerSetup) => void;
   onBounceFreeMode?: (setup: PlayerSetup) => void;
   onBounceAlternatingMode?: (setup: PlayerSetup) => void;
 }
 
 export function SetupScreen({
   onCollectionMode,
-  onAudioMode,
-  onBounceAudioImuMode,
   onFreeRecordingMode,
   onFreeRecordingImuMode,
+  onAudioVideoPoseMode,
+  onVideoOnlyStrokeMode,
+  onVideoBounceSideMode,
   onLiveMode,
+  onFableLiveMode,
+  onBounceSideLiveMode,
   onBounceFreeMode,
   onBounceAlternatingMode,
 }: Props) {
   const [name, setName] = useState('');
-  const [handedness, setHandedness] = useState<'right' | 'left'>('right');
+  const [handedness, setHandedness] = useState<'right' | 'left'>('left');
 
   const canContinue = name.trim().length > 0;
   const setup = { name: name.trim(), handedness };
@@ -143,8 +149,52 @@ export function SetupScreen({
             onPress={() => canContinue && onLiveMode(setup)}
           />
         )}
-
+        {onFableLiveMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Fable-algoritm"
+            subtitle="Ny brusrobust studsdetektor: bandpass-gate + HistGB, tål musik/prat. Testläge."
+            colorStyle="purple"
+            onPress={() => canContinue && onFableLiveMode(setup)}
+          />
+        )}
+        {onBounceSideLiveMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Studs FH/BH LIVE"
+            subtitle="Kameran igång: räknar studsar via ljudet och avgör forehand-/backhandsida i realtid."
+            colorStyle="gold"
+            onPress={() => canContinue && onBounceSideLiveMode(setup)}
+          />
+        )}
         <Text style={styles.sectionLabel}>DATA</Text>
+        {onAudioVideoPoseMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Ljud + video ML"
+            subtitle="Spela in eller importera MP4, märk ljud först och kör rörelsereview efteråt."
+            colorStyle="blue"
+            onPress={() => canContinue && onAudioVideoPoseMode(setup)}
+          />
+        )}
+        {onVideoOnlyStrokeMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Video FH/BH"
+            subtitle="Importera video, kör pose i 15 fps och märk forehand/backhand utan ljud-ML."
+            colorStyle="green"
+            onPress={() => canContinue && onVideoOnlyStrokeMode(setup)}
+          />
+        )}
+        {onVideoBounceSideMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Video studs FH/BH"
+            subtitle="Importera studs-video, använd ljudpeakar som ankare och märk FH-sida/BH-sida."
+            colorStyle="purple"
+            onPress={() => canContinue && onVideoBounceSideMode(setup)}
+          />
+        )}
         {onCollectionMode && (
           <ModeButton
             disabled={!canContinue}
@@ -152,24 +202,6 @@ export function SetupScreen({
             subtitle="Collect labeled IMU sessions for model training"
             colorStyle="darkGreen"
             onPress={() => canContinue && onCollectionMode(setup)}
-          />
-        )}
-        {onAudioMode && (
-          <ModeButton
-            disabled={!canContinue}
-            title="Ljudinsamling"
-            subtitle="Spela in ljudklasser utan IMU: racket, bord, golv och brus."
-            colorStyle="purple"
-            onPress={() => canContinue && onAudioMode(setup)}
-          />
-        )}
-        {onBounceAudioImuMode && (
-          <ModeButton
-            disabled={!canContinue}
-            title="Audio plus IMU"
-            subtitle="Samla ljud och rörelse tillsammans: racketstuds eller playing."
-            colorStyle="blue"
-            onPress={() => canContinue && onBounceAudioImuMode(setup)}
           />
         )}
         {onFreeRecordingMode && (

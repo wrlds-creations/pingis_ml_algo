@@ -57,17 +57,29 @@ const REVIEW_REQUIRED_SCENARIOS = new Set<AudioScenarioId>([
 
 const FRAME_MS = 12;
 const MIN_CANDIDATE_GAP_MS = 180;
+const DENSE_CANDIDATE_GAP_MS = 70;
 const MIN_ENVELOPE_THRESHOLD = 0.01;
 const LOCAL_FRAME_MS = 4;
 const LOCAL_HOP_MS = 1;
 const AUTO_REFINE_SEARCH_PRE_MS = 120;
 const AUTO_REFINE_SEARCH_POST_MS = 40;
+const DENSE_AUTO_REFINE_SEARCH_PRE_MS = 70;
+const DENSE_AUTO_REFINE_SEARCH_POST_MS = 35;
 const MANUAL_SNAP_RADIUS_MS = 140;
 const REVIEW_CONTACT_CONFIDENCE = 0.65;
 const PLAYING_REVIEW_CONTACT_FLOOR = 0.45;
 const REVIEW_SURFACE_CONFIDENCE = 0.55;
 const REVIEW_SURFACE_VETO_CONFIDENCE = 0.75;
 const REVIEW_MARKER_DEDUP_MS = 450;
+const DENSE_REVIEW_MARKER_DEDUP_MS = 80;
+const DENSE_REVIEW_SAME_LABEL_DEDUP_MS = 180;
+
+function isDenseReviewScenario(scenarioId: AudioScenarioId): boolean {
+  return scenarioId === 'playing_dense_audio' ||
+    scenarioId === 'playing_dense_imu' ||
+    scenarioId === 'free_recording' ||
+    scenarioId === 'imported_audio';
+}
 
 export interface DecodedWavFile {
   sampleRate: number;
@@ -95,6 +107,10 @@ export interface SuggestedReviewData {
   markers: AudioReviewMarker[];
   model_candidates: AudioModelCandidate[];
   detection_config_snapshot: AudioDetectionConfigSnapshot;
+}
+
+export interface SuggestedReviewOptions {
+  min_contact_confidence?: number;
 }
 
 export function requiresAudioReview(scenarioId: AudioScenarioId): boolean {
@@ -219,6 +235,7 @@ export function buildSuggestedReviewData(
   sampleRate: number,
   scenarioId: AudioScenarioId,
   detectionConfig: AudioDetectionConfigSnapshot = getDefaultAudioDetectionConfigSnapshot(),
+  options: SuggestedReviewOptions = {},
 ): SuggestedReviewData {
   if (scenarioId === 'racket_motion_no_bounce') {
     return {
@@ -231,12 +248,19 @@ export function buildSuggestedReviewData(
   const markers: AudioReviewMarker[] = [];
   const modelCandidates: AudioModelCandidate[] = [];
   let lastAcceptedMs = -Infinity;
-  const contactConfidenceThreshold = scenarioId === 'free_recording' || scenarioId === 'imported_audio'
+  const baseContactConfidenceThreshold = scenarioId === 'free_recording' || scenarioId === 'imported_audio'
     ? Math.min(detectionConfig.contact_confidence_min, PLAYING_REVIEW_CONTACT_FLOOR)
     : detectionConfig.contact_confidence_min;
+  const contactConfidenceThreshold = Math.max(
+    baseContactConfidenceThreshold,
+    options.min_contact_confidence ?? 0,
+  );
 
-  for (const candidate of detectReviewCandidates(samples, sampleRate)) {
-    if (candidate.refined_timestamp_ms - lastAcceptedMs < REVIEW_MARKER_DEDUP_MS) continue;
+  const denseReview = isDenseReviewScenario(scenarioId);
+  const reviewMarkerDedupMs = denseReview ? DENSE_REVIEW_MARKER_DEDUP_MS : REVIEW_MARKER_DEDUP_MS;
+
+  for (const candidate of detectReviewCandidates(samples, sampleRate, { dense: denseReview })) {
+    if (candidate.refined_timestamp_ms - lastAcceptedMs < reviewMarkerDedupMs) continue;
 
     const decision = detectAudioContact({
       detectedAtMs: candidate.refined_timestamp_ms,
@@ -253,24 +277,30 @@ export function buildSuggestedReviewData(
       detectionConfig.surface_veto_confidence,
       detectionConfig.detection_mode,
     );
+    const sameLabelDuplicate = !!suggestedLabel && denseReview && markers.some(marker =>
+      marker.suggested_label === suggestedLabel &&
+      Math.abs(marker.timestamp_ms - candidate.refined_timestamp_ms) < DENSE_REVIEW_SAME_LABEL_DEDUP_MS
+    );
     const candidateId = `candidate_${modelCandidates.length}_${candidate.refined_timestamp_ms}`;
-    const candidateMetadata = suggestedLabel
+    const candidateMetadata = suggestedLabel && !sameLabelDuplicate
       ? metadataForScenario(scenarioId, suggestedLabel, decision)
       : {};
     modelCandidates.push({
       id: candidateId,
       timestamp_ms: candidate.refined_timestamp_ms,
-      review_relevant: !!suggestedLabel,
-      suggested_label: suggestedLabel ?? undefined,
+      review_relevant: !!suggestedLabel && !sameLabelDuplicate,
+      suggested_label: suggestedLabel && !sameLabelDuplicate ? suggestedLabel : undefined,
       contact_confidence: decision.confidence,
       surface_label: decision.surface_label,
       surface_confidence: decision.surface_confidence,
       detection_mode: detectionConfig.detection_mode,
       detection_config_id: detectionConfig.config_id,
-      ignored_reason: suggestedLabel ? undefined : decision.ignored_reason ?? 'not_preset_relevant',
+      ignored_reason: suggestedLabel
+        ? sameLabelDuplicate ? 'same_label_duplicate' : undefined
+        : decision.ignored_reason ?? 'not_preset_relevant',
       ...candidateMetadata,
     });
-    if (!suggestedLabel) continue;
+    if (!suggestedLabel || sameLabelDuplicate) continue;
 
     markers.push({
       id: `auto_${markers.length}_${candidate.refined_timestamp_ms}`,
@@ -356,6 +386,9 @@ function reviewLabelForDecision(
   const surfaceLabel = decision.surface_label;
   const surfaceConfidence = decision.surface_confidence ?? 0;
   const allowSurfaceVeto = detectionMode !== 'binary_only';
+  const surfaceReviewConfidence = isDenseReviewScenario(scenarioId)
+    ? Math.min(REVIEW_SURFACE_CONFIDENCE, contactConfidenceThreshold)
+    : REVIEW_SURFACE_CONFIDENCE;
 
   if (scenarioId.startsWith('racket_')) {
     if (scenarioId === 'racket_motion_no_bounce') return null;
@@ -383,7 +416,7 @@ function reviewLabelForDecision(
     const surfaceVeto = (
       allowSurfaceVeto &&
       (surfaceLabel === 'table_bounce' || surfaceLabel === 'floor_bounce' || surfaceLabel === 'noise') &&
-      surfaceConfidence >= REVIEW_SURFACE_CONFIDENCE
+      surfaceConfidence >= surfaceReviewConfidence
     );
     if (surfaceVeto) return 'not_racket_contact';
     return decision.label === 'racket_contact' && decision.confidence >= contactConfidenceThreshold
@@ -553,6 +586,24 @@ export async function writePreviewClip(
   );
 }
 
+export async function writeWavSegmentFile(
+  filePath: string,
+  samples: Float32Array,
+  sampleRate: number,
+  startMs: number,
+  endMs: number,
+): Promise<number> {
+  const totalDurationMs = samples.length > 0 ? (samples.length / sampleRate) * 1000 : 0;
+  const safeStartMs = Math.max(0, Math.min(totalDurationMs, startMs));
+  const safeEndMs = Math.max(safeStartMs, Math.min(totalDurationMs, endMs));
+  const startSample = Math.max(0, Math.floor((safeStartMs / 1000) * sampleRate));
+  const endSample = Math.min(samples.length, Math.ceil((safeEndMs / 1000) * sampleRate));
+  const wav = encodeMonoPcm16Wav(samples.slice(startSample, endSample), sampleRate);
+  await RNFS.writeFile(filePath, Buffer.from(wav).toString('base64'), 'base64');
+  try { await RNFS.scanFile(filePath); } catch (_) {}
+  return Math.round(((endSample - startSample) / sampleRate) * 1000);
+}
+
 export async function writeTakePlaybackClip(
   samples: Float32Array,
   sampleRate: number,
@@ -631,10 +682,17 @@ export function snapMarkerToAttack(
   return refineAttackTimestamp(samples, sampleRate, peakMs);
 }
 
+export interface AudioReviewCandidatePeak {
+  timestamp_ms: number;
+  refined_timestamp_ms: number;
+  score: number;
+}
+
 function detectReviewCandidates(
   samples: Float32Array,
   sampleRate: number,
-): Array<{ timestamp_ms: number; refined_timestamp_ms: number; score: number }> {
+  options: { dense?: boolean; minCandidateGapMs?: number } = {},
+): AudioReviewCandidatePeak[] {
   if (samples.length === 0) return [];
 
   const frameSize = Math.max(32, Math.round((sampleRate * FRAME_MS) / 1000));
@@ -653,7 +711,9 @@ function detectReviewCandidates(
   const mean = envelope.reduce((sum, value) => sum + value, 0) / envelope.length;
   const p90 = percentile(sorted, 0.9);
   const p98 = percentile(sorted, 0.98);
-  const threshold = Math.max(MIN_ENVELOPE_THRESHOLD, mean * 2.2, p90 * 0.6, p98 * 0.35);
+  const threshold = options.dense
+    ? Math.max(MIN_ENVELOPE_THRESHOLD * 0.65, mean * 1.45, p90 * 0.38, p98 * 0.18)
+    : Math.max(MIN_ENVELOPE_THRESHOLD, mean * 2.2, p90 * 0.6, p98 * 0.35);
 
   const localPeaks: Array<{ frame: number; score: number }> = [];
   for (let i = 1; i < envelope.length - 1; i++) {
@@ -665,7 +725,8 @@ function detectReviewCandidates(
   }
 
   localPeaks.sort((a, b) => b.score - a.score);
-  const minGapFrames = Math.max(1, Math.round(MIN_CANDIDATE_GAP_MS / ((hopSize / sampleRate) * 1000)));
+  const minCandidateGapMs = options.minCandidateGapMs ?? (options.dense ? DENSE_CANDIDATE_GAP_MS : MIN_CANDIDATE_GAP_MS);
+  const minGapFrames = Math.max(1, Math.round(minCandidateGapMs / ((hopSize / sampleRate) * 1000)));
   const accepted: Array<{ frame: number; score: number }> = [];
 
   for (const peak of localPeaks) {
@@ -674,15 +735,27 @@ function detectReviewCandidates(
   }
 
   accepted.sort((a, b) => a.frame - b.frame);
+  const refinePreMs = options.dense ? DENSE_AUTO_REFINE_SEARCH_PRE_MS : AUTO_REFINE_SEARCH_PRE_MS;
+  const refinePostMs = options.dense ? DENSE_AUTO_REFINE_SEARCH_POST_MS : AUTO_REFINE_SEARCH_POST_MS;
   return accepted.map(peak => ({
     timestamp_ms: Math.round(((peak.frame * hopSize) / sampleRate) * 1000),
     refined_timestamp_ms: refineAttackTimestamp(
       samples,
       sampleRate,
       Math.round(((peak.frame * hopSize) / sampleRate) * 1000),
+      refinePreMs,
+      refinePostMs,
     ),
     score: peak.score,
   }));
+}
+
+export function detectDenseAudioReviewCandidatePeaks(
+  samples: Float32Array,
+  sampleRate: number,
+  options: { minCandidateGapMs?: number } = {},
+): AudioReviewCandidatePeak[] {
+  return detectReviewCandidates(samples, sampleRate, { dense: true, ...options });
 }
 
 function percentile(sortedValues: number[], q: number): number {
@@ -723,10 +796,12 @@ function refineAttackTimestamp(
   samples: Float32Array,
   sampleRate: number,
   approxTimestampMs: number,
+  searchPreMs = AUTO_REFINE_SEARCH_PRE_MS,
+  searchPostMs = AUTO_REFINE_SEARCH_POST_MS,
 ): number {
   const totalDurationMs = (samples.length / sampleRate) * 1000;
-  const localStartMs = Math.max(0, approxTimestampMs - AUTO_REFINE_SEARCH_PRE_MS);
-  const localEndMs = Math.min(totalDurationMs, approxTimestampMs + AUTO_REFINE_SEARCH_POST_MS);
+  const localStartMs = Math.max(0, approxTimestampMs - searchPreMs);
+  const localEndMs = Math.min(totalDurationMs, approxTimestampMs + searchPostMs);
   const localEnvelope = buildLocalEnvelope(samples, sampleRate, localStartMs, localEndMs);
   if (localEnvelope.values.length < 3) {
     return clampMs(approxTimestampMs, totalDurationMs);

@@ -27,6 +27,149 @@ export interface PlayerSetup {
   handedness: 'right' | 'left';
 }
 
+// ---- Video stroke classification ----
+
+export type VideoStrokeType = 'forehand' | 'backhand';
+export type VideoStrokeMarkerType = VideoStrokeType | 'unknown';
+export type VideoStrokePredictionLabel = VideoStrokeType | 'uncertain';
+export type VideoStrokeCameraFacing = 'front' | 'back';
+export type VideoStrokeCameraAngle = 'front_oblique';
+export type VideoStrokeCameraSide = 'player_left' | 'player_right' | 'center_front' | 'unknown';
+export type VideoStrokeReviewStatus = 'pending' | 'reviewed';
+export type VideoStrokeAnalysisStatus = 'ok' | 'uncertain' | 'model_missing' | 'insufficient_pose';
+export type VideoStrokeRecordingMode = 'fixed_30s' | 'continuous_segment' | 'long_source_segment' | 'imported_source';
+
+export interface VideoStrokeMarker {
+  id: string;
+  timestamp_ms: number;
+  stroke_type: VideoStrokeMarkerType;
+  source: 'manual' | 'model' | 'audio_peak';
+  /** 'bulk_confirmed' = godkänd via "Godkänn alla" UTAN individuell
+   *  granskning - träningspipelinen accepterar bara 'confirmed'/'edited'
+   *  som facit, så bulk-godkända förslag kan aldrig förgifta träningen. */
+  review_status: 'confirmed' | 'suggested' | 'bulk_confirmed';
+  created_at: string;
+}
+
+export interface VideoPoseLandmark {
+  type: number;
+  x: number;
+  y: number;
+  z: number;
+  visibility: number;
+}
+
+export interface VideoPoseFrame {
+  timestamp_ms: number;
+  pose_detected: boolean;
+  landmarks: VideoPoseLandmark[];
+}
+
+export interface VideoPoseExtractionResult {
+  video_path: string;
+  sample_fps: number;
+  duration_ms: number;
+  frame_count: number;
+  frames: VideoPoseFrame[];
+}
+
+export interface VideoStrokePoseAnalysis {
+  marker_id: string;
+  timestamp_ms: number;
+  predicted_stroke_type: VideoStrokePredictionLabel;
+  confidence: number;
+  probabilities: Record<string, number>;
+  model_version: string;
+  feature_spec: 'video_stroke_features_v1' | 'video_stroke_features_v2';
+  status: VideoStrokeAnalysisStatus;
+}
+
+export interface VideoStrokeTake {
+  video_filename: string;
+  duration_ms: number;
+  take_index: number;
+  recording_mode?: VideoStrokeRecordingMode;
+  segment_duration_ms?: number;
+  source_video_filename?: string;
+  waveform_audio_filename?: string;
+  imported_source_uri?: string;
+  imported_at?: string;
+  source_start_ms?: number;
+  source_end_ms?: number;
+  review_status: VideoStrokeReviewStatus;
+  markers: VideoStrokeMarker[];
+  pose_analysis?: VideoStrokePoseAnalysis[];
+  /** Bortfallsbokföring från den ljudankrade slaganalysen (diagnostik). */
+  analysis_diagnostics?: unknown;
+}
+
+export interface VideoStrokeSessionFile {
+  session_meta: {
+    player_name: string;
+    handedness: 'right' | 'left';
+    camera_facing: VideoStrokeCameraFacing;
+    camera_angle: VideoStrokeCameraAngle;
+    camera_side?: VideoStrokeCameraSide;
+    camera_source?: string;
+    collection_type?: 'video_stroke' | 'video_pose_only' | 'video_bounce_side_snapshot';
+    pose_sample_fps?: number;
+    waveform_audio_filename?: string;
+    app_version: string;
+    created_at: string;
+  };
+  takes: VideoStrokeTake[];
+}
+
+export interface VideoBounceSideMarker {
+  id: string;
+  timestamp_ms: number;
+  bounce_side: VideoStrokeMarkerType;
+  source: 'manual' | 'audio_peak';
+  review_status: 'confirmed' | 'bulk_confirmed';
+  created_at: string;
+  audio_peak_score?: number;
+  snapshot_window_ms?: {
+    pre_ms: number;
+    post_ms: number;
+  };
+}
+
+export interface VideoBounceSideSessionFile {
+  session_meta: {
+    player_name: string;
+    handedness: 'right' | 'left';
+    camera_facing: VideoStrokeCameraFacing;
+    camera_angle: VideoStrokeCameraAngle;
+    camera_side?: VideoStrokeCameraSide;
+    camera_source?: string;
+    collection_type: 'video_bounce_side_snapshot';
+    label_schema: 'video_bounce_side_v1';
+    anchor_source: 'audio_peak';
+    /** Färg på spelarens forehandsida; sidomodellen känner igen färgsidan
+     *  och appen mappar färg -> FH/BH per spelare. */
+    racket_forehand_color?: 'red' | 'black';
+    snapshot_window_ms: {
+      pre_ms: number;
+      post_ms: number;
+    };
+    waveform_audio_filename?: string;
+    app_version: string;
+    created_at: string;
+  };
+  takes: Array<{
+    video_filename: string;
+    duration_ms: number;
+    take_index: number;
+    recording_mode: 'imported_source';
+    review_status: VideoStrokeReviewStatus;
+    markers: VideoBounceSideMarker[];
+    source_video_filename?: string;
+    waveform_audio_filename?: string;
+    imported_source_uri?: string;
+    imported_at?: string;
+  }>;
+}
+
 export interface TableCalibration {
   gravity: Vector3;
   gyro_bias: Vector3;
@@ -82,17 +225,20 @@ export type AudioContactLabel = 'racket_contact' | 'not_racket_contact';
 export type AudioReviewLabel = AudioContactLabel | 'ignore';
 export type AudioReviewSource = 'auto' | 'manual';
 export type AudioReviewAnchorRule = 'attack_start';
+export type AudioReviewMotionLabel = 'forehand' | 'backhand' | 'unknown' | 'none';
+export type AudioVideoSyncSource = 'manual' | 'auto_peak';
 export type AudioDetectionSensitivity = 'strict' | 'normal' | 'sensitive';
 export type AudioDetectionMode = 'hybrid' | 'four_class_only' | 'binary_only';
 export type AudioDetectionIgnoredReason =
   | 'not_racket_contact'
   | 'low_confidence'
   | 'dedup'
+  | 'same_label_duplicate'
   | 'surface_veto'
   | 'group_duplicate'
   | 'not_preset_relevant';
 export type AudioContactKind = 'racket_bounce';
-export type AudioReviewEventType = 'racket_hit' | 'bounce' | 'noise' | 'ignore';
+export type AudioReviewEventType = 'racket_hit' | 'bounce' | 'noise' | 'motion' | 'ignore';
 export type AudioReviewClassLabel =
   | 'racket_bounce'
   | 'forehand'
@@ -153,10 +299,14 @@ export interface AudioReviewMarker {
   timestamp_ms: number;
   source: AudioReviewSource;
   linked_candidate_id?: string;
+  linked_pose_candidate_id?: string;
+  source_audio_marker_id?: string;
   suggested_label: AudioReviewLabel;
   final_label: AudioReviewLabel;
   event_type?: AudioReviewEventType;
   class_label?: AudioReviewClassLabel;
+  motion_label?: AudioReviewMotionLabel;
+  motion_confidence?: number;
   contact_kind?: AudioContactKind;
   not_racket_kind?: AudioNotRacketKind;
   bounce_side?: AudioReviewBounceSide;
@@ -200,11 +350,32 @@ export interface AudioModelCandidate {
   ignored_reason?: AudioDetectionIgnoredReason;
 }
 
+export interface VideoPoseCandidate {
+  id: string;
+  timestamp_ms: number;
+  source_audio_marker_id?: string;
+  predicted_stroke_type: VideoStrokePredictionLabel;
+  confidence: number;
+  probabilities: Record<string, number>;
+  model_version: string;
+  feature_spec: 'video_stroke_features_v1' | 'video_stroke_features_v2';
+  status: VideoStrokeAnalysisStatus;
+  wrist_speed_max?: number;
+  review_relevant: boolean;
+}
+
 export interface AudioTakeReview {
   required: boolean;
   anchor_rule: AudioReviewAnchorRule;
+  review_stage?: 'audio' | 'motion' | 'complete';
+  audio_completed_at?: string;
+  motion_completed_at?: string;
   completed_at?: string;
   markers: AudioReviewMarker[];
+}
+
+export interface AudioTakeReviewSaveOptions {
+  completion?: 'audio' | 'complete';
 }
 
 export interface AudioImuRecording {
@@ -229,6 +400,16 @@ export interface AudioVideoRecording {
   duration_ms: number;
   audio_origin_in_video_ms: number;
   video_sync_offset_ms?: number;
+  video_sync_anchor_audio_ms?: number;
+  video_sync_anchor_video_ms?: number;
+  video_sync_source?: AudioVideoSyncSource;
+}
+
+export interface AudioVideoSyncMetadata {
+  video_sync_offset_ms: number;
+  video_sync_anchor_audio_ms?: number;
+  video_sync_anchor_video_ms?: number;
+  video_sync_source?: AudioVideoSyncSource;
 }
 
 export interface AudioEvent {
@@ -241,8 +422,8 @@ export interface AudioEvent {
   background_condition: AudioBackgroundCondition;
   take_index: number;
   target_duration_s: number;
-  recording_mode?: 'guided_audio_only' | 'guided_audio_imu' | 'audio_imu' | 'free_recording' | 'imported_audio';
-  collection_type?: 'audio_only' | 'audio_only_import' | 'audio_video_only' | 'audio_video_imu';
+  recording_mode?: 'guided_audio_only' | 'guided_audio_imu' | 'audio_imu' | 'free_recording' | 'audio_video_pose' | 'audio_video_pose_import' | 'imported_audio';
+  collection_type?: 'audio_only' | 'audio_only_import' | 'audio_video_only' | 'audio_video_imu' | 'audio_video_pose';
   scenario?: AudioRecordingScenario;
   bounce_context?: AudioBounceContext;
   calibration_status?: AudioCalibrationStatus;
@@ -252,8 +433,15 @@ export interface AudioEvent {
   imported_source_filename?: string;
   imported_source_uri?: string;
   imported_at?: string;
+  source_wav_filename?: string;
+  source_video_filename?: string;
+  source_start_ms?: number;
+  source_end_ms?: number;
+  player_handedness?: 'right' | 'left';
+  camera_facing?: VideoStrokeCameraFacing;
   detection_config_snapshot?: AudioDetectionConfigSnapshot;
   model_candidates?: AudioModelCandidate[];
+  video_pose_candidates?: VideoPoseCandidate[];
   review?: AudioTakeReview;
   imu_recording?: AudioImuRecording;
   video_recording?: AudioVideoRecording;
@@ -286,9 +474,9 @@ export interface AudioSessionFile {
     session_date: string;
     app_version: string;
     clip_duration_ms: number;
-    collection_mode: 'guided_scenarios' | 'guided_scenarios_audio_imu' | 'free_recording';
-    recording_mode?: 'guided_audio_only' | 'guided_audio_imu' | 'audio_imu' | 'free_recording' | 'imported_audio';
-    collection_type?: 'audio_only' | 'audio_only_import' | 'audio_video_only' | 'audio_video_imu';
+    collection_mode: 'guided_scenarios' | 'guided_scenarios_audio_imu' | 'free_recording' | 'audio_video_pose';
+    recording_mode?: 'guided_audio_only' | 'guided_audio_imu' | 'audio_imu' | 'free_recording' | 'audio_video_pose' | 'audio_video_pose_import' | 'imported_audio';
+    collection_type?: 'audio_only' | 'audio_only_import' | 'audio_video_only' | 'audio_video_imu' | 'audio_video_pose';
     scenarios?: AudioRecordingScenario[];
     calibration_status?: AudioCalibrationStatus;
     detection_config_snapshot?: AudioDetectionConfigSnapshot;
