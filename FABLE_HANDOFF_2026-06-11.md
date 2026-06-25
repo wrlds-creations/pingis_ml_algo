@@ -1,8 +1,8 @@
 # Överlämning: Fable-arbetet 2026-06-10/11 → stiga-app-v2
 
 Karta för en agent (eller människa) som ska portera de nya modellerna och
-komponenterna till en annan app. Allt ligger på branchen
-**`claude/audio-noise-robust-racket-bounce`** i detta repo (55 commits, main orörd).
+komponenterna till en annan app. Fable-runtimes, modeller och referensskärmar
+ligger nu i **`main`** i detta repo.
 
 ## TL;DR — vad som finns
 
@@ -61,6 +61,14 @@ stale-spärr → fönsterkontroller (FÖRE feature-extraktion, sparar ~165 ms/ka
 - Studssida: `skills/pingis-stroke-detection/scripts/classify_bounce_side.py` (`--train`, `--export-app`). Tränar på granskade sessioner + app-crops + live-dumpar (`data/video/raw/live_sidedebug/*.json`, alternationsfacit, se `live_debug_rows()`).
 - Slag: `skills/pingis-stroke-detection/scripts/train_video_stroke_v2.py` (`--export-app`).
 - Paritetstester (kör efter varje export): `check_fable_ts_parity.js`, `check_bounce_side_ts_parity.js`, `check_stroke_v2_ts_parity.js` — kräver 0 argmax-avvikelser.
+
+## Diagnostik för CJ
+
+- `skills/pingis-audio-classification/scripts/noise_robust/analyze_fable_live_debug_counts.py` — summerar appens live-debug-dumpar: räknade händelser, misstänkta dubbletter, reject-skäl, konfidens och JS feature/predict-latens.
+- `skills/pingis-audio-classification/scripts/noise_robust/compare_fable_anchor_gates.py` — jämför legacy `findAudioPeaks`-ankare mot Fable/NR-gaten på en video eller wav, så man ser om missar sker före eller efter modellen.
+- `skills/pingis-stroke-detection/scripts/inspect_video_stroke_session.py` — snabb sammanfattning av session JSON: takes, markörer, label-fördelning och sparad pose-analys.
+- `skills/pingis-stroke-detection/scripts/diagnose_video_stroke_audio_anchors.py` — kör video-stroke-modellen vid ljudankarna och visar om appens pose-/rotation-/timestamp-väg tappar slag.
+- `skills/pingis-stroke-detection/scripts/verify_video_stroke_handedness.py` — jämför vänster/höger racketarm och verifierar att `detectRacketHandedness`-logiken behövs.
 
 ## Fallgropar (alla kostade oss en device-iteration)
 
