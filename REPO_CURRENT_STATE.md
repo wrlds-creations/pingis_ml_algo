@@ -6,11 +6,11 @@ Use this file as the living snapshot of what actually exists in the repository. 
 
 - Date: `2026-07-01`
 - Current branch: `codex/t0057-fable-auto-improvement-loop`
-- Current phase: `T0104 Bounce audio test live validation pulled`
-- Current status: T0104 pulled and summarized Love's fresh Motorola `Bounce audio test` validation for the guarded T0103 candidate. Across `16` fresh debug JSON sessions, Love-reported positives counted `186/360` while producing `389` peak candidates and `203` low-probability rejections. Talking-only and racket-handling-only stayed safe at `0` counts despite `287` peak candidates. The main blocker is final classifier `below_threshold`, not missing peak candidates, dedupe, or Fable-noise veto. Far/soft+background is the clearest failure (`4/60` counted despite `88` candidates). The T0103 candidate remains diagnostic-only and should not be promoted as-is. Existing production Fable/studs/camera flows are unchanged. The branch remains local and not approved for `main`; raw/generated `data/` remains ignored and must be shared through a separate data handoff if needed.
-- Current ticket: `T0104-bounce-audio-test-live-validation-pull`
-- Last completed ticket: `T0104-bounce-audio-test-live-validation-pull`
-- Recommended next ticket: Use the T0104 pull as the promotion blocker for T0103. Next useful work is either exact-labeling the weak live positive WAVs, especially far/soft+background and the weak background/high runs, or training/evaluating a next candidate that treats T0104 as validation while preserving older Round A/T0073 hard-negative safety. Do not merge, push, or promote T0103 before that.
+- Current phase: `T0104A Slow/high expected-count review pages prepared`
+- Current status: T0104A prepared two local exact-label review pages for the ambiguous T0104 `Slow/high racket bounce` WAVs whose app metadata saved expected `20` while Love was unsure whether the true count was `20` or `30`. The pages are live at `http://127.0.0.1:8781/` and `http://127.0.0.1:8782/`, with editable green draft labels from `peak_fast_balanced`. Page `8781` has `20` waveform candidates/draft labels; page `8782` has `24`. If Love labels either clip above those counts, the result is direct evidence of candidate-gate misses for soft/high contacts. Existing production Fable/studs/camera flows and the guarded Bounce audio test runtime are unchanged. The branch remains local and not approved for `main`; raw/generated `data/` remains ignored and must be shared through a separate data handoff if needed.
+- Current ticket: `T0104A-slow-high-expected-count-review-pages`
+- Last completed ticket: `T0104A-slow-high-expected-count-review-pages`
+- Recommended next ticket: Wait for Love to save labels on `8781`/`8782`, then ingest those exact labels and update the T0104 validation summary. Use the result to decide whether the next work should prioritize peak-gate recovery for slow/high contacts or classifier/threshold retraining. Do not merge, push, or promote T0103 before scenario-level Motorola validation passes.
 
 ## Current Structure
 
@@ -42,6 +42,7 @@ SAFE_MERGE_PREP.md                      corrected no-main-merge cleanup plan bef
 | `python skills/pingis-audio-classification/scripts/noise_robust/ingest_t0102_boundary_review_labels.py` | T0103 full boundary positive label ingest | `Passed 2026-07-01; ingested 269/269 labels with Love's 8774 override to 29` |
 | `python skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0103_boundary_candidate_loop.py --reuse-existing --export-app-model` | T0103 boundary candidate replay/export | `Passed 2026-07-01; exported guarded apps/collector/src/models/fable_extra_trees_candidate_t0103.json for Bounce audio test only` |
 | `python skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104_bounce_audio_test_validation.py` | T0104 fresh Bounce audio test debug summary | `Passed 2026-07-01; analyzed 16 fresh sessions, positives 186/360, negatives 0/0, dominant miss reason below_threshold` |
+| `python skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104a_slow_high_review_pages.py --force --port-start 8781` | T0104A slow/high expected-count exact review page prep | `Passed 2026-07-01; prepared pages on 8781/8782 with 20 and 24 draft labels, /api/session smoke checks passed` |
 | `python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py` | T0004 candidate-centered playing-retro audio report | `Passed 2026-06-02 on Tomas 05-28/05-29 sessions` |
 | `python skills/pingis-audio-classification/scripts/train_playing_retro_audio.py` | T0005 local `spel_retro_audio` candidate train/eval | `Passed 2026-06-02; 4,028 rows, holdout accuracy 0.759` |
 | `python skills/pingis-audio-classification/scripts/evaluate_playing_retro_audio_variants.py` | T0006 focused variant comparison | `Passed 2026-06-02; selected safe one-window candidate, holdout racket recall 0.623` |
