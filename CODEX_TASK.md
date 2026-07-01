@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0104D-t0104b-positive-label-ingest`
+`T0104E-live-positive-candidate-loop`
 
 ## Branch
 
@@ -14,17 +14,17 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Status
 
-`Completed`
+`Complete`
 
 ## Goal
 
-Ingest Love's saved exact labels from the ten T0104B positive review pages, all confirmed expected `30`, and produce corrected label/coverage artifacts for the next candidate-training loop.
+Train/evaluate a guarded audio candidate loop using the newly ingested T0104D live positives, while preserving the existing boundary/Round A hard-negative safety gates.
 
 ## Dependencies
 
-- T0104B prepared positive review pages on `8783`-`8792`.
-- Love saved labels for all ten pages and confirmed every clip should be expected `30`.
+- T0104D ingested `300/300` exact labels from T0104B, with `288/300` within `140 ms` and `295/300` within `250 ms`.
 - T0104C showed threshold lowering alone is diagnostic only, not safe enough to promote.
+- T0103 candidate-loop artifacts and older boundary/Round A safety rows are available locally.
 - Raw/generated data under `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
@@ -50,15 +50,15 @@ Ingest Love's saved exact labels from the ten T0104B positive review pages, all 
 
 ## Requirements
 
-- Read all ten T0104B review-label JSON files.
-- Enforce Love's confirmed expected count of `30` for every clip.
-- Produce reviewed positive label CSV, nearest peak/candidate match CSV, per-session summary, summary JSON, and markdown report.
-- Report candidate coverage within `140 ms` and `250 ms`, manual additions/deletions, and scenario-level weak spots.
-- Update source-of-truth docs/logs with the ingest result and next recommended model loop.
+- Build or reuse app-style candidate rows for T0104D positive labels.
+- Train/evaluate candidate policies using T0104D positives plus existing T0103 boundary positives/negatives and older Round A/T0073 safety rows.
+- Compare against the installed T0103 default and the diagnostic threshold-only settings.
+- Report live-positive recall, boundary false counts, Round A hard-negative false counts, and scenario-level failures.
+- Do not export or install unless a candidate clearly passes the offline safety gate and a separate install ticket is opened.
 
 ## Non-Goals
 
-- No model retraining/export in this ticket.
+- No app model export.
 - No app runtime change.
 - No APK install.
 - No raw/generated data commit.
@@ -68,38 +68,32 @@ Ingest Love's saved exact labels from the ten T0104B positive review pages, all 
 
 ## Acceptance Criteria
 
-- All ten saved T0104B pages are ingested with expected count `30`.
-- The report shows exact label totals and peak/candidate coverage by scenario.
-- The next training/evaluation step is clear.
+- Candidate-loop report is generated from T0104D positives and safety rows.
+- The report states whether any candidate is worth an APK test.
+- If no candidate passes, the failure mode and next data/model need are clear.
 
 ## Completion Notes
 
-Added `ingest_t0104b_positive_review_labels.py` to ingest the ten saved T0104B review pages with Love-confirmed expected count `30` for every clip.
-
-Generated ignored local artifacts under `data/audio/models/evaluations/t0104d_t0104b_positive_label_ingest/`:
-
-- `t0104d_reviewed_positive_labels.csv`
-- `t0104d_nearest_peak_matches.csv`
-- `t0104d_session_summary.csv`
-- `t0104d_scenario_summary.csv`
-- `t0104d_summary.json`
-- `t0104d_report.md`
-
-Key result:
-
-| Scenario | Labels | Current App Count | Peak Candidates | Within 140 ms | Within 250 ms |
-|---|---:|---:|---:|---:|---:|
-| Normal racket bounce | `60` | `38` | `60` | `60` | `60` |
-| Fast racket bounce | `60` | `46` | `60` | `60` | `60` |
-| Racket bounce + speaking/counting | `60` | `47` | `64` | `60` | `60` |
-| Racket bounce + background sound | `60` | `34` | `79` | `59` | `60` |
-| Far/soft racket bounce + background | `60` | `4` | `89` | `49` | `55` |
-
-Total reviewed positives: `300/300`; strict peak-candidate coverage: `288/300` within `140 ms`, `295/300` within `250 ms`.
-
-Conclusion: T0104B labels are clean and useful for the next candidate-training loop. Far/soft + background still has some candidate-generation weakness, but the main problem for most fresh positives is classifier/scoring rather than missing peaks.
+- Added `evaluate_t0104e_live_positive_candidate_loop.py` as an offline-only candidate loop.
+- Built live app-style candidate rows from the installed T0103 debug JSON feature vectors and the corrected T0104 labels:
+  - T0104D: `300/300` reviewed positives across normal, fast, speaking/counting, background, and far/soft+background.
+  - T0104A: included only the first confirmed slow/high run (`20` labels), excluded the unclear second slow/high run.
+  - T0104 fresh negatives: talking-only and racket-handling-only sessions included as expected-zero safety rows.
+- Generated ignored outputs under `data/audio/models/evaluations/t0104e_live_positive_candidate_loop/`.
+- Best newly trained candidate is only a near miss:
+  - `extra_leaf2_t0104e_base_t0075_live_recall_safety_thr0p575_dedupe180_vetoNone`
+  - Live positives: `274/320` (`0.8562` recall)
+  - Fresh live negatives: `4` false counts
+  - T0103 boundary negatives: `2` false counts
+  - Round A hard negatives: `8` false counts
+- Current T0103 app model with a typed diagnostic setting `p>=0.30`, no Fable-noise veto, dedupe `180 ms` is the better next manual phone-test/data-collection baseline on fresh T0104:
+  - Fresh live positives: `270/320` (`0.8438` recall)
+  - Fresh live negatives: `0` false counts
+  - Its boundary/Round A rows in the T0104E app-baseline table are final-fit/in-sample context only, not a promotion safety result.
+  - The older T0104C out-of-fold safety warning still applies: `p>=0.30/no-veto` had `28` boundary false counts and `70` Round A hard-negative false counts in the T0103 OOF sweep.
+- No model JSON was exported, no runtime/app change was made, and no APK was installed.
 
 ## Validation
 
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/ingest_t0104b_positive_review_labels.py` passed.
-- `python skills/pingis-audio-classification/scripts/noise_robust/ingest_t0104b_positive_review_labels.py` passed.
+- `python -m py_compile skills\pingis-audio-classification\scripts\noise_robust\evaluate_t0104e_live_positive_candidate_loop.py`
+- `python skills\pingis-audio-classification\scripts\noise_robust\evaluate_t0104e_live_positive_candidate_loop.py`
