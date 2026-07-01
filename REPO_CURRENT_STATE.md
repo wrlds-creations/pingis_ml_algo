@@ -6,11 +6,11 @@ Use this file as the living snapshot of what actually exists in the repository. 
 
 - Date: `2026-07-01`
 - Current branch: `codex/t0057-fable-auto-improvement-loop`
-- Current phase: `T0104C p>=0.20 no-veto sweep completed`
-- Current status: T0104C evaluated Love's typed `Bounce audio test` setting (`p>=0.20`, Fable-noise veto effectively disabled) against already pulled/evaluable T0104/T0103 artifacts. On fresh corrected T0104 live debug rows it improves positives to `303/320`, but creates `3` fresh negative false counts. The older T0103 boundary/Round A safety sweep is not acceptable at this threshold: `242/269` boundary positives with `56` boundary negative false counts and `960/960` Round A positives with `121` hard-negative false counts. Existing production Fable/studs/camera flows and the guarded Bounce audio test runtime are unchanged. T0104B review pages remain prepared/running for exact positive labels, and raw/generated `data/` remains ignored.
-- Current ticket: `T0104C-p020-no-veto-safety-sweep`
-- Last completed ticket: `T0104C-p020-no-veto-safety-sweep`
-- Recommended next ticket: Ingest the saved T0104B exact labels from `8783`-`8792` after Love finishes them, then train/evaluate a candidate that recovers weak live positives without reopening boundary/Round A hard-negative false counts. Do not merge, push, promote T0103, or make `p>=0.20/no-veto` a default.
+- Current phase: `T0104D T0104B positive labels ingested`
+- Current status: Love saved all ten T0104B positive review pages and confirmed every clip is expected `30`. T0104D ingested `300/300` exact racket-contact labels with no issues. Peak-candidate coverage is `288/300` within `140 ms` and `295/300` within `250 ms`: normal, fast, and speaking/counting are fully covered; background sound is `59/60` within `140 ms`; far/soft+background is weaker at `49/60` within `140 ms` and `55/60` within `250 ms`. Existing production Fable/studs/camera flows and the guarded Bounce audio test runtime are unchanged. Raw/generated `data/` remains ignored.
+- Current ticket: `T0104D-t0104b-positive-label-ingest`
+- Last completed ticket: `T0104D-t0104b-positive-label-ingest`
+- Recommended next ticket: Train/evaluate a candidate using T0104D positives plus existing boundary/Round A hard negatives, aiming to recover weak live positives without reopening false counts. Do not merge, push, promote T0103, or make `p>=0.20/no-veto` a default without a passing safety replay and fresh Motorola validation.
 
 ## Current Structure
 
@@ -43,6 +43,7 @@ SAFE_MERGE_PREP.md                      corrected no-main-merge cleanup plan bef
 | `python skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0103_boundary_candidate_loop.py --reuse-existing --export-app-model` | T0103 boundary candidate replay/export | `Passed 2026-07-01; exported guarded apps/collector/src/models/fable_extra_trees_candidate_t0103.json for Bounce audio test only` |
 | `python skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104_bounce_audio_test_validation.py` | T0104 fresh Bounce audio test debug summary | `Passed 2026-07-01 after T0104A correction; analyzed 16 sessions, included positives 181/320, one slow/high session excluded, negatives 0/0, dominant miss reason below_threshold` |
 | `python skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104c_p020_no_veto_sweep.py` | T0104C threshold/no-veto safety sweep using existing T0104 live summary plus T0103 policy sweep | `Passed 2026-07-01; p>=0.20/no-veto gives fresh T0104 303/320 positives with 3 false counts, but older T0103 safety fails with 56 boundary false counts and 121 Round A hard-negative false counts` |
+| `python skills/pingis-audio-classification/scripts/noise_robust/ingest_t0104b_positive_review_labels.py` | T0104D ingest of saved exact labels from T0104B positive review pages | `Passed 2026-07-01; ingested 300/300 labels, 288/300 within 140 ms and 295/300 within 250 ms of peak candidates` |
 | `python skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104a_slow_high_review_pages.py --force --port-start 8781` | T0104A slow/high expected-count exact review page prep | `Passed 2026-07-01; prepared pages on 8781/8782 with 20 and 24 draft labels, /api/session smoke checks passed` |
 | `python skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104b_positive_review_pages.py --force --port-start 8783` | T0104B selected positive exact review page prep | `Passed 2026-07-01; prepared and served 10 pages on 8783-8792, /api/session smoke checks passed` |
 | `python skills/pingis-audio-classification/scripts/build_playing_retro_candidate_report.py` | T0004 candidate-centered playing-retro audio report | `Passed 2026-06-02 on Tomas 05-28/05-29 sessions` |

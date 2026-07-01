@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0104C-p020-no-veto-safety-sweep`
+`T0104D-t0104b-positive-label-ingest`
 
 ## Branch
 
@@ -18,13 +18,13 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Evaluate Love's live-observed `Bounce audio test` setting, `p>=0.20` with Fable-noise veto effectively disabled (`1.00`), against the already pulled/evaluable T0103/T0104 audio data before considering it good enough.
+Ingest Love's saved exact labels from the ten T0104B positive review pages, all confirmed expected `30`, and produce corrected label/coverage artifacts for the next candidate-training loop.
 
 ## Dependencies
 
-- T0103 exported the guarded boundary-trained candidate behind the separate `Bounce audio test` entry.
-- T0104 pulled and summarized the fresh `Bounce audio test` debug runs, with T0104A resolving the slow/high ambiguity.
-- Love observed that typing `p=0.20` and noise veto `1.00` felt good on-device and asked whether the already pulled WAV/evaluation data can be swept before more labeling.
+- T0104B prepared positive review pages on `8783`-`8792`.
+- Love saved labels for all ten pages and confirmed every clip should be expected `30`.
+- T0104C showed threshold lowering alone is diagnostic only, not safe enough to promote.
 - Raw/generated data under `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
@@ -50,49 +50,56 @@ Evaluate Love's live-observed `Bounce audio test` setting, `p>=0.20` with Fable-
 
 ## Requirements
 
-- Evaluate `threshold=0.20`, Fable-noise veto disabled/no-veto, against fresh corrected T0104 live debug summaries.
-- Evaluate the same setting against the existing T0103 boundary/Round A safety policy sweep.
-- Compare with safer thresholds including current installed default `0.575`.
-- Produce a concise report that separates fresh Motorola results from older boundary/Round A safety.
-- Make a recommendation on whether `0.20/no-veto` is already good enough or only a useful diagnostic.
-- Update source-of-truth docs/logs with the result.
+- Read all ten T0104B review-label JSON files.
+- Enforce Love's confirmed expected count of `30` for every clip.
+- Produce reviewed positive label CSV, nearest peak/candidate match CSV, per-session summary, summary JSON, and markdown report.
+- Report candidate coverage within `140 ms` and `250 ms`, manual additions/deletions, and scenario-level weak spots.
+- Update source-of-truth docs/logs with the ingest result and next recommended model loop.
 
 ## Non-Goals
 
-- No model retraining/export.
+- No model retraining/export in this ticket.
 - No app runtime change.
 - No APK install.
 - No raw/generated data commit.
 - No merge or push.
 - No camera/racket-side work.
-- Do not ingest unfinished T0104B review labels in this ticket.
+- Do not change the T0103 candidate or `Bounce audio test` defaults.
 
 ## Acceptance Criteria
 
-- T0104 live block-level `p>=0.20` counts are summarized.
-- T0103 boundary/Round A safety sweep rows for `p>=0.20/no-veto` are summarized.
-- The report clearly states whether the setting is safe enough to promote or should remain diagnostic.
+- All ten saved T0104B pages are ingested with expected count `30`.
+- The report shows exact label totals and peak/candidate coverage by scenario.
+- The next training/evaluation step is clear.
 
 ## Completion Notes
 
-Added `summarize_t0104c_p020_no_veto_sweep.py` to summarize Love's live-observed `p>=0.20` / no-veto setting from already pulled/evaluable artifacts.
+Added `ingest_t0104b_positive_review_labels.py` to ingest the ten saved T0104B review pages with Love-confirmed expected count `30` for every clip.
 
-Generated ignored local artifacts under `data/audio/models/evaluations/t0104c_p020_no_veto_safety_sweep/`.
+Generated ignored local artifacts under `data/audio/models/evaluations/t0104d_t0104b_positive_label_ingest/`:
+
+- `t0104d_reviewed_positive_labels.csv`
+- `t0104d_nearest_peak_matches.csv`
+- `t0104d_session_summary.csv`
+- `t0104d_scenario_summary.csv`
+- `t0104d_summary.json`
+- `t0104d_report.md`
 
 Key result:
 
-| Slice | p>=0.20/no-veto | p>=0.30/no-veto | default p>=0.575/no-veto |
-|---|---:|---:|---:|
-| Fresh T0104 positives | `303/320` | `284/320` | `181/320` |
-| Fresh T0104 negative false counts | `3` | `0` | `0` |
-| T0103 boundary positives | `242/269` | `239/269` | `225/269` |
-| T0103 boundary negative false counts | `56` | `28` | `2` |
-| Round A positives | `960/960` | `958/960` | `944/960` |
-| Round A hard-negative false counts | `121` | `70` | `4` |
+| Scenario | Labels | Current App Count | Peak Candidates | Within 140 ms | Within 250 ms |
+|---|---:|---:|---:|---:|---:|
+| Normal racket bounce | `60` | `38` | `60` | `60` | `60` |
+| Fast racket bounce | `60` | `46` | `60` | `60` | `60` |
+| Racket bounce + speaking/counting | `60` | `47` | `64` | `60` | `60` |
+| Racket bounce + background sound | `60` | `34` | `79` | `59` | `60` |
+| Far/soft racket bounce + background | `60` | `4` | `89` | `49` | `55` |
 
-Conclusion: `p>=0.20/no-veto` explains why Love's quick phone test felt good, but it is not safe enough to promote. Keep it diagnostic/manual only; next work should ingest T0104B exact labels and train/evaluate a better candidate.
+Total reviewed positives: `300/300`; strict peak-candidate coverage: `288/300` within `140 ms`, `295/300` within `250 ms`.
+
+Conclusion: T0104B labels are clean and useful for the next candidate-training loop. Far/soft + background still has some candidate-generation weakness, but the main problem for most fresh positives is classifier/scoring rather than missing peaks.
 
 ## Validation
 
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104c_p020_no_veto_sweep.py` passed.
-- `python skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104c_p020_no_veto_sweep.py` passed.
+- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/ingest_t0104b_positive_review_labels.py` passed.
+- `python skills/pingis-audio-classification/scripts/noise_robust/ingest_t0104b_positive_review_labels.py` passed.
