@@ -6,11 +6,11 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0041-live-bounce-side-backhand-bias`
+`T0105C-local-cleanup-commits`
 
 ## Branch
 
-`claude/audio-noise-robust-racket-bounce`
+`codex/t0057-fable-auto-improvement-loop`
 
 ## Status
 
@@ -18,72 +18,77 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Diagnose and fix the current `Studs FH/BH LIVE` / `Video studs FH/BH` behavior where red-forehand racket bounces are being suggested almost entirely as backhand. Keep the fix limited to runtime side mapping/guarding and debug visibility; do not retrain or replace model artifacts in this ticket.
+Tidy the current dirty feature branch by validating, staging, and committing accumulated source changes into sensible local commits, without merging to `main` or committing raw/generated data.
 
 ## Dependencies
 
-- Current installed Motorola APK from 2026-06-13 contains Fable v5 and `bounce_side_v2_2026_06_11_underangle`.
-- Latest device debug dumps from 2026-06-17 show `bounce_side_v2_2026_06_11_underangle` predicting almost all counted events as `backhand`, even when crops visibly include strong red racket evidence.
-- `node skills/pingis-stroke-detection/scripts/check_bounce_side_ts_parity.js` passes, so the TypeScript runtime matches the exported model on its fixture.
+- T0105 created `WORKTREE_CLEANUP_PLAN.md` and grouped the dirty tree.
+- T0105B corrected the policy: do not merge this branch to `main` before validating the current model/runtime.
+- Love explicitly asked Codex to set a goal, tidy the worktree, stage, and commit, using Codex judgment.
+- Raw/generated data under `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
 
-- `apps/collector/src/bounceSideInference.ts`
-- `apps/collector/src/BounceSideLiveScreen.tsx`
-- `apps/collector/src/VideoOnlyStrokeCollectionScreen.tsx`
 - `CODEX_TASK.md`
-- `ITERATION_LOG.md`
+- `WORKTREE_CLEANUP_PLAN.md`
+- `SAFE_MERGE_PREP.md`
 - `REPO_CURRENT_STATE.md`
-- Local ignored debug artifacts under `data/video/raw/live_sidedebug/`
+- `PROJECT_CONTEXT.md`
+- `DECISIONS.md`
+- `ITERATION_LOG.md`
+- app/source files already dirty in this branch
+- audio scripts already dirty/untracked in this branch
+- validation commands
+- git staging and local commits
 
 ## Do Not Touch
 
-- `apps/collector/src/models/bounce_side_model.json`
-- `apps/collector/src/models/fable_audio_model.json`
-- `apps/collector/src/models/video_stroke_model.json`
-- `audio_model.json`, `audio_contact_model.json`, or `playing_retro_audio_model.json`
-- Raw reviewed labels
-- Training scripts or model retraining
-- AWS or backend resources
+- Do not merge or push.
+- Do not delete local or device data.
+- Do not revert tracked changes.
+- Do not broaden app/model behavior beyond the existing dirty worktree.
+- Do not train/export a model or install an APK.
+- Do not move raw/generated data into git.
+- Do not touch Roboflow/cloud/API credentials, backend resources, or AWS resources.
 
 ## Requirements
 
-- Keep Fable audio detection unchanged.
-- Preserve the existing model and parity fixture.
-- Add a runtime color-evidence guard using the existing side features so visible red/black racket evidence can override an obviously wrong side suggestion.
-- Respect the user-selected forehand color: red forehand maps visible red to forehand; black forehand maps visible red to backhand.
-- Avoid confident wrong auto-suggestions when color evidence is ambiguous.
-- Include debug fields that make future live dumps explainable: raw model label/probability, visible color decision, red/dark evidence, and decision source.
+- Validate Python audio scripts.
+- Validate Collector TypeScript and Android Kotlin/native code if practical.
+- Stage and commit source changes in logical local commits.
+- Keep ignored `data/` out of git.
+- Update source-of-truth docs after commits.
+- Stop only if a real user decision is needed.
 
 ## Non-Goals
 
-- No model retraining.
-- No app model JSON export.
-- No changes to Fable audio model behavior.
-- No changes to video stroke FH/BH motion model.
-- No broad UI redesign.
+- No merge to `main`.
+- No push.
+- No raw/generated data commit.
+- No raw-data sharing solution beyond documenting the policy.
+- No judgment that every existing untracked file should be committed.
 
 ## Acceptance Criteria
 
-- Today's 2026-06-17 live debug crops no longer collapse to all backhand under the runtime side resolver.
-- TypeScript validation passes.
-- Existing bounce-side TypeScript parity check still passes.
-- If APK build/install is run, record build/install result in the handoff.
+- Dirty source files are grouped into local commits.
+- Validation results are recorded.
+- `git status --short` is materially cleaner, with raw/generated ignored data still untracked/ignored.
+- Final response lists commits and any remaining dirt.
 
 ## Completion Notes
 
-- Pulled and inspected the latest 2026-06-17 live side debug dumps from Motorola.
-- Confirmed Fable audio was producing racket-bounce events; the failure was side resolution after the audio anchor.
-- Confirmed Collector TypeScript parity against the exported bounce-side model still passes, so the runtime model implementation is not the source of the backhand collapse.
-- Added a visible-color resolver that lets clear red/black racket evidence override the model side when it contradicts the selected forehand color.
-- Added explainability fields to live debug rows: raw side/confidence, visible color/confidence, red/dark totals, and decision source.
-- Updated `Video studs FH/BH` auto-suggestions so ambiguous color evidence becomes `unknown` instead of a confident wrong side.
+- Created local source commits on feature branch `codex/t0057-fable-auto-improvement-loop`:
+  - `16f1e01 chore(audio): add fable reliability tooling`
+  - `0fbee48 feat(collector): add bounce audio diagnostics`
+  - `61d532e feat(collector): add live racket color tracker`
+- Kept ignored/raw/generated `data/` out of git.
+- Did not merge, push, delete local/device data, train/export a model, install an APK, or touch AWS/cloud/API resources.
+- Updated source-of-truth docs and cleanup plans to record that the branch is locally tidied but still not approved for `main`.
 
 ## Validation
 
-- `cd apps/collector && npx tsc --noEmit`
-- `node skills/pingis-stroke-detection/scripts/check_bounce_side_ts_parity.js`
-- Root `npm run validate`
-- `git diff --check` passed with existing Windows line-ending warnings only.
-- Forced release bundle generation and `.\gradlew.bat assembleRelease` passed.
-- APK installed on Motorola `ZY22L6NDHV` at `2026-06-17 16:29:12`; SHA256 `BE0C3F21473A44AF99979A38DF55B19FCBB50C5A755EBB502A3D6D3CBA5A30D2`.
+- `python -m py_compile` on the changed/untracked audio `noise_robust` Python scripts passed before committing script tooling.
+- `cd apps\collector && npx tsc --noEmit` passed.
+- `cd apps\collector\android && .\gradlew.bat :app:compileDebugKotlin` passed.
+- `npm run validate` passed before and after the final docs commit.
+- `git diff --check` passed, with existing Windows LF-to-CRLF warnings only before the final docs commit and clean output after it.
