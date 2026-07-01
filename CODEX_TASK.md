@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0104B-positive-review-pages`
+`T0104C-p020-no-veto-safety-sweep`
 
 ## Branch
 
@@ -18,18 +18,13 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Prepare exact-label review pages for the remaining useful T0104 positive `Bounce audio test` validation WAVs so Love can correct/save racket-contact timestamps before the next model loop.
+Evaluate Love's live-observed `Bounce audio test` setting, `p>=0.20` with Fable-noise veto effectively disabled (`1.00`), against the already pulled/evaluable T0103/T0104 audio data before considering it good enough.
 
 ## Dependencies
 
-- T0104 pulled and summarized the fresh `Bounce audio test` debug runs.
-- T0104A resolved the slow/high ambiguity: use `8781=20`, exclude `8782`.
-- Love requested review pages for:
-  - Normal racket bounce
-  - Fast racket bounce
-  - Racket bounce + speaking/counting
-  - Racket bounce + background sound
-  - Far/soft racket + background
+- T0103 exported the guarded boundary-trained candidate behind the separate `Bounce audio test` entry.
+- T0104 pulled and summarized the fresh `Bounce audio test` debug runs, with T0104A resolving the slow/high ambiguity.
+- Love observed that typing `p=0.20` and noise veto `1.00` felt good on-device and asked whether the already pulled WAV/evaluation data can be swept before more labeling.
 - Raw/generated data under `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
@@ -55,12 +50,12 @@ Prepare exact-label review pages for the remaining useful T0104 positive `Bounce
 
 ## Requirements
 
-- Locate the ten T0104 positive WAV/JSON pairs for the five requested scenario groups.
-- Generate peak-prefilled manual review labels on separate local URLs.
-- Use waveform peak candidates as gray read-only references and green editable draft racket-contact labels.
-- Prefill up to each clip's expected count, normally `30`, so Love can delete false drafts, drag mistimed labels, or add missing contacts.
-- Start and smoke-check local review servers on separate ports.
-- Update source-of-truth docs/logs with the prepared URLs and review instructions.
+- Evaluate `threshold=0.20`, Fable-noise veto disabled/no-veto, against fresh corrected T0104 live debug summaries.
+- Evaluate the same setting against the existing T0103 boundary/Round A safety policy sweep.
+- Compare with safer thresholds including current installed default `0.575`.
+- Produce a concise report that separates fresh Motorola results from older boundary/Round A safety.
+- Make a recommendation on whether `0.20/no-veto` is already good enough or only a useful diagnostic.
+- Update source-of-truth docs/logs with the result.
 
 ## Non-Goals
 
@@ -70,36 +65,34 @@ Prepare exact-label review pages for the remaining useful T0104 positive `Bounce
 - No raw/generated data commit.
 - No merge or push.
 - No camera/racket-side work.
+- Do not ingest unfinished T0104B review labels in this ticket.
 
 ## Acceptance Criteria
 
-- Ten review pages are prepared from the requested T0104 positive WAVs.
-- Review pages load through `/api/session` and expose editable green labels.
-- Love receives the URLs and clear save instructions.
+- T0104 live block-level `p>=0.20` counts are summarized.
+- T0103 boundary/Round A safety sweep rows for `p>=0.20/no-veto` are summarized.
+- The report clearly states whether the setting is safe enough to promote or should remain diagnostic.
 
 ## Completion Notes
 
-Added `prepare_t0104b_positive_review_pages.py` to prepare exact-label review pages for the remaining useful T0104 positives:
+Added `summarize_t0104c_p020_no_veto_sweep.py` to summarize Love's live-observed `p>=0.20` / no-veto setting from already pulled/evaluable artifacts.
 
-| URL | Scenario | Peaks | Draft Labels |
-|---|---|---:|---:|
-| `http://127.0.0.1:8783/` | Normal racket bounce | `30` | `30` |
-| `http://127.0.0.1:8784/` | Normal racket bounce | `30` | `30` |
-| `http://127.0.0.1:8785/` | Fast racket bounce | `30` | `30` |
-| `http://127.0.0.1:8786/` | Fast racket bounce | `30` | `30` |
-| `http://127.0.0.1:8787/` | Racket bounce + speaking/counting | `31` | `30` |
-| `http://127.0.0.1:8788/` | Racket bounce + speaking/counting | `33` | `30` |
-| `http://127.0.0.1:8789/` | Racket bounce + background sound | `30` | `30` |
-| `http://127.0.0.1:8790/` | Racket bounce + background sound | `49` | `30` |
-| `http://127.0.0.1:8791/` | Far/soft racket bounce + background | `45` | `30` |
-| `http://127.0.0.1:8792/` | Far/soft racket bounce + background | `44` | `30` |
+Generated ignored local artifacts under `data/audio/models/evaluations/t0104c_p020_no_veto_safety_sweep/`.
 
-Generated ignored local artifacts under `data/audio/models/evaluations/t0104b_positive_review_pages/`.
+Key result:
 
-Started and smoke-checked all ten local review pages. Each page is `manual_only=true`, expected `30`, with gray waveform peak candidates and editable green draft racket-contact labels.
+| Slice | p>=0.20/no-veto | p>=0.30/no-veto | default p>=0.575/no-veto |
+|---|---:|---:|---:|
+| Fresh T0104 positives | `303/320` | `284/320` | `181/320` |
+| Fresh T0104 negative false counts | `3` | `0` | `0` |
+| T0103 boundary positives | `242/269` | `239/269` | `225/269` |
+| T0103 boundary negative false counts | `56` | `28` | `2` |
+| Round A positives | `960/960` | `958/960` | `944/960` |
+| Round A hard-negative false counts | `121` | `70` | `4` |
+
+Conclusion: `p>=0.20/no-veto` explains why Love's quick phone test felt good, but it is not safe enough to promote. Keep it diagnostic/manual only; next work should ingest T0104B exact labels and train/evaluate a better candidate.
 
 ## Validation
 
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104b_positive_review_pages.py` passed.
-- `python skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104b_positive_review_pages.py --force --port-start 8783` passed.
-- `/api/session` smoke checks passed for ports `8783` through `8792`.
+- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104c_p020_no_veto_sweep.py` passed.
+- `python skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104c_p020_no_veto_sweep.py` passed.
