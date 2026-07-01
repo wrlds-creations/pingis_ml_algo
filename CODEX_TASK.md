@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0104A-slow-high-expected-count-review-pages`
+`T0104B-positive-review-pages`
 
 ## Branch
 
@@ -18,13 +18,18 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Prepare exact-label review pages for the two ambiguous T0104 `Slow/high racket bounce` validation WAVs so Love can resolve whether the real count was `20` or `30`.
+Prepare exact-label review pages for the remaining useful T0104 positive `Bounce audio test` validation WAVs so Love can correct/save racket-contact timestamps before the next model loop.
 
 ## Dependencies
 
 - T0104 pulled and summarized the fresh `Bounce audio test` debug runs.
-- Two `Slow/high racket bounce` sessions were saved in app metadata as expected `20`, while Love initially reported `30` and then noted uncertainty.
-- The exact count needs human waveform/audio review before using these runs as validation labels.
+- T0104A resolved the slow/high ambiguity: use `8781=20`, exclude `8782`.
+- Love requested review pages for:
+  - Normal racket bounce
+  - Fast racket bounce
+  - Racket bounce + speaking/counting
+  - Racket bounce + background sound
+  - Far/soft racket + background
 - Raw/generated data under `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
@@ -50,10 +55,10 @@ Prepare exact-label review pages for the two ambiguous T0104 `Slow/high racket b
 
 ## Requirements
 
-- Locate the two T0104 slow/high WAV/JSON pairs.
+- Locate the ten T0104 positive WAV/JSON pairs for the five requested scenario groups.
 - Generate peak-prefilled manual review labels on separate local URLs.
 - Use waveform peak candidates as gray read-only references and green editable draft racket-contact labels.
-- Prefill up to `30` draft labels so Love can delete extras if the actual count was `20`, or add missing labels if needed.
+- Prefill up to each clip's expected count, normally `30`, so Love can delete false drafts, drag mistimed labels, or add missing contacts.
 - Start and smoke-check local review servers on separate ports.
 - Update source-of-truth docs/logs with the prepared URLs and review instructions.
 
@@ -68,37 +73,33 @@ Prepare exact-label review pages for the two ambiguous T0104 `Slow/high racket b
 
 ## Acceptance Criteria
 
-- Two review pages are prepared from the T0104 slow/high WAVs.
+- Ten review pages are prepared from the requested T0104 positive WAVs.
 - Review pages load through `/api/session` and expose editable green labels.
 - Love receives the URLs and clear save instructions.
 
 ## Completion Notes
 
-Added `prepare_t0104a_slow_high_review_pages.py` to prepare exact-label review pages for the two ambiguous T0104 slow/high runs:
+Added `prepare_t0104b_positive_review_pages.py` to prepare exact-label review pages for the remaining useful T0104 positives:
 
-- `bounce_audio_test_session_2026-07-01T13-37-11-083Z`: saved expected `20`, app count `12`, WAV duration `21.900s`, waveform peak candidates/draft labels `20`.
-- `bounce_audio_test_session_2026-07-01T13-38-19-066Z`: saved expected `20`, app count `5`, WAV duration `22.449s`, waveform peak candidates/draft labels `24`.
+| URL | Scenario | Peaks | Draft Labels |
+|---|---|---:|---:|
+| `http://127.0.0.1:8783/` | Normal racket bounce | `30` | `30` |
+| `http://127.0.0.1:8784/` | Normal racket bounce | `30` | `30` |
+| `http://127.0.0.1:8785/` | Fast racket bounce | `30` | `30` |
+| `http://127.0.0.1:8786/` | Fast racket bounce | `30` | `30` |
+| `http://127.0.0.1:8787/` | Racket bounce + speaking/counting | `31` | `30` |
+| `http://127.0.0.1:8788/` | Racket bounce + speaking/counting | `33` | `30` |
+| `http://127.0.0.1:8789/` | Racket bounce + background sound | `30` | `30` |
+| `http://127.0.0.1:8790/` | Racket bounce + background sound | `49` | `30` |
+| `http://127.0.0.1:8791/` | Far/soft racket bounce + background | `45` | `30` |
+| `http://127.0.0.1:8792/` | Far/soft racket bounce + background | `44` | `30` |
 
-The review pages intentionally display expected `30` because the question is whether the real count was `20` or `30`. Green labels are editable draft labels from `peak_fast_balanced`; if Love hears only `20`, delete extras, and if Love hears more than the draft labels, add missing contacts.
+Generated ignored local artifacts under `data/audio/models/evaluations/t0104b_positive_review_pages/`.
 
-Generated ignored local artifacts under `data/audio/models/evaluations/t0104a_slow_high_expected_count_review/`.
-
-Started and smoke-checked local review pages:
-
-- `http://127.0.0.1:8781/` with `20` gray candidates and `20` green draft labels.
-- `http://127.0.0.1:8782/` with `24` gray candidates and `24` green draft labels.
-
-Love resolved the ambiguity:
-
-- `8781` is confirmed expected `20`.
-- `8782` should be discarded/excluded because the true bounce count is unclear.
-
-Updated `summarize_t0104_bounce_audio_test_validation.py` with explicit per-session correction/exclusion and regenerated ignored T0104 summary artifacts. Corrected included positive totals are now `181/320` with `365` included peak candidates and `184` low-probability rejections.
+Started and smoke-checked all ten local review pages. Each page is `manual_only=true`, expected `30`, with gray waveform peak candidates and editable green draft racket-contact labels.
 
 ## Validation
 
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104a_slow_high_review_pages.py` passed.
-- `python skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104a_slow_high_review_pages.py --force --port-start 8781` passed.
-- `/api/session` smoke checks passed for `8781` and `8782`.
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104_bounce_audio_test_validation.py` passed after adding the correction/exclusion.
-- `python skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104_bounce_audio_test_validation.py` passed and regenerated ignored corrected T0104 report artifacts.
+- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104b_positive_review_pages.py` passed.
+- `python skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104b_positive_review_pages.py --force --port-start 8783` passed.
+- `/api/session` smoke checks passed for ports `8783` through `8792`.
