@@ -3,7 +3,7 @@ import { fablePredict, type FablePrediction } from './hgbRuntime';
 import { bounceHeightMeters } from './fableEngine';
 import { predictWithRfModelRaw, type RfJsonModel, type RfPrediction } from './rfRuntime';
 import type { NativeAudioOnsetDebug } from './NativeAudioStream';
-import candidateModelJson from './models/fable_extra_trees_candidate_t0075.json';
+import candidateModelJson from './models/fable_extra_trees_candidate_t0103.json';
 
 interface CandidateModel extends RfJsonModel {
   metadata?: {
@@ -22,23 +22,27 @@ interface CandidateModel extends RfJsonModel {
 const MODEL = candidateModelJson as unknown as CandidateModel;
 
 export const BOUNCE_AUDIO_TEST_MODEL_VERSION =
-  MODEL.metadata?.model_version ?? 'fable_extra_trees_candidate_t0075';
+  MODEL.metadata?.model_version ?? 'fable_extra_trees_candidate_t0103';
 
 export interface BounceAudioTestRuntimeConfig {
   threshold: number;
   fableNoiseVetoThreshold: number;
 }
 
+function metadataNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
 export const BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG: BounceAudioTestRuntimeConfig = {
-  threshold: 0.3,
-  fableNoiseVetoThreshold: 0.95,
+  threshold: metadataNumber(MODEL.metadata?.selected_threshold, 0.575),
+  fableNoiseVetoThreshold: metadataNumber(MODEL.metadata?.fable_noise_veto_threshold, 1.0),
 };
 
 export const BOUNCE_AUDIO_TEST_CONFIG = {
   positiveLabel: MODEL.metadata?.positive_label ?? 'racket_bounce',
   threshold: BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.threshold,
   fableNoiseVetoThreshold: BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.fableNoiseVetoThreshold,
-  smartDedupeMs: 220,
+  smartDedupeMs: metadataNumber(MODEL.metadata?.smart_dedupe_ms, 180),
   decisionDelayMs: 500,
   staleMs: 2500,
 } as const;
@@ -182,6 +186,7 @@ function isHighConfidenceFableNoise(
   prediction: FablePrediction,
   config: BounceAudioTestRuntimeConfig,
 ): boolean {
+  if (config.fableNoiseVetoThreshold >= 1) return false;
   return prediction.label === 'noise'
     && prediction.confidence >= config.fableNoiseVetoThreshold;
 }

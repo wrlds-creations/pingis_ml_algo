@@ -147,7 +147,8 @@ function parseProbabilityInput(text: string): number | null {
 }
 
 function formatProbabilityInput(value: number): string {
-  return value.toFixed(2);
+  if (value >= 0.995) return '1.00';
+  return value.toFixed(3).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 function formatPercent(value: number): string {
@@ -477,7 +478,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
             onChangeText={setThresholdText}
             editable={canEditConfig}
             keyboardType="default"
-            placeholder="0.30"
+            placeholder={formatProbabilityInput(BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.threshold)}
             placeholderTextColor="#555"
             selectTextOnFocus
           />
@@ -490,14 +491,14 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
             onChangeText={setNoiseVetoText}
             editable={canEditConfig}
             keyboardType="default"
-            placeholder="0.95"
+            placeholder={formatProbabilityInput(BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.fableNoiseVetoThreshold)}
             placeholderTextColor="#555"
             selectTextOnFocus
           />
         </View>
       </View>
       <Text style={styles.configHint}>
-        Type decimals or percents: 0.3, 30, or 30%.
+        Type decimals or percents: 0.575, 57.5%, or 100% to disable noise veto.
       </Text>
       {configError && canEditConfig ? (
         <Text style={styles.configError}>{configError}</Text>
@@ -517,7 +518,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       </TouchableOpacity>
 
       <Text style={styles.configLine}>
-        {`TUNABLE TEST | Peak gate raw abs 3 ms | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto >=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)} | dedupe 220 ms | delay 500 ms`}
+        {`T0103 TEST | Peak gate raw abs 3 ms | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${BOUNCE_AUDIO_TEST_CONFIG.smartDedupeMs} ms | delay 500 ms`}
       </Text>
       <Text style={styles.warningLine}>
         {'Still diagnostic. Typed values freeze when START is pressed, and each saved JSON records the active config.'}
