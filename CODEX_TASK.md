@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0106-bounce-audio-test-model-switcher`
+`T0107-bounce-audio-test-rms-fable-baseline`
 
 ## Branch
 
@@ -18,13 +18,14 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Let `Bounce audio test` switch between the current guarded T0103 model and the newly exported T0104E diagnostic candidate, so Love can compare both directly on the Motorola without changing production/default audio behavior.
+Add the original RMS/native gate + Fable counter path as a third selectable baseline inside `Bounce audio test`, so Love can compare T0103, T0104E, and the older Fable behavior in the same UI.
 
 ## Dependencies
 
-- T0103 is already exported and installed behind `Bounce audio test` only.
-- T0104E was evaluated offline as a near-miss candidate, not production-ready.
-- Love explicitly asked to include T0104E as a switchable test model despite the earlier no-promotion decision.
+- T0103 is already the default guarded model behind `Bounce audio test` only.
+- T0104E is already bundled as a diagnostic switch-only candidate.
+- `Fable-algoritm` already has the older RMS/native gate + Fable counter flow.
+- Love explicitly asked to compare the original RMS + Fable model in the same `Bounce audio test` UI.
 - Raw/generated `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
@@ -36,9 +37,6 @@ Let `Bounce audio test` switch between the current guarded T0103 model and the n
 - `ITERATION_LOG.md`
 - `apps/collector/src/BounceAudioTestScreen.tsx`
 - `apps/collector/src/bounceAudioTestEngine.ts`
-- `apps/collector/src/models/fable_extra_trees_candidate_t0104e.json`
-- `skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0104e_live_positive_candidate_loop.py`
-- ignored local evaluation artifacts under `data/audio/`
 - validation/status commands
 
 ## Do Not Touch
@@ -48,55 +46,54 @@ Let `Bounce audio test` switch between the current guarded T0103 model and the n
 - Do not delete local or device data.
 - Do not revert tracked or user changes.
 - Do not replace or promote production Fable/studs/camera behavior.
-- Do not change `audio_model.json`, `audio_contact_model.json`, `fable_audio_model.json`, `bounce_side_model.json`, or native peak-gate defaults.
+- Do not change `audio_model.json`, `audio_contact_model.json`, `fable_audio_model.json`, `bounce_side_model.json`, T0103/T0104E JSON, or native peak-gate defaults.
 - Do not move raw/generated data into git.
 
 ## Requirements
 
-- Export T0104E as a diagnostic app JSON artifact with metadata that makes clear it is test-only.
 - Keep T0103 as the default `Bounce audio test` model.
-- Add a visible model selector to `Bounce audio test` with T0103 and T0104E options.
-- Freeze the selected model and typed threshold/noise-veto config when `START` is pressed.
-- Save selected model metadata/config in `bounce_audio_test_debug` JSON.
-- Keep existing T0103 typed threshold/noise-veto behavior intact.
+- Add a visible third selector option for the original RMS + Fable baseline.
+- For RMS + Fable, use the original native gate settings from `Fable-algoritm`: bandpass gate, retrigger `120 ms`, abs min RMS `0.0015`, and the existing `FableCounter` logic.
+- The typed `p threshold` and `noise veto` controls do not need to affect RMS + Fable; the UI should make that clear.
+- Save the selected baseline/runtime metadata in `bounce_audio_test_debug` JSON.
+- Keep T0103/T0104E typed threshold/noise-veto behavior intact.
 
 ## Non-Goals
 
 - No production promotion.
-- No APK release build unless explicitly needed.
+- No APK release build unless explicitly needed; debug install is acceptable if validation passes and a phone is connected.
 - No camera/racket-side changes.
 - No new training data pull or labeling.
 
 ## Acceptance Criteria
 
 - TypeScript validation passes for the Collector app.
-- The T0104E export command runs and creates the app model JSON.
 - Root validation passes.
-- `Bounce audio test` can choose either T0103 or T0104E before starting a test.
+- `Bounce audio test` can choose T0103, T0104E, or RMS + Fable before starting a test.
+- T0103 and T0104E still use peak gate + ExtraTrees with typed config.
+- RMS + Fable uses the original RMS/native gate and Fable counter, and saved debug JSON identifies it clearly.
 
 ## Completion Notes
 
-- Extended `evaluate_t0104e_live_positive_candidate_loop.py` with a guarded `--export-app-model` path.
-- Exported `apps/collector/src/models/fable_extra_trees_candidate_t0104e.json`.
-- Added model switching to `Bounce audio test`:
-  - default remains `T0103`;
-  - second option is `T0104E`;
-  - switching resets threshold/noise-veto fields to the selected model defaults, while typed values still freeze at `START`;
-  - saved debug JSON includes selected model id/title/metadata and active config.
-- Kept production Fable, studs, camera, native peak-gate defaults, and T0103 default behavior unchanged.
+- Added `RMS+Fable` as a third `Bounce audio test` selector option.
+- Reused the existing Fable runtime pieces for the baseline:
+  - native RMS/bandpass gate setup;
+  - retrigger `120 ms`;
+  - abs min RMS `0.0015`;
+  - existing `FableCounter` confidence/window logic with the same live overrides as `Fable-algoritm`.
+- Kept T0103 as the default selector choice.
+- Kept T0103/T0104E peak-gate + ExtraTrees behavior and typed threshold/noise-veto controls intact.
+- Made the `p threshold` and `noise veto` fields disabled/ignored for RMS+Fable and explained that in the UI.
+- Saved selected runtime mode plus either peak-gate config or RMS+Fable gate config in `bounce_audio_test_debug` JSON.
 - Installed/launched the debug app on Motorola `ZY22KSPF5W`.
 
 ## Validation
 
-- `python -m py_compile skills\pingis-audio-classification\scripts\noise_robust\evaluate_t0104e_live_positive_candidate_loop.py`
-- `python skills\pingis-audio-classification\scripts\noise_robust\evaluate_t0104e_live_positive_candidate_loop.py --export-app-model`
-  - exported T0104E app model;
-  - Python/app JSON parity max diff: `5.55e-16`.
 - `cd apps/collector && npx tsc --noEmit`
 - `npm run validate`
 - `git diff --check`
   - passed with existing Windows LF-to-CRLF warnings only.
 - `.\install-android-dev.ps1`
   - installed/launched `com.collectorapp` on Motorola `ZY22KSPF5W`;
-  - smoke: `pidof com.collectorapp` returned `21612`;
-  - package `lastUpdateTime=2026-07-01 18:39:11`.
+  - smoke: `pidof com.collectorapp` returned `25499`;
+  - package `lastUpdateTime=2026-07-01 19:32:24`.

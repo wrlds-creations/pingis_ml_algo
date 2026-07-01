@@ -26,10 +26,13 @@ import {
   BOUNCE_AUDIO_TEST_MODEL_OPTIONS,
   BOUNCE_AUDIO_TEST_MODEL_VERSION,
   BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG,
+  BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG,
   BounceAudioTestEngine,
   defaultRuntimeConfigForModelId,
   decisionConfigForModelId,
+  getBounceAudioTestModelMetadata,
   getBounceAudioTestModelOption,
+  modelOptionUsesTypedRuntimeConfig,
   type BounceAudioTestDecisionConfig,
   type BounceAudioTestModelOption,
   type BounceAudioCandidateRow,
@@ -194,6 +197,8 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   const [status, setStatus] = useState('Ready.');
   const [pendingDebugSession, setPendingDebugSession] = useState<PendingDebugSession | null>(null);
   const [selectedModelId, setSelectedModelId] = useState(BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID);
+  const selectedModelOption = getBounceAudioTestModelOption(selectedModelId);
+  const selectedModelUsesTypedConfig = modelOptionUsesTypedRuntimeConfig(selectedModelOption);
   const [activeModelOption, setActiveModelOption] = useState<BounceAudioTestModelOption>(defaultModelOption);
   const [selectedScenarioId, setSelectedScenarioId] = useState(TEST_SCENARIOS[0].id);
   const [expectedCount, setExpectedCount] = useState('');
@@ -209,19 +214,21 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   });
 
   const typedRuntimeConfig = useMemo(() => {
+    if (!selectedModelUsesTypedConfig) return defaultRuntimeConfigForModelId(selectedModelId);
     const threshold = parseProbabilityInput(thresholdText);
     const fableNoiseVetoThreshold = parseProbabilityInput(noiseVetoText);
     if (threshold === null || fableNoiseVetoThreshold === null) return null;
     return { threshold, fableNoiseVetoThreshold };
-  }, [noiseVetoText, thresholdText]);
+  }, [noiseVetoText, selectedModelId, selectedModelUsesTypedConfig, thresholdText]);
 
   const configError = useMemo(() => {
+    if (!selectedModelUsesTypedConfig) return null;
     const threshold = parseProbabilityInput(thresholdText);
     if (threshold === null) return 'p threshold must be 0-1 or 0-100%.';
     const veto = parseProbabilityInput(noiseVetoText);
     if (veto === null) return 'Noise veto must be 0-1 or 0-100%.';
     return null;
-  }, [noiseVetoText, thresholdText]);
+  }, [noiseVetoText, selectedModelUsesTypedConfig, thresholdText]);
 
   const syncSnapshot = useCallback(() => {
     const rows = engineRef.current.getRows();
@@ -269,6 +276,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         title: modelOption.title,
         short_title: modelOption.shortTitle,
         subtitle: modelOption.subtitle,
+        runtime_mode: modelOption.runtimeMode,
       },
       model_metadata: modelMetadata,
       player: setup,
@@ -288,16 +296,20 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         format: 'pcm_s16le_mono_wav',
         source: 'AudioStreamModule mic stream',
       },
-      peak_gate_config: BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG,
+      peak_gate_config: modelOption.runtimeMode === 'peak_extra_trees' ? BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG : null,
+      rms_fable_gate_config: modelOption.runtimeMode === 'rms_fable' ? BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG : null,
       decision_config: {
         ...decisionConfig,
         threshold: runtimeConfig.threshold,
         fableNoiseVetoThreshold: runtimeConfig.fableNoiseVetoThreshold,
-        source: 'typed_bounce_audio_test_ui',
+        source: modelOptionUsesTypedRuntimeConfig(modelOption)
+          ? 'typed_bounce_audio_test_ui'
+          : 'original_rms_fable_counter',
         selected_model_id: modelOption.id,
         selected_model_title: modelOption.title,
         threshold_input_text: thresholdText,
         fable_noise_veto_input_text: noiseVetoText,
+        typed_thresholds_used: modelOptionUsesTypedRuntimeConfig(modelOption),
       },
       counts,
       candidates: cappedDebugRows(rows),
@@ -342,25 +354,38 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     setSelectedScenarioId(TEST_SCENARIOS[0].id);
     setExpectedCount('');
     setCountUnclear(false);
-    setStatus('Starting peak-gate stream...');
+    setStatus(modelSelection.modelOption.runtimeMode === 'rms_fable'
+      ? 'Starting RMS + Fable stream...'
+      : 'Starting peak-gate stream...');
 
     void (async () => {
       try {
         await RNFS.mkdir(DEBUG_DIR);
         await AudioStream.setDebugRecordingPath(paths.wavPath);
         await AudioStream.startStreaming(TEST_ONSET_THRESHOLD);
-        await AudioStream.setPeakGateConfig(
-          true,
-          BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.smoothingMs,
-          BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.minGapMs,
-          BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.backgroundWindowMs,
-          BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.backgroundExcludeBeforePeakMs,
-          BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.absoluteMinimum,
-          BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.ratioMinimum,
-          BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.zMinimum,
-        );
+        if (modelSelection.modelOption.runtimeMode === 'rms_fable') {
+          await AudioStream.setRetriggerMs(BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.retriggerMs);
+          await AudioStream.setGateConfig(
+            BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.gateMode,
+            BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.spectralGate,
+            BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.absoluteMinimumRms,
+          );
+        } else {
+          await AudioStream.setPeakGateConfig(
+            true,
+            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.smoothingMs,
+            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.minGapMs,
+            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.backgroundWindowMs,
+            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.backgroundExcludeBeforePeakMs,
+            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.absoluteMinimum,
+            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.ratioMinimum,
+            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.zMinimum,
+          );
+        }
         setIsListening(true);
-        setStatus(`Listening with ${modelSelection.modelOption.shortTitle}, p>=${formatPercent(modelSelection.runtimeConfig.threshold)}, noise veto>=${formatPercent(modelSelection.runtimeConfig.fableNoiseVetoThreshold)}.`);
+        setStatus(modelSelection.modelOption.runtimeMode === 'rms_fable'
+          ? 'Listening with RMS+Fable original gate/counter. p and veto fields are ignored.'
+          : `Listening with ${modelSelection.modelOption.shortTitle}, p>=${formatPercent(modelSelection.runtimeConfig.threshold)}, noise veto>=${formatPercent(modelSelection.runtimeConfig.fableNoiseVetoThreshold)}.`);
       } catch (err) {
         setStatus(`Could not start: ${String(err).slice(0, 120)}`);
         try { await AudioStream.stopStreaming(); } catch (_) {}
@@ -455,8 +480,10 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     : typedRuntimeConfig ?? activeRuntimeConfig;
   const canEditConfig = !isListening && !pendingDebugSession;
   const startDisabled = !isListening && (Boolean(pendingDebugSession) || typedRuntimeConfig === null);
-  const selectedModelOption = getBounceAudioTestModelOption(selectedModelId);
   const displayedModelOption = isListening || pendingDebugSession ? activeModelOption : selectedModelOption;
+  const displayedModelMetadata = getBounceAudioTestModelMetadata(displayedModelOption);
+  const displayedModelUsesTypedConfig = modelOptionUsesTypedRuntimeConfig(displayedModelOption);
+  const displayedCandidateLabel = displayedModelOption.runtimeMode === 'rms_fable' ? 'RMS candidates' : 'peak candidates';
   const displayedDecisionConfig = isListening || pendingDebugSession
     ? activeDecisionConfigRef.current
     : decisionConfigForModelId(displayedModelOption.id, displayedRuntimeConfig);
@@ -493,7 +520,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         </TouchableOpacity>
         <Text style={styles.title}>Bounce audio test</Text>
         <Text style={styles.subtitle}>
-          {displayedModelOption.model.metadata?.model_version ?? BOUNCE_AUDIO_TEST_MODEL_VERSION}
+          {displayedModelMetadata.model_version ?? BOUNCE_AUDIO_TEST_MODEL_VERSION}
         </Text>
       </View>
 
@@ -501,7 +528,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         <Text style={styles.counterValue}>{hitCount}</Text>
         <Text style={styles.counterLabel}>counted racket bounces</Text>
         <Text style={styles.eventMeta}>
-          {candidateCount} peak candidates · {classifiedCount} classified · {pendingCount} waiting
+          {candidateCount} {displayedCandidateLabel} · {classifiedCount} classified · {pendingCount} waiting
         </Text>
         {lastCounted?.bounce_height_m !== undefined && lastCounted.bounce_gap_ms !== undefined ? (
           <Text style={styles.heightText}>
@@ -530,6 +557,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
           {BOUNCE_AUDIO_TEST_MODEL_OPTIONS.map(option => {
             const selected = option.id === selectedModelId;
             const modelDefaults = defaultRuntimeConfigForModelId(option.id);
+            const usesTypedConfig = modelOptionUsesTypedRuntimeConfig(option);
             return (
               <TouchableOpacity
                 key={option.id}
@@ -546,7 +574,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
                   {option.shortTitle}
                 </Text>
                 <Text style={[styles.modelButtonMeta, selected && styles.modelButtonMetaOn]}>
-                  p {formatPercent(modelDefaults.threshold)}
+                  {usesTypedConfig ? `p ${formatPercent(modelDefaults.threshold)}` : 'original gate'}
                 </Text>
               </TouchableOpacity>
             );
@@ -558,10 +586,14 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         <View style={styles.configInputGroup}>
           <Text style={styles.configLabel}>p threshold</Text>
           <TextInput
-            style={[styles.configInput, parseProbabilityInput(thresholdText) === null && styles.configInputError]}
+            style={[
+              styles.configInput,
+              !selectedModelUsesTypedConfig && styles.configInputDisabled,
+              selectedModelUsesTypedConfig && parseProbabilityInput(thresholdText) === null && styles.configInputError,
+            ]}
             value={thresholdText}
             onChangeText={setThresholdText}
-            editable={canEditConfig}
+            editable={canEditConfig && selectedModelUsesTypedConfig}
             keyboardType="default"
             placeholder={formatProbabilityInput(BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.threshold)}
             placeholderTextColor="#555"
@@ -571,10 +603,14 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         <View style={styles.configInputGroup}>
           <Text style={styles.configLabel}>noise veto</Text>
           <TextInput
-            style={[styles.configInput, parseProbabilityInput(noiseVetoText) === null && styles.configInputError]}
+            style={[
+              styles.configInput,
+              !selectedModelUsesTypedConfig && styles.configInputDisabled,
+              selectedModelUsesTypedConfig && parseProbabilityInput(noiseVetoText) === null && styles.configInputError,
+            ]}
             value={noiseVetoText}
             onChangeText={setNoiseVetoText}
-            editable={canEditConfig}
+            editable={canEditConfig && selectedModelUsesTypedConfig}
             keyboardType="default"
             placeholder={formatProbabilityInput(BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.fableNoiseVetoThreshold)}
             placeholderTextColor="#555"
@@ -583,7 +619,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         </View>
       </View>
       <Text style={styles.configHint}>
-        Type decimals or percents: 0.575, 57.5%, or 100% to disable noise veto.
+        {selectedModelUsesTypedConfig
+          ? 'Type decimals or percents: 0.575, 57.5%, or 100% to disable noise veto.'
+          : 'RMS+Fable uses the original Fable counter. p threshold and noise veto are ignored for this option.'}
       </Text>
       {configError && canEditConfig ? (
         <Text style={styles.configError}>{configError}</Text>
@@ -603,10 +641,12 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       </TouchableOpacity>
 
       <Text style={styles.configLine}>
-        {`${displayedModelOption.shortTitle} TEST | Peak gate raw abs 3 ms | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${displayedDecisionConfig.smartDedupeMs} ms | delay ${displayedDecisionConfig.decisionDelayMs} ms`}
+        {displayedModelUsesTypedConfig
+          ? `${displayedModelOption.shortTitle} TEST | Peak gate raw abs 3 ms | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${displayedDecisionConfig.smartDedupeMs} ms | delay ${displayedDecisionConfig.decisionDelayMs} ms`
+          : `${displayedModelOption.shortTitle} TEST | RMS bandpass gate | retrigger ${BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.retriggerMs} ms | abs RMS ${BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.absoluteMinimumRms} | original Fable confidence/count logic`}
       </Text>
       <Text style={styles.warningLine}>
-        {'Still diagnostic. Typed values freeze when START is pressed, and each saved JSON records the active config.'}
+        {'Still diagnostic. Selected model and active runtime are saved in each JSON.'}
       </Text>
       <Text style={styles.status}>{status}</Text>
       {savedDebugPath ? <Text style={styles.savedPath}>{savedDebugPath}</Text> : null}
@@ -759,6 +799,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontVariant: ['tabular-nums'],
   },
+  configInputDisabled: { color: '#666', backgroundColor: '#111' },
   configInputError: { borderColor: '#9b3333' },
   configHint: { color: '#666', fontSize: 10, textAlign: 'center', marginHorizontal: 18, marginTop: 5 },
   configError: { color: '#ff9a9a', fontSize: 11, textAlign: 'center', marginHorizontal: 18, marginTop: 4 },

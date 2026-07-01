@@ -1,6 +1,11 @@
 import { extractFableFeatures } from './nrFeatures';
-import { fablePredict, type FablePrediction } from './hgbRuntime';
-import { bounceHeightMeters } from './fableEngine';
+import { fablePredict, FABLE_ENGINE_DEFAULTS, FABLE_MODEL_VERSION, type FablePrediction } from './hgbRuntime';
+import {
+  bounceHeightMeters,
+  FableCounter,
+  FABLE_DEFAULT_CONFIG,
+  type FableDetectionResult,
+} from './fableEngine';
 import { predictWithRfModelRaw, type RfJsonModel, type RfPrediction } from './rfRuntime';
 import type { NativeAudioOnsetDebug } from './NativeAudioStream';
 import t0103ModelJson from './models/fable_extra_trees_candidate_t0103.json';
@@ -21,17 +26,49 @@ export interface CandidateModel extends RfJsonModel {
 }
 
 export type BounceAudioTestModelMetadata = NonNullable<CandidateModel['metadata']>;
+export type BounceAudioTestRuntimeMode = 'peak_extra_trees' | 'rms_fable';
 
 export interface BounceAudioTestModelOption {
   id: string;
   title: string;
   shortTitle: string;
   subtitle: string;
-  model: CandidateModel;
+  runtimeMode: BounceAudioTestRuntimeMode;
+  model?: CandidateModel;
+  metadata?: BounceAudioTestModelMetadata;
 }
 
 const T0103_MODEL = t0103ModelJson as unknown as CandidateModel;
 const T0104E_MODEL = t0104eModelJson as unknown as CandidateModel;
+
+const RMS_FABLE_ENGINE_OVERRIDES = { loudBgDb: -36, loudConfidence: 0.85 } as const;
+
+export const BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG = {
+  gateId: 'original_rms_fable',
+  onsetThreshold: 0.005,
+  gateMode: 'bandpass',
+  spectralGate: false,
+  absoluteMinimumRms: 0.0015,
+  retriggerMs: 120,
+} as const;
+
+export const BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG = {
+  ...FABLE_DEFAULT_CONFIG,
+  ...RMS_FABLE_ENGINE_OVERRIDES,
+} as const;
+
+const RMS_FABLE_METADATA: BounceAudioTestModelMetadata = {
+  model_version: `rms_fable_baseline_${FABLE_MODEL_VERSION}`,
+  source_ticket: 'T0107-bounce-audio-test-rms-fable-baseline',
+  model_type: 'native_rms_gate_plus_fable_counter',
+  candidate_gate: BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.gateId,
+  runtime_status: 'diagnostic_baseline_original_fable_flow_not_production_promotion',
+  fable_model_version: FABLE_MODEL_VERSION,
+  fable_engine_defaults: FABLE_ENGINE_DEFAULTS,
+  fable_live_engine_overrides: RMS_FABLE_ENGINE_OVERRIDES,
+  fable_counter_config: BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG,
+  gate_config: BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG,
+};
 
 export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
   {
@@ -39,6 +76,7 @@ export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
     title: 'T0103 current',
     shortTitle: 'T0103',
     subtitle: 'current guarded test model',
+    runtimeMode: 'peak_extra_trees',
     model: T0103_MODEL,
   },
   {
@@ -46,7 +84,16 @@ export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
     title: 'T0104E candidate',
     shortTitle: 'T0104E',
     subtitle: 'new diagnostic near-miss',
+    runtimeMode: 'peak_extra_trees',
     model: T0104E_MODEL,
+  },
+  {
+    id: 'rms_fable',
+    title: 'RMS + Fable baseline',
+    shortTitle: 'RMS+Fable',
+    subtitle: 'original native gate + Fable counter',
+    runtimeMode: 'rms_fable',
+    metadata: RMS_FABLE_METADATA,
   },
 ];
 
@@ -60,7 +107,8 @@ export function getBounceAudioTestModelOption(modelId: string): BounceAudioTestM
 const DEFAULT_MODEL_OPTION = getBounceAudioTestModelOption(BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID);
 
 export const BOUNCE_AUDIO_TEST_MODEL_VERSION =
-  DEFAULT_MODEL_OPTION.model.metadata?.model_version ?? 'fable_extra_trees_candidate_t0103';
+  (DEFAULT_MODEL_OPTION.model?.metadata ?? DEFAULT_MODEL_OPTION.metadata)?.model_version
+  ?? 'fable_extra_trees_candidate_t0103';
 
 export interface BounceAudioTestRuntimeConfig {
   threshold: number;
@@ -81,21 +129,54 @@ function metadataNumber(value: unknown, fallback: number): number {
 }
 
 export const BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG: BounceAudioTestRuntimeConfig = {
-  threshold: metadataNumber(DEFAULT_MODEL_OPTION.model.metadata?.selected_threshold, 0.575),
-  fableNoiseVetoThreshold: metadataNumber(DEFAULT_MODEL_OPTION.model.metadata?.fable_noise_veto_threshold, 1.0),
+  threshold: metadataNumber(DEFAULT_MODEL_OPTION.model?.metadata?.selected_threshold, 0.575),
+  fableNoiseVetoThreshold: metadataNumber(DEFAULT_MODEL_OPTION.model?.metadata?.fable_noise_veto_threshold, 1.0),
 };
 
-function defaultRuntimeConfigForModel(model: CandidateModel): BounceAudioTestRuntimeConfig {
+export function modelOptionUsesTypedRuntimeConfig(option: BounceAudioTestModelOption): boolean {
+  return option.runtimeMode === 'peak_extra_trees';
+}
+
+export function getBounceAudioTestModelMetadata(option: BounceAudioTestModelOption): BounceAudioTestModelMetadata {
+  return option.model?.metadata ?? option.metadata ?? {};
+}
+
+function requireCandidateModel(option: BounceAudioTestModelOption): CandidateModel {
+  if (!option.model) {
+    throw new Error(`${option.id} does not have an ExtraTrees candidate model`);
+  }
+  return option.model;
+}
+
+function defaultRuntimeConfigForOption(option: BounceAudioTestModelOption): BounceAudioTestRuntimeConfig {
+  if (!modelOptionUsesTypedRuntimeConfig(option)) {
+    return {
+      threshold: 0,
+      fableNoiseVetoThreshold: 1.0,
+    };
+  }
+  const model = requireCandidateModel(option);
   return {
     threshold: metadataNumber(model.metadata?.selected_threshold, 0.575),
     fableNoiseVetoThreshold: metadataNumber(model.metadata?.fable_noise_veto_threshold, 1.0),
   };
 }
 
-function decisionConfigForModel(
-  model: CandidateModel,
+function decisionConfigForOption(
+  option: BounceAudioTestModelOption,
   runtimeConfig: BounceAudioTestRuntimeConfig,
 ): BounceAudioTestDecisionConfig {
+  if (option.runtimeMode === 'rms_fable') {
+    return {
+      positiveLabel: 'racket_bounce',
+      threshold: 0,
+      fableNoiseVetoThreshold: 1.0,
+      smartDedupeMs: 0,
+      decisionDelayMs: 0,
+      staleMs: BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG.staleMs,
+    };
+  }
+  const model = requireCandidateModel(option);
   return {
     positiveLabel: model.metadata?.positive_label ?? 'racket_bounce',
     threshold: runtimeConfig.threshold,
@@ -107,18 +188,18 @@ function decisionConfigForModel(
 }
 
 export function defaultRuntimeConfigForModelId(modelId: string): BounceAudioTestRuntimeConfig {
-  return defaultRuntimeConfigForModel(getBounceAudioTestModelOption(modelId).model);
+  return defaultRuntimeConfigForOption(getBounceAudioTestModelOption(modelId));
 }
 
 export function decisionConfigForModelId(
   modelId: string,
   runtimeConfig = defaultRuntimeConfigForModelId(modelId),
 ): BounceAudioTestDecisionConfig {
-  return decisionConfigForModel(getBounceAudioTestModelOption(modelId).model, runtimeConfig);
+  return decisionConfigForOption(getBounceAudioTestModelOption(modelId), runtimeConfig);
 }
 
 export const BOUNCE_AUDIO_TEST_CONFIG: BounceAudioTestDecisionConfig = {
-  ...decisionConfigForModel(DEFAULT_MODEL_OPTION.model, BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG),
+  ...decisionConfigForOption(DEFAULT_MODEL_OPTION, BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG),
   decisionDelayMs: 500,
   staleMs: 2500,
 };
@@ -143,6 +224,7 @@ export type BounceAudioCandidateDecision =
   | 'pending_delay'
   | 'classified_low_probability'
   | 'rejected_fable_noise_veto'
+  | 'rejected_fable_counter'
   | 'accepted_pending_dedupe'
   | 'deduped_lower_probability'
   | 'counted'
@@ -236,9 +318,10 @@ function probabilityOrFallback(value: unknown, fallback: number): number {
 
 function normalizeRuntimeConfig(
   config?: Partial<BounceAudioTestRuntimeConfig>,
-  model = DEFAULT_MODEL_OPTION.model,
+  option = DEFAULT_MODEL_OPTION,
 ): BounceAudioTestRuntimeConfig {
-  const defaults = defaultRuntimeConfigForModel(model);
+  const defaults = defaultRuntimeConfigForOption(option);
+  if (!modelOptionUsesTypedRuntimeConfig(option)) return defaults;
   return {
     threshold: probabilityOrFallback(
       config?.threshold,
@@ -479,6 +562,104 @@ function buildDebugExplanation(
   };
 }
 
+function buildRmsFableDebugExplanation(
+  row: BounceAudioCandidateRow,
+  result: FableDetectionResult,
+  probability: number,
+): BounceAudioDebugExplanation {
+  const prediction = result.prediction;
+  const label = prediction?.label ?? 'not_classified';
+  const confidence = prediction?.confidence ?? 0;
+  const fableRacketProbability = finiteNumber(prediction?.probabilities.racket_bounce);
+  const fableNoiseProbability = finiteNumber(prediction?.probabilities.noise);
+  const confidenceThreshold = result.bgMode === 'loud'
+    ? BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG.loudConfidence
+    : BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG.quietConfidence;
+  const threshold = label === 'racket_bounce' ? confidenceThreshold : 0;
+  const margin = label === 'racket_bounce' ? confidence - confidenceThreshold : probability;
+  const reasons: BounceAudioDebugReason[] = [];
+
+  if (!prediction) {
+    reasons.push({
+      code: result.rejectReason ?? 'fable_counter_reject',
+      severity: 'blocker',
+      message: `Original Fable gate/counter rejected before model inference (${result.rejectReason ?? 'unknown'}).`,
+    });
+  } else if (result.counted) {
+    reasons.push({
+      code: 'original_fable_counted',
+      severity: 'info',
+      message: `Original Fable counted: ${label} at ${percent(confidence)} confidence.`,
+      value: confidence,
+      threshold: confidenceThreshold,
+    });
+  } else if (label !== 'racket_bounce') {
+    reasons.push({
+      code: 'original_fable_non_racket',
+      severity: 'blocker',
+      message: `Original Fable says ${label} (${percent(confidence)} confidence), not racket.`,
+      value: confidence,
+    });
+  } else if (result.rejectReason === 'low_confidence' || result.rejectReason === 'low_confidence_loud_bg') {
+    reasons.push({
+      code: result.rejectReason,
+      severity: 'blocker',
+      message: `Original Fable racket confidence ${percent(confidence)} is below ${percent(confidenceThreshold)}.`,
+      value: confidence,
+      threshold: confidenceThreshold,
+    });
+  } else {
+    reasons.push({
+      code: result.rejectReason ?? 'original_fable_reject',
+      severity: 'blocker',
+      message: `Original Fable counter rejected this candidate (${result.rejectReason ?? 'unknown'}).`,
+      value: confidence,
+      threshold,
+    });
+  }
+
+  if (result.bgMode === 'loud') {
+    reasons.push({
+      code: 'original_fable_loud_background',
+      severity: 'info',
+      message: `Original Fable used loud-background confidence mode (${percent(confidenceThreshold)}).`,
+      value: result.bgRmsDb,
+      threshold: BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG.loudBgDb,
+    });
+  }
+
+  if (row.peak_value > 0 && row.peak_value < 0.18) {
+    reasons.push({
+      code: row.peak_value < 0.12 ? 'very_soft_peak' : 'soft_peak',
+      severity: row.peak_value < 0.12 ? 'warning' : 'info',
+      message: `Peak is ${row.peak_value < 0.12 ? 'very soft' : 'soft'} (${compactNumber(row.peak_value)}).`,
+      value: row.peak_value,
+      threshold: row.peak_value < 0.12 ? 0.12 : 0.18,
+    });
+  }
+
+  return {
+    summary: reasons[0].message,
+    score: probability,
+    threshold,
+    margin,
+    fable_racket_probability: fableRacketProbability,
+    fable_noise_probability: fableNoiseProbability,
+    reasons,
+    feature_diagnostics: [
+      { feature: 'frame_rms', value: row.frame_rms },
+      { feature: 'bg_rms', value: row.bg_rms },
+      { feature: 'peak_value', value: row.peak_value },
+      { feature: 'peak_ratio', value: row.peak_ratio },
+      { feature: 'peak_z', value: row.peak_z },
+      { feature: 'prob_racket_bounce', value: fableRacketProbability },
+      { feature: 'prob_noise', value: fableNoiseProbability },
+      { feature: 'prob_floor_bounce', value: finiteNumber(prediction?.probabilities.floor_bounce) },
+      { feature: 'prob_table_bounce', value: finiteNumber(prediction?.probabilities.table_bounce) },
+    ],
+  };
+}
+
 function fableModelFlags(prediction: FablePrediction): Record<string, number> {
   return {
     model_is_racket: prediction.label === 'racket_bounce' ? 1 : 0,
@@ -492,7 +673,7 @@ export function buildBounceAudioFeatureVector(
   row: BounceAudioCandidateRow,
   fableFeatures: Record<string, number>,
   fablePrediction: FablePrediction,
-  model: CandidateModel = DEFAULT_MODEL_OPTION.model,
+  model: CandidateModel = requireCandidateModel(DEFAULT_MODEL_OPTION),
 ): Record<string, number> {
   const vector: Record<string, number> = {
     frame_rms: row.frame_rms,
@@ -529,8 +710,9 @@ export class BounceAudioTestEngine {
   private emittedCountedIds = new Set<number>();
   private lastEmittedCountedOnsetMs: number | null = null;
   private modelOption = DEFAULT_MODEL_OPTION;
-  private runtimeConfig = normalizeRuntimeConfig(undefined, DEFAULT_MODEL_OPTION.model);
-  private decisionConfig = decisionConfigForModel(DEFAULT_MODEL_OPTION.model, this.runtimeConfig);
+  private runtimeConfig = normalizeRuntimeConfig(undefined, DEFAULT_MODEL_OPTION);
+  private decisionConfig = decisionConfigForOption(DEFAULT_MODEL_OPTION, this.runtimeConfig);
+  private rmsFableCounter = new FableCounter(RMS_FABLE_ENGINE_OVERRIDES);
 
   constructor(config?: Partial<BounceAudioTestRuntimeConfig>, modelId = BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID) {
     this.setModelOption(modelId, config);
@@ -538,8 +720,9 @@ export class BounceAudioTestEngine {
 
   setModelOption(modelId: string, config?: Partial<BounceAudioTestRuntimeConfig>) {
     this.modelOption = getBounceAudioTestModelOption(modelId);
-    this.runtimeConfig = normalizeRuntimeConfig(config, this.modelOption.model);
-    this.decisionConfig = decisionConfigForModel(this.modelOption.model, this.runtimeConfig);
+    this.runtimeConfig = normalizeRuntimeConfig(config, this.modelOption);
+    this.decisionConfig = decisionConfigForOption(this.modelOption, this.runtimeConfig);
+    this.rmsFableCounter.reset();
     return {
       modelOption: this.getModelOption(),
       runtimeConfig: this.getRuntimeConfig(),
@@ -548,8 +731,8 @@ export class BounceAudioTestEngine {
   }
 
   setRuntimeConfig(config: Partial<BounceAudioTestRuntimeConfig>): BounceAudioTestRuntimeConfig {
-    this.runtimeConfig = normalizeRuntimeConfig(config, this.modelOption.model);
-    this.decisionConfig = decisionConfigForModel(this.modelOption.model, this.runtimeConfig);
+    this.runtimeConfig = normalizeRuntimeConfig(config, this.modelOption);
+    this.decisionConfig = decisionConfigForOption(this.modelOption, this.runtimeConfig);
     return this.getRuntimeConfig();
   }
 
@@ -566,7 +749,7 @@ export class BounceAudioTestEngine {
   }
 
   getModelMetadata(): BounceAudioTestModelMetadata {
-    return this.modelOption.model.metadata ?? {};
+    return getBounceAudioTestModelMetadata(this.modelOption);
   }
 
   reset(): void {
@@ -575,6 +758,7 @@ export class BounceAudioTestEngine {
     this.nextId = 1;
     this.emittedCountedIds.clear();
     this.lastEmittedCountedOnsetMs = null;
+    this.rmsFableCounter.reset();
   }
 
   addCandidate(input: BounceAudioCandidateInput): BounceAudioCandidateRow {
@@ -672,14 +856,19 @@ export class BounceAudioTestEngine {
       return true;
     }
 
+    if (this.modelOption.runtimeMode === 'rms_fable') {
+      return this.classifyRmsFableRow(row, pcm, nowMs);
+    }
+
     try {
       const featureStart = Date.now();
       const fableFeatures = extractFableFeatures(pcm);
       const featureEnd = Date.now();
       const fablePrediction = fablePredict(fableFeatures);
-      const vector = buildBounceAudioFeatureVector(row, fableFeatures, fablePrediction, this.modelOption.model);
+      const model = requireCandidateModel(this.modelOption);
+      const vector = buildBounceAudioFeatureVector(row, fableFeatures, fablePrediction, model);
       const rfStart = Date.now();
-      const prediction = predictWithRfModelRaw(this.modelOption.model, vector);
+      const prediction = predictWithRfModelRaw(model, vector);
       const rfEnd = Date.now();
       const probability = positiveProbability(prediction, this.decisionConfig.positiveLabel);
       const runtimeConfig = this.runtimeConfig;
@@ -699,7 +888,7 @@ export class BounceAudioTestEngine {
         fablePrediction,
         probability,
         runtimeConfig,
-        this.modelOption.model,
+        model,
         this.decisionConfig,
       );
       if (isHighConfidenceFableNoise(fablePrediction, runtimeConfig)) {
@@ -722,12 +911,60 @@ export class BounceAudioTestEngine {
     }
   }
 
+  private classifyRmsFableRow(
+    row: BounceAudioCandidateRow,
+    pcm: Float32Array,
+    nowMs: number,
+  ): boolean {
+    try {
+      const result = this.rmsFableCounter.process(
+        pcm,
+        row.native_onset_time_ms,
+        row.frame_rms,
+        nowMs,
+      );
+      const prediction = result.prediction;
+      const probability = finiteNumber(prediction?.probabilities.racket_bounce);
+
+      row.feature_ms = result.featureMs;
+      row.predict_ms = result.predictMs;
+      row.fable_label = prediction?.label;
+      row.fable_confidence = prediction?.confidence;
+      row.fable_probabilities = prediction?.probabilities;
+      row.classifier_label = prediction?.label;
+      row.classifier_confidence = prediction?.confidence;
+      row.classifier_probability = prediction ? probability : undefined;
+      row.classifier_probabilities = prediction?.probabilities;
+      row.debug_explanation = buildRmsFableDebugExplanation(row, result, probability);
+
+      if (result.counted) {
+        row.decision = 'accepted_pending_dedupe';
+        row.reject_reason = undefined;
+      } else if (result.rejectReason === 'stale_backlog') {
+        row.decision = 'stale_backlog';
+        row.reject_reason = result.rejectReason;
+      } else {
+        row.decision = 'rejected_fable_counter';
+        row.reject_reason = result.rejectReason ?? 'original_fable_reject';
+      }
+      this.pcmById.delete(row.id);
+      return true;
+    } catch (err) {
+      row.decision = 'js_error';
+      row.reject_reason = `js_error:${String(err).slice(0, 120)}`;
+      this.pcmById.delete(row.id);
+      return true;
+    }
+  }
+
   private applySmartDedupe(matureCutoffMs: number, final: boolean): BounceAudioCandidateRow[] {
-    const threshold = this.runtimeConfig.threshold;
     const smartDedupeMs = this.decisionConfig.smartDedupeMs;
     const accepted = this.rows
-      .filter(row => (row.classifier_probability ?? 0) >= threshold)
-      .filter(row => row.decision !== 'rejected_fable_noise_veto')
+      .filter(row => (
+        row.decision === 'accepted_pending_dedupe'
+        || row.decision === 'counted'
+        || row.decision === 'deduped_lower_probability'
+      ))
       .sort((a, b) => a.native_onset_time_ms - b.native_onset_time_ms);
 
     for (const row of accepted) {
@@ -790,4 +1027,4 @@ export class BounceAudioTestEngine {
   }
 }
 
-export const BOUNCE_AUDIO_TEST_MODEL_METADATA = DEFAULT_MODEL_OPTION.model.metadata ?? {};
+export const BOUNCE_AUDIO_TEST_MODEL_METADATA = getBounceAudioTestModelMetadata(DEFAULT_MODEL_OPTION);
