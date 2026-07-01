@@ -76,9 +76,16 @@ const TEST_SCENARIOS: TestScenario[] = [
   { id: 'messy_kid_style_racket_bounce', title: 'Messy/kid-style racket bounce', polarity: 'positive' },
   { id: 'racket_bounce_speaking_counting', title: 'Racket bounce + speaking/counting', polarity: 'positive' },
   { id: 'racket_bounce_background_sound', title: 'Racket bounce + background sound', polarity: 'positive' },
+  { id: 'far_soft_racket_bounce_background', title: 'Far/soft racket bounce + background', polarity: 'positive' },
+  { id: 'soft_high_racket_bounce_background', title: 'High racket bounce + background', polarity: 'positive' },
   { id: 'talking_only_no_bounce', title: 'Talking only, no bounce', polarity: 'negative' },
   { id: 'racket_handling_no_bounce', title: 'Racket handling, no bounce', polarity: 'negative' },
   { id: 'floor_table_other_impact_no_racket', title: 'Floor/table/other impact, no racket', polarity: 'negative' },
+  { id: 'background_sound_only_no_bounce', title: 'Background sound only, no bounce', polarity: 'negative' },
+  { id: 'talking_counting_background_no_bounce', title: 'Talking/counting + background, no bounce', polarity: 'negative' },
+  { id: 'racket_handling_background_no_bounce', title: 'Racket handling + background, no bounce', polarity: 'negative' },
+  { id: 'catch_after_sound_no_racket', title: 'Catch/after-sound, no racket', polarity: 'negative' },
+  { id: 'ambiguous_ball_like_impact_near_phone_no_racket', title: 'Ball-like impact near phone, no racket', polarity: 'negative' },
   { id: 'other_unclear', title: 'Other/unclear', polarity: 'unclear' },
 ];
 

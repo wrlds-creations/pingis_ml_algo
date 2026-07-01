@@ -107,9 +107,9 @@ const SCENARIOS: RecorderScenario[] = [
   },
   {
     id: 'soft_high_racket_bounce_background',
-    title: 'Soft/high racket bounce + background',
-    short: 'Higher slower bounces where the contact is not very loud.',
-    howTo: 'Bounce higher and slower while background sound is present. Let some contacts be soft, like normal home practice.',
+    title: 'High racket bounce + background',
+    short: 'Higher, slower bounces with realistic background sound.',
+    howTo: 'Bounce higher and slower while background sound is present. Use the normal phone position and count each racket contact.',
     countHint: 'Count every real racket contact, even when the peak is small in the waveform.',
     polarity: 'positive',
     boundaryBucket: 'soft_high_background_racket_positive',
