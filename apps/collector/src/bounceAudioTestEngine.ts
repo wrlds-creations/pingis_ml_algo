@@ -36,6 +36,7 @@ export interface BounceAudioTestModelOption {
   runtimeMode: BounceAudioTestRuntimeMode;
   model?: CandidateModel;
   metadata?: BounceAudioTestModelMetadata;
+  defaultRuntimeConfig?: BounceAudioTestRuntimeConfig;
 }
 
 const T0103_MODEL = t0103ModelJson as unknown as CandidateModel;
@@ -83,9 +84,13 @@ export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
     id: 't0104e',
     title: 'T0104E candidate',
     shortTitle: 'T0104E',
-    subtitle: 'new diagnostic near-miss',
+    subtitle: 'colleague test default',
     runtimeMode: 'peak_extra_trees',
     model: T0104E_MODEL,
+    defaultRuntimeConfig: {
+      threshold: 0.25,
+      fableNoiseVetoThreshold: 0.98,
+    },
   },
   {
     id: 'rms_fable',
@@ -97,7 +102,7 @@ export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
   },
 ];
 
-export const BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID = 't0103';
+export const BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID = 't0104e';
 
 export function getBounceAudioTestModelOption(modelId: string): BounceAudioTestModelOption {
   return BOUNCE_AUDIO_TEST_MODEL_OPTIONS.find(option => option.id === modelId)
@@ -154,6 +159,9 @@ function defaultRuntimeConfigForOption(option: BounceAudioTestModelOption): Boun
       threshold: 0,
       fableNoiseVetoThreshold: 1.0,
     };
+  }
+  if (option.defaultRuntimeConfig) {
+    return option.defaultRuntimeConfig;
   }
   const model = requireCandidateModel(option);
   return {

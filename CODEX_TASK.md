@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0110-t0104e-loud-music-negative-feedback`
+`T0111-colleague-test-release-t0104e-defaults`
 
 ## Branch
 
@@ -18,12 +18,13 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Record Love's fresh guarded phone-test feedback that T0104E with `p=0.25` and noise veto `0.98` false-counts loud background music without bounce, while quieter background volume behaves well.
+Prepare a colleague-test release build by making `Bounce audio test` open on T0104E with default `p=0.25` and Fable noise veto `0.98`, then build/install a release APK on the connected phone.
 
 ## Dependencies
 
 - T0109 evaluated T0104E `p=0.25`, noise veto `0.98` as a guarded phone-test setting.
-- Love tested a negative loud-music case on the Motorola app and reported false counts only when music was loud.
+- T0110 confirmed loud music without bounce false-counts at this setting, so this remains a colleague-test diagnostic build rather than a production merge.
+- Love explicitly asked to use `0.25` and `0.98` as defaults and install a release version to the connected phone.
 - Raw/generated `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
@@ -33,6 +34,7 @@ Record Love's fresh guarded phone-test feedback that T0104E with `p=0.25` and no
 - `DECISIONS.md`
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
+- `apps/collector/src/bounceAudioTestEngine.ts`
 - validation/status commands
 
 ## Do Not Touch
@@ -42,38 +44,47 @@ Record Love's fresh guarded phone-test feedback that T0104E with `p=0.25` and no
 - Do not delete local or device data.
 - Do not revert tracked or user changes.
 - Do not replace or promote production Fable/studs/camera behavior.
-- Do not change `audio_model.json`, `audio_contact_model.json`, `fable_audio_model.json`, `bounce_side_model.json`, T0103/T0104E JSON, native peak-gate defaults, or app runtime code.
+- Do not change `audio_model.json`, `audio_contact_model.json`, `fable_audio_model.json`, `bounce_side_model.json`, T0103/T0104E JSON, or native peak-gate defaults.
 - Do not move raw/generated data into git.
 
 ## Requirements
 
-- Record the live feedback clearly in source-of-truth docs.
-- Keep T0104E `p=0.25`, noise veto `0.98` as diagnostic only.
-- Call out loud background music as a confirmed hard negative to collect/label or gate against.
+- Set `Bounce audio test` default selected model to `T0104E`.
+- Set T0104E's default typed runtime config to threshold `0.25` and Fable noise veto `0.98`.
+- Keep T0103 and RMS+Fable available in the selector.
+- Keep this as a diagnostic colleague-test build, not a `main` merge/promotion.
+- Build and install a release APK on the connected Motorola.
 
 ## Non-Goals
 
-- No app code change.
 - No model export/retrain.
-- No APK install.
 - No camera/racket-side changes.
 - No new data pull or labeling.
+- No push or main merge.
 
 ## Acceptance Criteria
 
+- Collector TypeScript validation passes.
 - Root validation passes.
 - `git diff --check` passes.
-- Device feedback is recorded in `PROJECT_CONTEXT.md`, `DECISIONS.md`, `REPO_CURRENT_STATE.md`, and `ITERATION_LOG.md`.
-- Final answer explains what the feedback means and what to do next.
+- Release build/install/launch succeeds on the connected phone.
+- Final answer explains that this is installed for colleague testing but not merged to `main`.
 
 ## Completion Notes
 
-- Recorded Love's live feedback: T0104E `p=0.25`, noise veto `0.98` false-counts loud background music without bounces, but is OK when the volume is reduced.
-- Updated the recommendation to collect/save loud-music-only negatives and treat loud music as outside the current reliable operating envelope.
-- No code, model, APK, raw data, merge, or push changed.
+- `Bounce audio test` now opens with `T0104E` selected.
+- T0104E's default typed config is threshold `0.25` and Fable noise veto `0.98`.
+- T0103 and `RMS+Fable` remain available in the same selector.
+- This is a colleague-test diagnostic release, not a production promotion or `main` merge.
+- Built, installed, and launched a release APK on Motorola `ZY22KSPF5W`.
+- Release APK: `C:\pcr\android\app\build\outputs\apk\release\app-release.apk`.
+- Release APK SHA256: `F7C9D1514D2E408ACFD7391070D68DB43EC2E5646DFAF59896AB6D0B66979F79`.
+- Package smoke: `com.collectorapp`, `versionName=1.0`, `versionCode=1`, `lastUpdateTime=2026-07-01 20:25:36`, PID `32126`.
 
 ## Validation
 
+- `cd apps/collector && npx tsc --noEmit`
 - `npm run validate`
 - `git diff --check`
-  - passed with existing Windows LF-to-CRLF warnings only.
+- `.\build-android-local.ps1 -Install -Launch`
+- release bundle string smoke for `T0104E candidate`, `colleague test default`, and `.98`.
