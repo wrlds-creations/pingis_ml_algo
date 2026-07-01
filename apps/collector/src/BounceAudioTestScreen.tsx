@@ -22,10 +22,16 @@ import {
 import {
   BOUNCE_AUDIO_TEST_CONFIG,
   BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG,
-  BOUNCE_AUDIO_TEST_MODEL_METADATA,
+  BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID,
+  BOUNCE_AUDIO_TEST_MODEL_OPTIONS,
   BOUNCE_AUDIO_TEST_MODEL_VERSION,
   BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG,
   BounceAudioTestEngine,
+  defaultRuntimeConfigForModelId,
+  decisionConfigForModelId,
+  getBounceAudioTestModelOption,
+  type BounceAudioTestDecisionConfig,
+  type BounceAudioTestModelOption,
   type BounceAudioCandidateRow,
   type BounceAudioTestRuntimeConfig,
 } from './bounceAudioTestEngine';
@@ -168,9 +174,14 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   const engineRef = useRef(new BounceAudioTestEngine());
   const startedAtRef = useRef<string | null>(null);
   const pathsRef = useRef<DebugSessionPaths | null>(null);
+  const defaultModelOption = getBounceAudioTestModelOption(BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID);
   const activeRuntimeConfigRef = useRef<BounceAudioTestRuntimeConfig>({
     ...BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG,
   });
+  const activeDecisionConfigRef = useRef<BounceAudioTestDecisionConfig>({
+    ...BOUNCE_AUDIO_TEST_CONFIG,
+  });
+  const activeModelOptionRef = useRef<BounceAudioTestModelOption>(defaultModelOption);
   const [isListening, setIsListening] = useState(false);
   const [hitCount, setHitCount] = useState(0);
   const [candidateCount, setCandidateCount] = useState(0);
@@ -182,6 +193,8 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   const [savedDebugPath, setSavedDebugPath] = useState<string | null>(null);
   const [status, setStatus] = useState('Ready.');
   const [pendingDebugSession, setPendingDebugSession] = useState<PendingDebugSession | null>(null);
+  const [selectedModelId, setSelectedModelId] = useState(BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID);
+  const [activeModelOption, setActiveModelOption] = useState<BounceAudioTestModelOption>(defaultModelOption);
   const [selectedScenarioId, setSelectedScenarioId] = useState(TEST_SCENARIOS[0].id);
   const [expectedCount, setExpectedCount] = useState('');
   const [countUnclear, setCountUnclear] = useState(false);
@@ -244,11 +257,20 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     const rows = engineRef.current.getRows();
     const counts = engineRef.current.getCounts();
     const runtimeConfig = activeRuntimeConfigRef.current;
+    const decisionConfig = activeDecisionConfigRef.current;
+    const modelOption = activeModelOptionRef.current;
+    const modelMetadata = engineRef.current.getModelMetadata();
     const payload = {
       type: 'bounce_audio_test_debug_session',
       schema_version: 1,
-      model_version: BOUNCE_AUDIO_TEST_MODEL_VERSION,
-      model_metadata: BOUNCE_AUDIO_TEST_MODEL_METADATA,
+      model_version: modelMetadata.model_version ?? modelOption.id,
+      model_selector: {
+        id: modelOption.id,
+        title: modelOption.title,
+        short_title: modelOption.shortTitle,
+        subtitle: modelOption.subtitle,
+      },
+      model_metadata: modelMetadata,
       player: setup,
       created_at: new Date().toISOString(),
       started_at: pending.startedAtIso,
@@ -268,10 +290,12 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       },
       peak_gate_config: BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG,
       decision_config: {
-        ...BOUNCE_AUDIO_TEST_CONFIG,
+        ...decisionConfig,
         threshold: runtimeConfig.threshold,
         fableNoiseVetoThreshold: runtimeConfig.fableNoiseVetoThreshold,
         source: 'typed_bounce_audio_test_ui',
+        selected_model_id: modelOption.id,
+        selected_model_title: modelOption.title,
         threshold_input_text: thresholdText,
         fable_noise_veto_input_text: noiseVetoText,
       },
@@ -298,9 +322,12 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     }
     const startedAtIso = new Date().toISOString();
     const paths = buildDebugSessionPaths(startedAtIso);
-    const runtimeConfig = engineRef.current.setRuntimeConfig(typedRuntimeConfig);
-    activeRuntimeConfigRef.current = runtimeConfig;
-    setActiveRuntimeConfig(runtimeConfig);
+    const modelSelection = engineRef.current.setModelOption(selectedModelId, typedRuntimeConfig);
+    activeRuntimeConfigRef.current = modelSelection.runtimeConfig;
+    activeDecisionConfigRef.current = modelSelection.decisionConfig;
+    activeModelOptionRef.current = modelSelection.modelOption;
+    setActiveRuntimeConfig(modelSelection.runtimeConfig);
+    setActiveModelOption(modelSelection.modelOption);
     engineRef.current.reset();
     startedAtRef.current = startedAtIso;
     pathsRef.current = paths;
@@ -333,14 +360,14 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
           BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.zMinimum,
         );
         setIsListening(true);
-        setStatus(`Listening with p>=${formatPercent(runtimeConfig.threshold)} and noise veto>=${formatPercent(runtimeConfig.fableNoiseVetoThreshold)}.`);
+        setStatus(`Listening with ${modelSelection.modelOption.shortTitle}, p>=${formatPercent(modelSelection.runtimeConfig.threshold)}, noise veto>=${formatPercent(modelSelection.runtimeConfig.fableNoiseVetoThreshold)}.`);
       } catch (err) {
         setStatus(`Could not start: ${String(err).slice(0, 120)}`);
         try { await AudioStream.stopStreaming(); } catch (_) {}
         try { await AudioStream.setDebugRecordingPath(null); } catch (_) {}
       }
     })();
-  }, [configError, isListening, pendingDebugSession, typedRuntimeConfig]);
+  }, [configError, isListening, pendingDebugSession, selectedModelId, typedRuntimeConfig]);
 
   const stop = useCallback(() => {
     if (!isListening) return;
@@ -428,6 +455,25 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     : typedRuntimeConfig ?? activeRuntimeConfig;
   const canEditConfig = !isListening && !pendingDebugSession;
   const startDisabled = !isListening && (Boolean(pendingDebugSession) || typedRuntimeConfig === null);
+  const selectedModelOption = getBounceAudioTestModelOption(selectedModelId);
+  const displayedModelOption = isListening || pendingDebugSession ? activeModelOption : selectedModelOption;
+  const displayedDecisionConfig = isListening || pendingDebugSession
+    ? activeDecisionConfigRef.current
+    : decisionConfigForModelId(displayedModelOption.id, displayedRuntimeConfig);
+  const selectModel = useCallback((modelId: string) => {
+    if (!canEditConfig) return;
+    const defaults = defaultRuntimeConfigForModelId(modelId);
+    const modelSelection = engineRef.current.setModelOption(modelId, defaults);
+    activeRuntimeConfigRef.current = modelSelection.runtimeConfig;
+    activeDecisionConfigRef.current = modelSelection.decisionConfig;
+    activeModelOptionRef.current = modelSelection.modelOption;
+    setSelectedModelId(modelSelection.modelOption.id);
+    setActiveModelOption(modelSelection.modelOption);
+    setActiveRuntimeConfig(modelSelection.runtimeConfig);
+    setThresholdText(formatProbabilityInput(modelSelection.runtimeConfig.threshold));
+    setNoiseVetoText(formatProbabilityInput(modelSelection.runtimeConfig.fableNoiseVetoThreshold));
+    setStatus(`Selected ${modelSelection.modelOption.title}.`);
+  }, [canEditConfig]);
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
@@ -446,7 +492,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
           <Text style={styles.back}>Back</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Bounce audio test</Text>
-        <Text style={styles.subtitle}>{BOUNCE_AUDIO_TEST_MODEL_VERSION}</Text>
+        <Text style={styles.subtitle}>
+          {displayedModelOption.model.metadata?.model_version ?? BOUNCE_AUDIO_TEST_MODEL_VERSION}
+        </Text>
       </View>
 
       <View style={styles.counterBox}>
@@ -474,6 +522,36 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
             Why: {lastExplanation}
           </Text>
         ) : null}
+      </View>
+
+      <View style={styles.modelPanel}>
+        <Text style={styles.configLabel}>model</Text>
+        <View style={styles.modelButtons}>
+          {BOUNCE_AUDIO_TEST_MODEL_OPTIONS.map(option => {
+            const selected = option.id === selectedModelId;
+            const modelDefaults = defaultRuntimeConfigForModelId(option.id);
+            return (
+              <TouchableOpacity
+                key={option.id}
+                style={[
+                  styles.modelButton,
+                  selected && styles.modelButtonOn,
+                  !canEditConfig && !selected && styles.modelButtonDisabled,
+                ]}
+                onPress={() => selectModel(option.id)}
+                activeOpacity={0.75}
+                disabled={!canEditConfig}
+              >
+                <Text style={[styles.modelButtonTitle, selected && styles.modelButtonTitleOn]}>
+                  {option.shortTitle}
+                </Text>
+                <Text style={[styles.modelButtonMeta, selected && styles.modelButtonMetaOn]}>
+                  p {formatPercent(modelDefaults.threshold)}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
       </View>
 
       <View style={styles.configPanel}>
@@ -525,7 +603,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       </TouchableOpacity>
 
       <Text style={styles.configLine}>
-        {`T0103 TEST | Peak gate raw abs 3 ms | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${BOUNCE_AUDIO_TEST_CONFIG.smartDedupeMs} ms | delay 500 ms`}
+        {`${displayedModelOption.shortTitle} TEST | Peak gate raw abs 3 ms | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${displayedDecisionConfig.smartDedupeMs} ms | delay ${displayedDecisionConfig.decisionDelayMs} ms`}
       </Text>
       <Text style={styles.warningLine}>
         {'Still diagnostic. Typed values freeze when START is pressed, and each saved JSON records the active config.'}
@@ -644,6 +722,24 @@ const styles = StyleSheet.create({
   toggleStop: { backgroundColor: '#8e2b2b' },
   toggleDisabled: { backgroundColor: '#333' },
   toggleText: { color: '#fff', fontSize: 18, fontWeight: '800' },
+  modelPanel: { marginHorizontal: 24, marginTop: 4 },
+  modelButtons: { flexDirection: 'row', gap: 8 },
+  modelButton: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 8,
+    backgroundColor: '#101010',
+    paddingVertical: 9,
+    paddingHorizontal: 10,
+    minHeight: 54,
+  },
+  modelButtonOn: { borderColor: '#4a9eff', backgroundColor: '#0d1f33' },
+  modelButtonDisabled: { opacity: 0.45 },
+  modelButtonTitle: { color: '#aaa', fontSize: 13, fontWeight: '800' },
+  modelButtonTitleOn: { color: '#fff' },
+  modelButtonMeta: { color: '#666', fontSize: 10, marginTop: 3 },
+  modelButtonMetaOn: { color: '#9dccff' },
   configPanel: {
     flexDirection: 'row',
     gap: 10,

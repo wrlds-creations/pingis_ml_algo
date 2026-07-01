@@ -8,6 +8,7 @@ export an app model, install an APK, or change runtime behavior.
 
 from __future__ import annotations
 
+import argparse
 import csv
 import importlib.util
 import json
@@ -34,12 +35,19 @@ T0104B_REVIEW_DIR = ROOT / "data/audio/models/evaluations/t0104b_positive_review
 T0104_RAW_DEBUG_DIR = ROOT / "data/audio/raw/t0104_bounce_audio_test_live_validation/bounce_audio_test_debug"
 T0103_APP_MODEL = ROOT / "apps/collector/src/models/fable_extra_trees_candidate_t0103.json"
 T0103_ARCHIVE_MODEL = T0103_DIR / "fable_extra_trees_candidate_t0103.json"
+DEFAULT_APP_MODEL_OUT = ROOT / "apps/collector/src/models/fable_extra_trees_candidate_t0104e.json"
 EXPORT_PARITY_SCRIPT = ROOT / "skills/pingis-audio-classification/scripts/noise_robust/export_t0075_fable_extra_trees_app_parity.py"
 
 MATCH_TOLERANCE_MS = 140.0
 THRESHOLDS = [0.20, 0.25, 0.30, 0.40, 0.50, 0.575, 0.65, 0.75]
 DEDUPES_MS = [180.0, 220.0]
 NOISE_VETO_THRESHOLDS: list[float | None] = [None, 0.95, 1.0]
+SELECTED_MODEL_ID = "extra_leaf2_t0104e"
+SELECTED_FEATURE_SET_ID = "base_t0075"
+SELECTED_WEIGHT_STRATEGY_ID = "live_recall_safety"
+SELECTED_THRESHOLD = 0.575
+SELECTED_DEDUPE_MS = 180.0
+SELECTED_FABLE_NOISE_VETO_THRESHOLD: float | None = None
 POSITIVE_CLASS = 1
 POSITIVE_LABEL = "racket_bounce"
 NEGATIVE_LABEL = "not_racket_bounce"
@@ -764,6 +772,94 @@ def select_candidate(policy_rows: list[dict[str, Any]]) -> tuple[str, dict[str, 
     return "no_candidate_worth_phone_test_yet", None
 
 
+def class_label(value: int) -> str:
+    return POSITIVE_LABEL if int(value) == POSITIVE_CLASS else NEGATIVE_LABEL
+
+
+def export_candidate_model(
+    t0103: Any,
+    estimator: Any,
+    features: list[str],
+    training_rows: list[dict[str, Any]],
+    selected_policy: dict[str, Any] | None,
+) -> dict[str, Any]:
+    classes = [int(value) for value in estimator.classes_]
+    if POSITIVE_CLASS not in classes:
+        raise RuntimeError("Estimator does not expose positive class 1")
+    positive_rows = sum(1 for row in training_rows if intish(row.get("label")) == 1)
+    total_nodes = sum(int(tree.tree_.node_count) for tree in estimator.estimators_)
+    labels = [class_label(value) for value in classes]
+    return {
+        "metadata": {
+            "model_version": "fable_extra_trees_candidate_t0104e",
+            "source_ticket": "T0106-bounce-audio-test-model-switcher",
+            "training_source_ticket": "T0104E-live-positive-candidate-loop",
+            "selection_source": selected_policy.get("policy_id") if selected_policy else "",
+            "model_type": "extra_trees_binary_peak_candidate",
+            "candidate_gate": "peak_fast_balanced",
+            "feature_version": "t0104e_peak_candidate_features_plus_fable83",
+            "selected_threshold": SELECTED_THRESHOLD,
+            "smart_dedupe_ms": SELECTED_DEDUPE_MS,
+            "fable_noise_veto_threshold": SELECTED_FABLE_NOISE_VETO_THRESHOLD,
+            "positive_class": POSITIVE_CLASS,
+            "positive_label": POSITIVE_LABEL,
+            "classes": classes,
+            "tree_count": len(estimator.estimators_),
+            "total_nodes": total_nodes,
+            "training_rows": len(training_rows),
+            "training_positive_candidates": positive_rows,
+            "training_negative_candidates": len(training_rows) - positive_rows,
+            "normal_fable_model_unchanged": True,
+            "runtime_status": "diagnostic_bounce_audio_test_switch_only_not_production",
+            "offline_caution": (
+                "T0104E was a near-miss candidate, not a production promotion. "
+                "Use only for guarded phone comparison against T0103."
+            ),
+        },
+        "labels": labels,
+        "feature_names": features,
+        "scaler_mean": [0.0 for _ in features],
+        "scaler_std": [1.0 for _ in features],
+        "trees": [t0103.export_tree_full_precision(tree) for tree in estimator.estimators_],
+    }
+
+
+def train_and_export_selected_app_model(
+    t0103: Any,
+    rows: list[dict[str, Any]],
+    feature_sets: list[Any],
+    specs: list[Any],
+    strategies: list[Any],
+    selected_policy: dict[str, Any] | None,
+    app_model_out: Path,
+    out_dir: Path,
+) -> dict[str, Any]:
+    features = next(item.features for item in feature_sets if item.feature_set_id == SELECTED_FEATURE_SET_ID)
+    strategy = next(item for item in strategies if item.strategy_id == SELECTED_WEIGHT_STRATEGY_ID)
+    spec = next(item for item in specs if item.model_id == SELECTED_MODEL_ID)
+    estimator = t0103.fit_estimator(spec.estimator, rows, features, strategy)
+    model_json = export_candidate_model(t0103, estimator, features, rows, selected_policy)
+    app_model_out.parent.mkdir(parents=True, exist_ok=True)
+    app_model_out.write_text(json.dumps(model_json, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    archive_path = out_dir / "fable_extra_trees_candidate_t0104e.json"
+    archive_path.write_text(json.dumps(model_json, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    export = load_module("t0104e_export_parity", EXPORT_PARITY_SCRIPT)
+    app_probs = export.app_style_probabilities(model_json, rows)
+    fit_probs = t0103.predict_probability(estimator, rows, features)
+    max_probability_diff = float(np.max(np.abs(app_probs - fit_probs))) if len(rows) else 0.0
+
+    return {
+        "app_model_out": str(app_model_out),
+        "archive_path": str(archive_path),
+        "training_rows": len(rows),
+        "feature_count": len(features),
+        "tree_count": len(model_json["trees"]),
+        "total_nodes": model_json["metadata"]["total_nodes"],
+        "max_probability_diff": max_probability_diff,
+    }
+
+
 def render_report(
     summary: dict[str, Any],
     live_session_summary: list[dict[str, Any]],
@@ -779,7 +875,7 @@ def render_report(
         "## Decision",
         "",
         f"- Recommendation: `{summary['recommendation']}`",
-        f"- App/model export prepared: `False`",
+        f"- App/model export prepared: `{summary['app_model_export_prepared']}`",
         "",
         "## Live Candidate Coverage",
         "",
@@ -847,7 +943,7 @@ def render_report(
             "",
             "## Notes",
             "",
-            "- This is offline evaluation only; no app model was exported and no APK was installed.",
+            "- This is primarily offline evaluation. Any exported app model is diagnostic-only for the separate `Bounce audio test` selector.",
             "- The excluded slow/high run `bounce_audio_test_session_2026-07-01T13-38-19-066Z` is not used because Love marked the true count unclear.",
             "- Phone-test worthiness requires live-positive recall improvement while preserving fresh negative, T0103 boundary-negative, and Round A hard-negative safety.",
         ]
@@ -856,7 +952,18 @@ def render_report(
 
 
 def main() -> int:
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out-dir", type=Path, default=OUT_DIR)
+    parser.add_argument("--app-model-out", type=Path, default=DEFAULT_APP_MODEL_OUT)
+    parser.add_argument(
+        "--export-app-model",
+        action="store_true",
+        help="Export the selected near-miss T0104E model for guarded Bounce audio test comparison only.",
+    )
+    args = parser.parse_args()
+
+    out_dir = args.out_dir if args.out_dir.is_absolute() else ROOT / args.out_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
     t0103 = load_module("t0103_candidate_loop_for_t0104e", T0103_SCRIPT)
     t0099 = t0103.load_module("t0099_helpers_t0104e", t0103.T0099_SCRIPT)
     feature_names = load_feature_names()
@@ -875,6 +982,22 @@ def main() -> int:
     predictions = t0103.make_oof_predictions(rows, specs, feature_sets, strategies)
     policy_rows = sweep_predictions(predictions, live_truth, boundary_truth, round_truth, noisy_truth)
     recommendation, selected = select_candidate(policy_rows)
+    export_summary: dict[str, Any] | None = None
+
+    if args.export_app_model:
+        if selected is None:
+            raise RuntimeError("Refusing app export because no T0104E candidate was selected")
+        app_model_out = args.app_model_out if args.app_model_out.is_absolute() else ROOT / args.app_model_out
+        export_summary = train_and_export_selected_app_model(
+            t0103,
+            rows,
+            feature_sets,
+            specs,
+            strategies,
+            selected,
+            app_model_out,
+            out_dir,
+        )
 
     app_rows = baseline_rows_with_t0103_app_probability(rows)
     baselines = [
@@ -952,6 +1075,8 @@ def main() -> int:
         "recommendation": recommendation,
         "selected_policy_id": selected.get("policy_id") if selected else "",
         "selected_policy": selected,
+        "app_model_export_prepared": bool(export_summary),
+        "export_summary": export_summary,
         "outputs": {
             "candidate_rows": "t0104e_candidate_rows.csv",
             "oof_predictions": "t0104e_oof_predictions.csv",
@@ -960,18 +1085,18 @@ def main() -> int:
         },
     }
 
-    write_csv(OUT_DIR / "t0104e_candidate_rows.csv", rows)
-    write_csv(OUT_DIR / "t0104e_oof_predictions.csv", predictions)
-    write_csv(OUT_DIR / "t0104e_policy_sweep.csv", policy_rows)
-    write_csv(OUT_DIR / "t0104e_live_session_summary.csv", live_session_summary)
-    write_csv(OUT_DIR / "t0104e_baselines.csv", baselines)
-    write_json(OUT_DIR / "t0104e_summary.json", summary)
-    (OUT_DIR / "t0104e_report.md").write_text(
+    write_csv(out_dir / "t0104e_candidate_rows.csv", rows)
+    write_csv(out_dir / "t0104e_oof_predictions.csv", predictions)
+    write_csv(out_dir / "t0104e_policy_sweep.csv", policy_rows)
+    write_csv(out_dir / "t0104e_live_session_summary.csv", live_session_summary)
+    write_csv(out_dir / "t0104e_baselines.csv", baselines)
+    write_json(out_dir / "t0104e_summary.json", summary)
+    (out_dir / "t0104e_report.md").write_text(
         render_report(summary, live_session_summary, baselines, top_rows, selected),
         encoding="utf-8",
     )
 
-    print(f"Wrote {OUT_DIR}")
+    print(f"Wrote {out_dir}")
     print(f"Live truth: {summary['live_truth']} labels; live rows: {len(live_rows)}")
     print(f"Recommendation: {recommendation}")
     if selected:
@@ -981,6 +1106,9 @@ def main() -> int:
             f"{selected['live_positive_recall_140']} negatives={selected['live_negative_false_counts']} "
             f"boundary_false={selected['boundary_negative_false_counts']} round_false={selected['round_negative_false_counts']}"
         )
+    if export_summary:
+        print(f"Exported app model: {export_summary['app_model_out']}")
+        print(f"Export parity max diff: {export_summary['max_probability_diff']:.3g}")
     return 0
 
 

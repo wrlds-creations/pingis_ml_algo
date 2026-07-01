@@ -3,9 +3,10 @@ import { fablePredict, type FablePrediction } from './hgbRuntime';
 import { bounceHeightMeters } from './fableEngine';
 import { predictWithRfModelRaw, type RfJsonModel, type RfPrediction } from './rfRuntime';
 import type { NativeAudioOnsetDebug } from './NativeAudioStream';
-import candidateModelJson from './models/fable_extra_trees_candidate_t0103.json';
+import t0103ModelJson from './models/fable_extra_trees_candidate_t0103.json';
+import t0104eModelJson from './models/fable_extra_trees_candidate_t0104e.json';
 
-interface CandidateModel extends RfJsonModel {
+export interface CandidateModel extends RfJsonModel {
   metadata?: {
     model_version?: string;
     source_ticket?: string;
@@ -19,14 +20,60 @@ interface CandidateModel extends RfJsonModel {
   };
 }
 
-const MODEL = candidateModelJson as unknown as CandidateModel;
+export type BounceAudioTestModelMetadata = NonNullable<CandidateModel['metadata']>;
+
+export interface BounceAudioTestModelOption {
+  id: string;
+  title: string;
+  shortTitle: string;
+  subtitle: string;
+  model: CandidateModel;
+}
+
+const T0103_MODEL = t0103ModelJson as unknown as CandidateModel;
+const T0104E_MODEL = t0104eModelJson as unknown as CandidateModel;
+
+export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
+  {
+    id: 't0103',
+    title: 'T0103 current',
+    shortTitle: 'T0103',
+    subtitle: 'current guarded test model',
+    model: T0103_MODEL,
+  },
+  {
+    id: 't0104e',
+    title: 'T0104E candidate',
+    shortTitle: 'T0104E',
+    subtitle: 'new diagnostic near-miss',
+    model: T0104E_MODEL,
+  },
+];
+
+export const BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID = 't0103';
+
+export function getBounceAudioTestModelOption(modelId: string): BounceAudioTestModelOption {
+  return BOUNCE_AUDIO_TEST_MODEL_OPTIONS.find(option => option.id === modelId)
+    ?? BOUNCE_AUDIO_TEST_MODEL_OPTIONS[0];
+}
+
+const DEFAULT_MODEL_OPTION = getBounceAudioTestModelOption(BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID);
 
 export const BOUNCE_AUDIO_TEST_MODEL_VERSION =
-  MODEL.metadata?.model_version ?? 'fable_extra_trees_candidate_t0103';
+  DEFAULT_MODEL_OPTION.model.metadata?.model_version ?? 'fable_extra_trees_candidate_t0103';
 
 export interface BounceAudioTestRuntimeConfig {
   threshold: number;
   fableNoiseVetoThreshold: number;
+}
+
+export interface BounceAudioTestDecisionConfig {
+  positiveLabel: string;
+  threshold: number;
+  fableNoiseVetoThreshold: number;
+  smartDedupeMs: number;
+  decisionDelayMs: number;
+  staleMs: number;
 }
 
 function metadataNumber(value: unknown, fallback: number): number {
@@ -34,18 +81,47 @@ function metadataNumber(value: unknown, fallback: number): number {
 }
 
 export const BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG: BounceAudioTestRuntimeConfig = {
-  threshold: metadataNumber(MODEL.metadata?.selected_threshold, 0.575),
-  fableNoiseVetoThreshold: metadataNumber(MODEL.metadata?.fable_noise_veto_threshold, 1.0),
+  threshold: metadataNumber(DEFAULT_MODEL_OPTION.model.metadata?.selected_threshold, 0.575),
+  fableNoiseVetoThreshold: metadataNumber(DEFAULT_MODEL_OPTION.model.metadata?.fable_noise_veto_threshold, 1.0),
 };
 
-export const BOUNCE_AUDIO_TEST_CONFIG = {
-  positiveLabel: MODEL.metadata?.positive_label ?? 'racket_bounce',
-  threshold: BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.threshold,
-  fableNoiseVetoThreshold: BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.fableNoiseVetoThreshold,
-  smartDedupeMs: metadataNumber(MODEL.metadata?.smart_dedupe_ms, 180),
+function defaultRuntimeConfigForModel(model: CandidateModel): BounceAudioTestRuntimeConfig {
+  return {
+    threshold: metadataNumber(model.metadata?.selected_threshold, 0.575),
+    fableNoiseVetoThreshold: metadataNumber(model.metadata?.fable_noise_veto_threshold, 1.0),
+  };
+}
+
+function decisionConfigForModel(
+  model: CandidateModel,
+  runtimeConfig: BounceAudioTestRuntimeConfig,
+): BounceAudioTestDecisionConfig {
+  return {
+    positiveLabel: model.metadata?.positive_label ?? 'racket_bounce',
+    threshold: runtimeConfig.threshold,
+    fableNoiseVetoThreshold: runtimeConfig.fableNoiseVetoThreshold,
+    smartDedupeMs: metadataNumber(model.metadata?.smart_dedupe_ms, 180),
+    decisionDelayMs: 500,
+    staleMs: 2500,
+  };
+}
+
+export function defaultRuntimeConfigForModelId(modelId: string): BounceAudioTestRuntimeConfig {
+  return defaultRuntimeConfigForModel(getBounceAudioTestModelOption(modelId).model);
+}
+
+export function decisionConfigForModelId(
+  modelId: string,
+  runtimeConfig = defaultRuntimeConfigForModelId(modelId),
+): BounceAudioTestDecisionConfig {
+  return decisionConfigForModel(getBounceAudioTestModelOption(modelId).model, runtimeConfig);
+}
+
+export const BOUNCE_AUDIO_TEST_CONFIG: BounceAudioTestDecisionConfig = {
+  ...decisionConfigForModel(DEFAULT_MODEL_OPTION.model, BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG),
   decisionDelayMs: 500,
   staleMs: 2500,
-} as const;
+};
 
 export const BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG = {
   gateId: 'peak_fast_balanced',
@@ -158,15 +234,19 @@ function probabilityOrFallback(value: unknown, fallback: number): number {
   return parsed;
 }
 
-function normalizeRuntimeConfig(config?: Partial<BounceAudioTestRuntimeConfig>): BounceAudioTestRuntimeConfig {
+function normalizeRuntimeConfig(
+  config?: Partial<BounceAudioTestRuntimeConfig>,
+  model = DEFAULT_MODEL_OPTION.model,
+): BounceAudioTestRuntimeConfig {
+  const defaults = defaultRuntimeConfigForModel(model);
   return {
     threshold: probabilityOrFallback(
       config?.threshold,
-      BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.threshold,
+      defaults.threshold,
     ),
     fableNoiseVetoThreshold: probabilityOrFallback(
       config?.fableNoiseVetoThreshold,
-      BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.fableNoiseVetoThreshold,
+      defaults.fableNoiseVetoThreshold,
     ),
   };
 }
@@ -175,10 +255,10 @@ function nativeOnsetTime(nativeDebug: NativeAudioOnsetDebug | undefined, receive
   return finiteNumber(nativeDebug?.onset_time_ms, receivedAtMs);
 }
 
-function positiveProbability(prediction: RfPrediction): number {
+function positiveProbability(prediction: RfPrediction, positiveLabel: string): number {
   return finiteNumber(
-    prediction.probabilities[BOUNCE_AUDIO_TEST_CONFIG.positiveLabel],
-    prediction.label === BOUNCE_AUDIO_TEST_CONFIG.positiveLabel ? prediction.confidence : 0,
+    prediction.probabilities[positiveLabel],
+    prediction.label === positiveLabel ? prediction.confidence : 0,
   );
 }
 
@@ -207,16 +287,16 @@ function compactNumber(value: number): string {
   return value.toFixed(3);
 }
 
-function modelZ(featureName: string, value: number): number | undefined {
-  const index = MODEL.feature_names.indexOf(featureName);
+function modelZ(model: CandidateModel, featureName: string, value: number): number | undefined {
+  const index = model.feature_names.indexOf(featureName);
   if (index < 0) return undefined;
-  const std = finiteNumber(MODEL.scaler_std[index], 1);
+  const std = finiteNumber(model.scaler_std[index], 1);
   const denominator = std === 0 ? 1 : std;
-  return (value - finiteNumber(MODEL.scaler_mean[index])) / denominator;
+  return (value - finiteNumber(model.scaler_mean[index])) / denominator;
 }
 
-function diagnosticFeature(featureName: string, value: number): BounceAudioFeatureDiagnostic {
-  const z = modelZ(featureName, value);
+function diagnosticFeature(model: CandidateModel, featureName: string, value: number): BounceAudioFeatureDiagnostic {
+  const z = modelZ(model, featureName, value);
   return {
     feature: featureName,
     value,
@@ -229,6 +309,8 @@ function buildDebugExplanation(
   fablePrediction: FablePrediction,
   probability: number,
   config: BounceAudioTestRuntimeConfig,
+  model: CandidateModel,
+  decisionConfig: BounceAudioTestDecisionConfig,
 ): BounceAudioDebugExplanation {
   const threshold = config.threshold;
   const margin = probability - threshold;
@@ -264,7 +346,7 @@ function buildDebugExplanation(
     });
   }
 
-  if (fablePrediction.label !== BOUNCE_AUDIO_TEST_CONFIG.positiveLabel) {
+  if (fablePrediction.label !== decisionConfig.positiveLabel) {
     reasons.push({
       code: 'fable_non_racket',
       severity: 'warning',
@@ -381,18 +463,18 @@ function buildDebugExplanation(
     fable_racket_probability: fableRacketProbability,
     fable_noise_probability: fableNoiseProbability,
     fable_noise_veto_threshold: config.fableNoiseVetoThreshold,
-    tree_positive_mass: probability * MODEL.trees.length,
+    tree_positive_mass: probability * model.trees.length,
     reasons,
     feature_diagnostics: [
-      diagnosticFeature('peak_value', row.peak_value),
-      diagnosticFeature('frame_rms', row.frame_rms),
-      diagnosticFeature('bg_rms', row.bg_rms),
-      diagnosticFeature('peak_ratio', row.peak_ratio),
-      diagnosticFeature('peak_z', row.peak_z),
-      diagnosticFeature('prob_racket_bounce', fableRacketProbability),
-      diagnosticFeature('prob_noise', finiteNumber(fablePrediction.probabilities.noise)),
-      diagnosticFeature('prob_floor_bounce', finiteNumber(fablePrediction.probabilities.floor_bounce)),
-      diagnosticFeature('prob_table_bounce', finiteNumber(fablePrediction.probabilities.table_bounce)),
+      diagnosticFeature(model, 'peak_value', row.peak_value),
+      diagnosticFeature(model, 'frame_rms', row.frame_rms),
+      diagnosticFeature(model, 'bg_rms', row.bg_rms),
+      diagnosticFeature(model, 'peak_ratio', row.peak_ratio),
+      diagnosticFeature(model, 'peak_z', row.peak_z),
+      diagnosticFeature(model, 'prob_racket_bounce', fableRacketProbability),
+      diagnosticFeature(model, 'prob_noise', finiteNumber(fablePrediction.probabilities.noise)),
+      diagnosticFeature(model, 'prob_floor_bounce', finiteNumber(fablePrediction.probabilities.floor_bounce)),
+      diagnosticFeature(model, 'prob_table_bounce', finiteNumber(fablePrediction.probabilities.table_bounce)),
     ],
   };
 }
@@ -410,6 +492,7 @@ export function buildBounceAudioFeatureVector(
   row: BounceAudioCandidateRow,
   fableFeatures: Record<string, number>,
   fablePrediction: FablePrediction,
+  model: CandidateModel = DEFAULT_MODEL_OPTION.model,
 ): Record<string, number> {
   const vector: Record<string, number> = {
     frame_rms: row.frame_rms,
@@ -435,7 +518,7 @@ export function buildBounceAudioFeatureVector(
   // Keep the vector aligned with the exported artifact even if a future feature
   // extractor emits fewer keys than the model expects.
   const aligned: Record<string, number> = {};
-  for (const name of MODEL.feature_names) aligned[name] = finiteNumber(vector[name]);
+  for (const name of model.feature_names) aligned[name] = finiteNumber(vector[name]);
   return aligned;
 }
 
@@ -445,19 +528,45 @@ export class BounceAudioTestEngine {
   private nextId = 1;
   private emittedCountedIds = new Set<number>();
   private lastEmittedCountedOnsetMs: number | null = null;
-  private runtimeConfig = normalizeRuntimeConfig();
+  private modelOption = DEFAULT_MODEL_OPTION;
+  private runtimeConfig = normalizeRuntimeConfig(undefined, DEFAULT_MODEL_OPTION.model);
+  private decisionConfig = decisionConfigForModel(DEFAULT_MODEL_OPTION.model, this.runtimeConfig);
 
-  constructor(config?: Partial<BounceAudioTestRuntimeConfig>) {
-    this.runtimeConfig = normalizeRuntimeConfig(config);
+  constructor(config?: Partial<BounceAudioTestRuntimeConfig>, modelId = BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID) {
+    this.setModelOption(modelId, config);
+  }
+
+  setModelOption(modelId: string, config?: Partial<BounceAudioTestRuntimeConfig>) {
+    this.modelOption = getBounceAudioTestModelOption(modelId);
+    this.runtimeConfig = normalizeRuntimeConfig(config, this.modelOption.model);
+    this.decisionConfig = decisionConfigForModel(this.modelOption.model, this.runtimeConfig);
+    return {
+      modelOption: this.getModelOption(),
+      runtimeConfig: this.getRuntimeConfig(),
+      decisionConfig: this.getDecisionConfig(),
+    };
   }
 
   setRuntimeConfig(config: Partial<BounceAudioTestRuntimeConfig>): BounceAudioTestRuntimeConfig {
-    this.runtimeConfig = normalizeRuntimeConfig(config);
+    this.runtimeConfig = normalizeRuntimeConfig(config, this.modelOption.model);
+    this.decisionConfig = decisionConfigForModel(this.modelOption.model, this.runtimeConfig);
     return this.getRuntimeConfig();
   }
 
   getRuntimeConfig(): BounceAudioTestRuntimeConfig {
     return { ...this.runtimeConfig };
+  }
+
+  getModelOption(): BounceAudioTestModelOption {
+    return this.modelOption;
+  }
+
+  getDecisionConfig(): BounceAudioTestDecisionConfig {
+    return { ...this.decisionConfig };
+  }
+
+  getModelMetadata(): BounceAudioTestModelMetadata {
+    return this.modelOption.model.metadata ?? {};
   }
 
   reset(): void {
@@ -494,7 +603,7 @@ export class BounceAudioTestEngine {
   }
 
   flush(nowMs = Date.now(), final = false): BounceAudioFlushResult {
-    const matureCutoffMs = final ? Number.POSITIVE_INFINITY : nowMs - BOUNCE_AUDIO_TEST_CONFIG.decisionDelayMs;
+    const matureCutoffMs = final ? Number.POSITIVE_INFINITY : nowMs - this.decisionConfig.decisionDelayMs;
     let rowsChanged = false;
 
     for (const row of this.rows) {
@@ -549,7 +658,7 @@ export class BounceAudioTestEngine {
   }
 
   private classifyRow(row: BounceAudioCandidateRow, nowMs: number): boolean {
-    if (nowMs - row.native_onset_time_ms > BOUNCE_AUDIO_TEST_CONFIG.staleMs) {
+    if (nowMs - row.native_onset_time_ms > this.decisionConfig.staleMs) {
       row.decision = 'stale_backlog';
       row.reject_reason = 'stale_backlog';
       return true;
@@ -568,11 +677,11 @@ export class BounceAudioTestEngine {
       const fableFeatures = extractFableFeatures(pcm);
       const featureEnd = Date.now();
       const fablePrediction = fablePredict(fableFeatures);
-      const vector = buildBounceAudioFeatureVector(row, fableFeatures, fablePrediction);
+      const vector = buildBounceAudioFeatureVector(row, fableFeatures, fablePrediction, this.modelOption.model);
       const rfStart = Date.now();
-      const prediction = predictWithRfModelRaw(MODEL, vector);
+      const prediction = predictWithRfModelRaw(this.modelOption.model, vector);
       const rfEnd = Date.now();
-      const probability = positiveProbability(prediction);
+      const probability = positiveProbability(prediction, this.decisionConfig.positiveLabel);
       const runtimeConfig = this.runtimeConfig;
 
       row.feature_ms = featureEnd - featureStart;
@@ -585,7 +694,14 @@ export class BounceAudioTestEngine {
       row.classifier_probability = probability;
       row.classifier_probabilities = prediction.probabilities;
       row.feature_vector = vector;
-      row.debug_explanation = buildDebugExplanation(row, fablePrediction, probability, runtimeConfig);
+      row.debug_explanation = buildDebugExplanation(
+        row,
+        fablePrediction,
+        probability,
+        runtimeConfig,
+        this.modelOption.model,
+        this.decisionConfig,
+      );
       if (isHighConfidenceFableNoise(fablePrediction, runtimeConfig)) {
         row.decision = 'rejected_fable_noise_veto';
         row.reject_reason = 'fable_noise_veto';
@@ -608,6 +724,7 @@ export class BounceAudioTestEngine {
 
   private applySmartDedupe(matureCutoffMs: number, final: boolean): BounceAudioCandidateRow[] {
     const threshold = this.runtimeConfig.threshold;
+    const smartDedupeMs = this.decisionConfig.smartDedupeMs;
     const accepted = this.rows
       .filter(row => (row.classifier_probability ?? 0) >= threshold)
       .filter(row => row.decision !== 'rejected_fable_noise_veto')
@@ -625,7 +742,7 @@ export class BounceAudioTestEngine {
     const flushCluster = (items: BounceAudioCandidateRow[]) => {
       if (items.length === 0) return;
       const lastTime = items[items.length - 1].native_onset_time_ms;
-      const clusterIsClosed = final || lastTime <= matureCutoffMs - BOUNCE_AUDIO_TEST_CONFIG.smartDedupeMs;
+      const clusterIsClosed = final || lastTime <= matureCutoffMs - smartDedupeMs;
       if (!clusterIsClosed) return;
       const winner = items.reduce((best, row) => {
         const bestProb = best.classifier_probability ?? 0;
@@ -662,7 +779,7 @@ export class BounceAudioTestEngine {
 
     for (const row of accepted) {
       const last = cluster[cluster.length - 1];
-      if (last && row.native_onset_time_ms - last.native_onset_time_ms > BOUNCE_AUDIO_TEST_CONFIG.smartDedupeMs) {
+      if (last && row.native_onset_time_ms - last.native_onset_time_ms > smartDedupeMs) {
         flushCluster(cluster);
         cluster = [];
       }
@@ -673,4 +790,4 @@ export class BounceAudioTestEngine {
   }
 }
 
-export const BOUNCE_AUDIO_TEST_MODEL_METADATA = MODEL.metadata ?? {};
+export const BOUNCE_AUDIO_TEST_MODEL_METADATA = DEFAULT_MODEL_OPTION.model.metadata ?? {};

@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0104E-live-positive-candidate-loop`
+`T0106-bounce-audio-test-model-switcher`
 
 ## Branch
 
@@ -18,24 +18,27 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Train/evaluate a guarded audio candidate loop using the newly ingested T0104D live positives, while preserving the existing boundary/Round A hard-negative safety gates.
+Let `Bounce audio test` switch between the current guarded T0103 model and the newly exported T0104E diagnostic candidate, so Love can compare both directly on the Motorola without changing production/default audio behavior.
 
 ## Dependencies
 
-- T0104D ingested `300/300` exact labels from T0104B, with `288/300` within `140 ms` and `295/300` within `250 ms`.
-- T0104C showed threshold lowering alone is diagnostic only, not safe enough to promote.
-- T0103 candidate-loop artifacts and older boundary/Round A safety rows are available locally.
-- Raw/generated data under `data/` remains ignored and must not be committed.
+- T0103 is already exported and installed behind `Bounce audio test` only.
+- T0104E was evaluated offline as a near-miss candidate, not production-ready.
+- Love explicitly asked to include T0104E as a switchable test model despite the earlier no-promotion decision.
+- Raw/generated `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
 
 - `CODEX_TASK.md`
+- `PROJECT_CONTEXT.md`
+- `DECISIONS.md`
 - `REPO_CURRENT_STATE.md`
-- `PROJECT_CONTEXT.md` if confirmed project facts change
-- `DECISIONS.md` if a meaningful decision changes
 - `ITERATION_LOG.md`
-- `skills/pingis-audio-classification/scripts/noise_robust/`
-- ignored local raw/evaluation artifacts under `data/audio/`
+- `apps/collector/src/BounceAudioTestScreen.tsx`
+- `apps/collector/src/bounceAudioTestEngine.ts`
+- `apps/collector/src/models/fable_extra_trees_candidate_t0104e.json`
+- `skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0104e_live_positive_candidate_loop.py`
+- ignored local evaluation artifacts under `data/audio/`
 - validation/status commands
 
 ## Do Not Touch
@@ -44,56 +47,56 @@ Train/evaluate a guarded audio candidate loop using the newly ingested T0104D li
 - Do not push.
 - Do not delete local or device data.
 - Do not revert tracked or user changes.
-- Do not replace or promote the T0103 model.
-- Do not change app thresholds, model JSON, native audio runtime, production Fable behavior, studs/camera behavior, cloud/API credentials, backend resources, or AWS resources.
+- Do not replace or promote production Fable/studs/camera behavior.
+- Do not change `audio_model.json`, `audio_contact_model.json`, `fable_audio_model.json`, `bounce_side_model.json`, or native peak-gate defaults.
 - Do not move raw/generated data into git.
 
 ## Requirements
 
-- Build or reuse app-style candidate rows for T0104D positive labels.
-- Train/evaluate candidate policies using T0104D positives plus existing T0103 boundary positives/negatives and older Round A/T0073 safety rows.
-- Compare against the installed T0103 default and the diagnostic threshold-only settings.
-- Report live-positive recall, boundary false counts, Round A hard-negative false counts, and scenario-level failures.
-- Do not export or install unless a candidate clearly passes the offline safety gate and a separate install ticket is opened.
+- Export T0104E as a diagnostic app JSON artifact with metadata that makes clear it is test-only.
+- Keep T0103 as the default `Bounce audio test` model.
+- Add a visible model selector to `Bounce audio test` with T0103 and T0104E options.
+- Freeze the selected model and typed threshold/noise-veto config when `START` is pressed.
+- Save selected model metadata/config in `bounce_audio_test_debug` JSON.
+- Keep existing T0103 typed threshold/noise-veto behavior intact.
 
 ## Non-Goals
 
-- No app model export.
-- No app runtime change.
-- No APK install.
-- No raw/generated data commit.
-- No merge or push.
-- No camera/racket-side work.
-- Do not change the T0103 candidate or `Bounce audio test` defaults.
+- No production promotion.
+- No APK release build unless explicitly needed.
+- No camera/racket-side changes.
+- No new training data pull or labeling.
 
 ## Acceptance Criteria
 
-- Candidate-loop report is generated from T0104D positives and safety rows.
-- The report states whether any candidate is worth an APK test.
-- If no candidate passes, the failure mode and next data/model need are clear.
+- TypeScript validation passes for the Collector app.
+- The T0104E export command runs and creates the app model JSON.
+- Root validation passes.
+- `Bounce audio test` can choose either T0103 or T0104E before starting a test.
 
 ## Completion Notes
 
-- Added `evaluate_t0104e_live_positive_candidate_loop.py` as an offline-only candidate loop.
-- Built live app-style candidate rows from the installed T0103 debug JSON feature vectors and the corrected T0104 labels:
-  - T0104D: `300/300` reviewed positives across normal, fast, speaking/counting, background, and far/soft+background.
-  - T0104A: included only the first confirmed slow/high run (`20` labels), excluded the unclear second slow/high run.
-  - T0104 fresh negatives: talking-only and racket-handling-only sessions included as expected-zero safety rows.
-- Generated ignored outputs under `data/audio/models/evaluations/t0104e_live_positive_candidate_loop/`.
-- Best newly trained candidate is only a near miss:
-  - `extra_leaf2_t0104e_base_t0075_live_recall_safety_thr0p575_dedupe180_vetoNone`
-  - Live positives: `274/320` (`0.8562` recall)
-  - Fresh live negatives: `4` false counts
-  - T0103 boundary negatives: `2` false counts
-  - Round A hard negatives: `8` false counts
-- Current T0103 app model with a typed diagnostic setting `p>=0.30`, no Fable-noise veto, dedupe `180 ms` is the better next manual phone-test/data-collection baseline on fresh T0104:
-  - Fresh live positives: `270/320` (`0.8438` recall)
-  - Fresh live negatives: `0` false counts
-  - Its boundary/Round A rows in the T0104E app-baseline table are final-fit/in-sample context only, not a promotion safety result.
-  - The older T0104C out-of-fold safety warning still applies: `p>=0.30/no-veto` had `28` boundary false counts and `70` Round A hard-negative false counts in the T0103 OOF sweep.
-- No model JSON was exported, no runtime/app change was made, and no APK was installed.
+- Extended `evaluate_t0104e_live_positive_candidate_loop.py` with a guarded `--export-app-model` path.
+- Exported `apps/collector/src/models/fable_extra_trees_candidate_t0104e.json`.
+- Added model switching to `Bounce audio test`:
+  - default remains `T0103`;
+  - second option is `T0104E`;
+  - switching resets threshold/noise-veto fields to the selected model defaults, while typed values still freeze at `START`;
+  - saved debug JSON includes selected model id/title/metadata and active config.
+- Kept production Fable, studs, camera, native peak-gate defaults, and T0103 default behavior unchanged.
+- Installed/launched the debug app on Motorola `ZY22KSPF5W`.
 
 ## Validation
 
 - `python -m py_compile skills\pingis-audio-classification\scripts\noise_robust\evaluate_t0104e_live_positive_candidate_loop.py`
-- `python skills\pingis-audio-classification\scripts\noise_robust\evaluate_t0104e_live_positive_candidate_loop.py`
+- `python skills\pingis-audio-classification\scripts\noise_robust\evaluate_t0104e_live_positive_candidate_loop.py --export-app-model`
+  - exported T0104E app model;
+  - Python/app JSON parity max diff: `5.55e-16`.
+- `cd apps/collector && npx tsc --noEmit`
+- `npm run validate`
+- `git diff --check`
+  - passed with existing Windows LF-to-CRLF warnings only.
+- `.\install-android-dev.ps1`
+  - installed/launched `com.collectorapp` on Motorola `ZY22KSPF5W`;
+  - smoke: `pidof com.collectorapp` returned `21612`;
+  - package `lastUpdateTime=2026-07-01 18:39:11`.
