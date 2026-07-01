@@ -489,18 +489,22 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     : decisionConfigForModelId(displayedModelOption.id, displayedRuntimeConfig);
   const selectModel = useCallback((modelId: string) => {
     if (!canEditConfig) return;
-    const defaults = defaultRuntimeConfigForModelId(modelId);
-    const modelSelection = engineRef.current.setModelOption(modelId, defaults);
+    const threshold = parseProbabilityInput(thresholdText);
+    const fableNoiseVetoThreshold = parseProbabilityInput(noiseVetoText);
+    const preservedConfig = threshold === null || fableNoiseVetoThreshold === null
+      ? undefined
+      : { threshold, fableNoiseVetoThreshold };
+    const modelSelection = engineRef.current.setModelOption(modelId, preservedConfig);
     activeRuntimeConfigRef.current = modelSelection.runtimeConfig;
     activeDecisionConfigRef.current = modelSelection.decisionConfig;
     activeModelOptionRef.current = modelSelection.modelOption;
     setSelectedModelId(modelSelection.modelOption.id);
     setActiveModelOption(modelSelection.modelOption);
     setActiveRuntimeConfig(modelSelection.runtimeConfig);
-    setThresholdText(formatProbabilityInput(modelSelection.runtimeConfig.threshold));
-    setNoiseVetoText(formatProbabilityInput(modelSelection.runtimeConfig.fableNoiseVetoThreshold));
-    setStatus(`Selected ${modelSelection.modelOption.title}.`);
-  }, [canEditConfig]);
+    setStatus(preservedConfig
+      ? `Selected ${modelSelection.modelOption.title}. Keeping typed p/noise values.`
+      : `Selected ${modelSelection.modelOption.title}. Fix typed p/noise values before START.`);
+  }, [canEditConfig, noiseVetoText, thresholdText]);
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>

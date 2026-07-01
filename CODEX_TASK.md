@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0107-bounce-audio-test-rms-fable-baseline`
+`T0108-bounce-audio-test-preserve-typed-config`
 
 ## Branch
 
@@ -18,25 +18,23 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Add the original RMS/native gate + Fable counter path as a third selectable baseline inside `Bounce audio test`, so Love can compare T0103, T0104E, and the older Fable behavior in the same UI.
+Keep typed `Bounce audio test` threshold values stable while switching models, so Love can compare T0103/T0104E/RMS+Fable without retyping `p` and noise-veto values each time.
 
 ## Dependencies
 
 - T0103 is already the default guarded model behind `Bounce audio test` only.
 - T0104E is already bundled as a diagnostic switch-only candidate.
-- `Fable-algoritm` already has the older RMS/native gate + Fable counter flow.
-- Love explicitly asked to compare the original RMS + Fable model in the same `Bounce audio test` UI.
+- `RMS+Fable` is already bundled as a diagnostic baseline and ignores typed `p`/noise-veto values.
+- Love reported that model switching currently resets `p` to `0.575`, which slows down same-setting comparisons.
 - Raw/generated `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
 
 - `CODEX_TASK.md`
 - `PROJECT_CONTEXT.md`
-- `DECISIONS.md`
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
 - `apps/collector/src/BounceAudioTestScreen.tsx`
-- `apps/collector/src/bounceAudioTestEngine.ts`
 - validation/status commands
 
 ## Do Not Touch
@@ -51,12 +49,11 @@ Add the original RMS/native gate + Fable counter path as a third selectable base
 
 ## Requirements
 
-- Keep T0103 as the default `Bounce audio test` model.
-- Add a visible third selector option for the original RMS + Fable baseline.
-- For RMS + Fable, use the original native gate settings from `Fable-algoritm`: bandpass gate, retrigger `120 ms`, abs min RMS `0.0015`, and the existing `FableCounter` logic.
-- The typed `p threshold` and `noise veto` controls do not need to affect RMS + Fable; the UI should make that clear.
-- Save the selected baseline/runtime metadata in `bounce_audio_test_debug` JSON.
-- Keep T0103/T0104E typed threshold/noise-veto behavior intact.
+- Preserve the current typed `p threshold` and `noise veto` values when switching between T0103 and T0104E.
+- Preserve the typed values while temporarily switching to RMS+Fable, even though RMS+Fable ignores them.
+- Do not reset threshold fields to per-model defaults on every selector tap.
+- Keep selected-model freeze-on-`START` behavior unchanged.
+- Keep saved debug JSON config behavior unchanged.
 
 ## Non-Goals
 
@@ -69,22 +66,16 @@ Add the original RMS/native gate + Fable counter path as a third selectable base
 
 - TypeScript validation passes for the Collector app.
 - Root validation passes.
-- `Bounce audio test` can choose T0103, T0104E, or RMS + Fable before starting a test.
-- T0103 and T0104E still use peak gate + ExtraTrees with typed config.
-- RMS + Fable uses the original RMS/native gate and Fable counter, and saved debug JSON identifies it clearly.
+- Switching model options no longer overwrites typed `p`/noise-veto values.
+- T0103/T0104E still start with the currently typed config.
+- RMS+Fable still ignores typed config but does not erase it.
 
 ## Completion Notes
 
-- Added `RMS+Fable` as a third `Bounce audio test` selector option.
-- Reused the existing Fable runtime pieces for the baseline:
-  - native RMS/bandpass gate setup;
-  - retrigger `120 ms`;
-  - abs min RMS `0.0015`;
-  - existing `FableCounter` confidence/window logic with the same live overrides as `Fable-algoritm`.
-- Kept T0103 as the default selector choice.
-- Kept T0103/T0104E peak-gate + ExtraTrees behavior and typed threshold/noise-veto controls intact.
-- Made the `p threshold` and `noise veto` fields disabled/ignored for RMS+Fable and explained that in the UI.
-- Saved selected runtime mode plus either peak-gate config or RMS+Fable gate config in `bounce_audio_test_debug` JSON.
+- Changed `Bounce audio test` model switching so it preserves the current text in `p threshold` and `noise veto`.
+- Switching T0103/T0104E now keeps the same typed values for the next `START`.
+- Switching to RMS+Fable still ignores the typed values, but no longer erases them for when Love switches back.
+- If the typed values are invalid, model switching preserves the text and tells Love to fix it before `START` instead of silently resetting to defaults.
 - Installed/launched the debug app on Motorola `ZY22KSPF5W`.
 
 ## Validation
@@ -95,5 +86,5 @@ Add the original RMS/native gate + Fable counter path as a third selectable base
   - passed with existing Windows LF-to-CRLF warnings only.
 - `.\install-android-dev.ps1`
   - installed/launched `com.collectorapp` on Motorola `ZY22KSPF5W`;
-  - smoke: `pidof com.collectorapp` returned `25499`;
-  - package `lastUpdateTime=2026-07-01 19:32:24`.
+  - smoke: `pidof com.collectorapp` returned `26873`;
+  - package `lastUpdateTime=2026-07-01 19:41:07`.
