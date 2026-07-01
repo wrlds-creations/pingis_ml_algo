@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0109-t0104e-p025-veto098-sweep`
+`T0110-t0104e-loud-music-negative-feedback`
 
 ## Branch
 
@@ -18,13 +18,12 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Evaluate Love's preferred `Bounce audio test` setting for T0104E: `p threshold = 0.25`, Fable noise veto `0.98`, smart dedupe `180 ms`, using the already pulled/labeled local artifacts.
+Record Love's fresh guarded phone-test feedback that T0104E with `p=0.25` and noise veto `0.98` false-counts loud background music without bounce, while quieter background volume behaves well.
 
 ## Dependencies
 
-- T0104E is already bundled as a diagnostic switch-only candidate in `Bounce audio test`.
-- T0108 preserves typed `p`/noise-veto values across model switches.
-- Existing T0104/T0104D live-positive labels, T0103 boundary rows, Round A rows, and noisy target rows are available locally.
+- T0109 evaluated T0104E `p=0.25`, noise veto `0.98` as a guarded phone-test setting.
+- Love tested a negative loud-music case on the Motorola app and reported false counts only when music was loud.
 - Raw/generated `data/` remains ignored and must not be committed.
 
 ## Allowed Areas
@@ -34,7 +33,6 @@ Evaluate Love's preferred `Bounce audio test` setting for T0104E: `p threshold =
 - `DECISIONS.md`
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
-- ignored evaluation outputs under `data/audio/models/evaluations/t0109_t0104e_p025_veto098_sweep/`
 - validation/status commands
 
 ## Do Not Touch
@@ -49,10 +47,9 @@ Evaluate Love's preferred `Bounce audio test` setting for T0104E: `p threshold =
 
 ## Requirements
 
-- Score the exported T0104E app JSON with `threshold=0.25`, `noise_veto=0.98`, and `dedupe=180 ms`.
-- Also score the matching T0104E out-of-fold selected-model predictions to separate app-runtime optimism from promotion risk.
-- Report live positives, fresh live negatives, boundary safety, Round A safety, noisy target rows, and scenario breakdown.
-- Keep the result diagnostic only unless fresh phone validation says otherwise.
+- Record the live feedback clearly in source-of-truth docs.
+- Keep T0104E `p=0.25`, noise veto `0.98` as diagnostic only.
+- Call out loud background music as a confirmed hard negative to collect/label or gate against.
 
 ## Non-Goals
 
@@ -66,30 +63,17 @@ Evaluate Love's preferred `Bounce audio test` setting for T0104E: `p threshold =
 
 - Root validation passes.
 - `git diff --check` passes.
-- Ignored local outputs record the exact T0104E `0.25/0.98` sweep.
-- Final answer explains both the app-finalfit result and the less-optimistic OOF risk.
+- Device feedback is recorded in `PROJECT_CONTEXT.md`, `DECISIONS.md`, `REPO_CURRENT_STATE.md`, and `ITERATION_LOG.md`.
+- Final answer explains what the feedback means and what to do next.
 
 ## Completion Notes
 
-- Generated ignored outputs under `data/audio/models/evaluations/t0109_t0104e_p025_veto098_sweep/`.
-- Exported T0104E app JSON final-fit replay at `p=0.25`, `noise_veto=0.98`, `dedupe=180` scored:
-  - live positives `286/320`;
-  - fresh live negative false counts `2`;
-  - boundary negative false counts `1`;
-  - Round A hard-negative false counts `0`;
-  - noisy-target negative false counts `1`.
-- Matching T0104E selected OOF replay at the same setting scored:
-  - live positives `283/320`;
-  - fresh live negative false counts `32`;
-  - boundary negative false counts `26`;
-  - Round A hard-negative false counts `79`;
-  - noisy-target negative false counts `44`.
-- Interpretation: this is worth a guarded phone test because the exported app model likely explains why Love likes the setting, but the OOF safety row blocks promotion/defaulting.
+- Recorded Love's live feedback: T0104E `p=0.25`, noise veto `0.98` false-counts loud background music without bounces, but is OK when the volume is reduced.
+- Updated the recommendation to collect/save loud-music-only negatives and treat loud music as outside the current reliable operating envelope.
+- No code, model, APK, raw data, merge, or push changed.
 
 ## Validation
 
-- Inline Python evaluation using existing T0104E helper functions and exported T0104E app JSON
-  - wrote `t0109_summary_rows.csv`, `t0109_summary.json`, and `t0109_nearby_grid.csv` under ignored `data/audio/models/evaluations/t0109_t0104e_p025_veto098_sweep/`.
 - `npm run validate`
 - `git diff --check`
   - passed with existing Windows LF-to-CRLF warnings only.
