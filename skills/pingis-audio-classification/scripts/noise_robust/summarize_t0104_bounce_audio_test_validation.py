@@ -32,6 +32,18 @@ LOVE_REPORTED_EXPECTED_BY_SCENARIO = {
     "talking_only_no_bounce": 0,
     "racket_handling_no_bounce": 0,
 }
+MANUAL_SESSION_REVIEW = {
+    "bounce_audio_test_session_2026-07-01T13-37-11-083Z": {
+        "expected": 20,
+        "include_in_metrics": True,
+        "note": "Love confirmed this slow/high run should be expected 20.",
+    },
+    "bounce_audio_test_session_2026-07-01T13-38-19-066Z": {
+        "expected": None,
+        "include_in_metrics": False,
+        "note": "Love was unsure about the actual bounce count; exclude this clip from truth/validation.",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,8 @@ class SessionSummary:
     polarity: str
     saved_expected: int | None
     expected: int | None
+    include_in_metrics: bool
+    review_note: str
     app_count: int
     candidate_count: int
     counted: int
@@ -111,6 +125,11 @@ def summarize_session(path: Path) -> SessionSummary | None:
         saved_expected = None
     scenario_id = str(scenario.get("id") or "unknown")
     expected = LOVE_REPORTED_EXPECTED_BY_SCENARIO.get(scenario_id, saved_expected)
+    manual_review = MANUAL_SESSION_REVIEW.get(path.stem, {})
+    if "expected" in manual_review:
+        expected = manual_review["expected"]
+    include_in_metrics = bool(manual_review.get("include_in_metrics", True))
+    review_note = str(manual_review.get("note") or "")
     fable_labels = Counter(str(candidate.get("fable_label") or "unknown") for candidate in candidates)
     reject_reasons = Counter()
     for candidate in candidates:
@@ -128,6 +147,8 @@ def summarize_session(path: Path) -> SessionSummary | None:
         polarity=str(scenario.get("polarity") or "unknown"),
         saved_expected=saved_expected,
         expected=expected,
+        include_in_metrics=include_in_metrics,
+        review_note=review_note,
         app_count=int(review.get("app_count_at_stop") if isinstance(review.get("app_count_at_stop"), int) else counts.get("counted", 0)),
         candidate_count=len(candidates),
         counted=int(counts.get("counted", sum(1 for candidate in candidates if candidate.get("counted")))),
@@ -154,6 +175,8 @@ def write_csv(path: Path, rows: list[SessionSummary]) -> None:
         "polarity",
         "saved_expected",
         "expected",
+        "include_in_metrics",
+        "review_note",
         "app_count",
         "candidate_count",
         "counted",
@@ -184,6 +207,8 @@ def write_csv(path: Path, rows: list[SessionSummary]) -> None:
 def aggregate_by_scenario(rows: list[SessionSummary]) -> list[dict[str, Any]]:
     grouped: dict[str, list[SessionSummary]] = defaultdict(list)
     for row in rows:
+        if not row.include_in_metrics:
+            continue
         grouped[row.scenario_id].append(row)
     output: list[dict[str, Any]] = []
     for scenario_id, items in grouped.items():
@@ -216,8 +241,10 @@ def aggregate_by_scenario(rows: list[SessionSummary]) -> list[dict[str, Any]]:
 def write_report(path: Path, rows: list[SessionSummary]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     aggregate = aggregate_by_scenario(rows)
-    positive = [row for row in rows if row.polarity == "positive"]
-    negative = [row for row in rows if row.polarity == "negative"]
+    metric_rows = [row for row in rows if row.include_in_metrics]
+    positive = [row for row in metric_rows if row.polarity == "positive"]
+    negative = [row for row in metric_rows if row.polarity == "negative"]
+    excluded = [row for row in rows if not row.include_in_metrics]
     total_expected_positive = sum(row.expected or 0 for row in positive)
     total_counted_positive = sum(row.app_count for row in positive)
     total_candidates_positive = sum(row.candidate_count for row in positive)
@@ -233,8 +260,9 @@ def write_report(path: Path, rows: list[SessionSummary]) -> None:
         f"- Positive expected/count: `{total_counted_positive}/{total_expected_positive}` with `{total_candidates_positive}` peak candidates.",
         f"- Positive low-probability rejections: `{total_low_positive}`.",
         f"- Negative expected/count: `{total_counted_negative}/{total_expected_negative}`.",
-        "- `Expected` uses Love's reported counts from the chat. The app JSON saved the two slow/high runs as `20`, but Love reported `30`; this is treated as a metadata-entry mismatch, not an algorithm result.",
+        "- `Expected` uses Love's reported counts plus manual corrections. After T0104A review, the first slow/high run is confirmed as `20`, and the second slow/high run is excluded because the true count is unclear.",
         "- Dedupe and Fable-noise veto were not material in this pull; the dominant positive miss reason is `below_threshold`.",
+        f"- Excluded unclear sessions: `{len(excluded)}`.",
         "",
         "## Scenario Totals",
         "",
@@ -263,8 +291,14 @@ def write_report(path: Path, rows: list[SessionSummary]) -> None:
         lines.append(
             "| {started} | {scenario} | {expected} | {app} | {candidates} | {low} | {median:.3f} | {maxp:.3f} | `{fable}` | `{rejects}` |".format(
                 started=row.started_at,
-                scenario=row.scenario_title,
-                expected="" if row.expected is None else (f"{row.expected}*" if row.saved_expected != row.expected else row.expected),
+                scenario=f"{row.scenario_title}{' (excluded)' if not row.include_in_metrics else ''}",
+                expected=(
+                    "excluded"
+                    if not row.include_in_metrics
+                    else "" if row.expected is None
+                    else f"{row.expected}*" if row.saved_expected != row.expected
+                    else row.expected
+                ),
                 app=row.app_count,
                 candidates=row.candidate_count,
                 low=row.low_probability,
@@ -279,7 +313,7 @@ def write_report(path: Path, rows: list[SessionSummary]) -> None:
             "",
             "## Interpretation",
             "",
-            "- The peak gate is not the main blocker for most fresh positives: every positive run has roughly the expected candidate volume. The two slow/high runs were saved as expected `20` in-app, but Love reported `30`; the report marks those expected counts with `*`.",
+            "- The peak gate is not the main blocker for most fresh positives: every included positive run has roughly the expected candidate volume. The first slow/high run is now confirmed as expected `20`; the second slow/high run is not used because the true count is unclear.",
             "- The final classifier threshold is the main blocker in the weak runs: far/soft + background had `88` candidates across two runs but only `4` counted at `p>=0.575`.",
             "- The current T0103 threshold stayed very safe on the two fresh hard-negative types: talking-only and racket-handling-only both counted `0`, despite `287` negative peak candidates.",
             "- A lower threshold such as `p>=0.3` would recover many positives in this exact pull without counting these two negative types, but older Round A/T0073 safety says threshold-only lowering is risky. Treat it as a diagnostic, not a promotion.",

@@ -88,8 +88,17 @@ Started and smoke-checked local review pages:
 - `http://127.0.0.1:8781/` with `20` gray candidates and `20` green draft labels.
 - `http://127.0.0.1:8782/` with `24` gray candidates and `24` green draft labels.
 
+Love resolved the ambiguity:
+
+- `8781` is confirmed expected `20`.
+- `8782` should be discarded/excluded because the true bounce count is unclear.
+
+Updated `summarize_t0104_bounce_audio_test_validation.py` with explicit per-session correction/exclusion and regenerated ignored T0104 summary artifacts. Corrected included positive totals are now `181/320` with `365` included peak candidates and `184` low-probability rejections.
+
 ## Validation
 
 - `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104a_slow_high_review_pages.py` passed.
 - `python skills/pingis-audio-classification/scripts/noise_robust/prepare_t0104a_slow_high_review_pages.py --force --port-start 8781` passed.
 - `/api/session` smoke checks passed for `8781` and `8782`.
+- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104_bounce_audio_test_validation.py` passed after adding the correction/exclusion.
+- `python skills/pingis-audio-classification/scripts/noise_robust/summarize_t0104_bounce_audio_test_validation.py` passed and regenerated ignored corrected T0104 report artifacts.
