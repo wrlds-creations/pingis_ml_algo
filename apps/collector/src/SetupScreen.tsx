@@ -20,8 +20,10 @@ interface Props {
   onAudioVideoPoseMode?: (setup: PlayerSetup) => void;
   onVideoOnlyStrokeMode?: (setup: PlayerSetup) => void;
   onVideoBounceSideMode?: (setup: PlayerSetup) => void;
+  onFableTrainingRecorderMode?: (setup: PlayerSetup) => void;
   onLiveMode?: (setup: PlayerSetup) => void;
   onFableLiveMode?: (setup: PlayerSetup) => void;
+  onBounceAudioTestMode?: (setup: PlayerSetup) => void;
   onBounceSideLiveMode?: (setup: PlayerSetup) => void;
   onBounceFreeMode?: (setup: PlayerSetup) => void;
   onBounceAlternatingMode?: (setup: PlayerSetup) => void;
@@ -34,8 +36,10 @@ export function SetupScreen({
   onAudioVideoPoseMode,
   onVideoOnlyStrokeMode,
   onVideoBounceSideMode,
+  onFableTrainingRecorderMode,
   onLiveMode,
   onFableLiveMode,
+  onBounceAudioTestMode,
   onBounceSideLiveMode,
   onBounceFreeMode,
   onBounceAlternatingMode,
@@ -158,6 +162,15 @@ export function SetupScreen({
             onPress={() => canContinue && onFableLiveMode(setup)}
           />
         )}
+        {onBounceAudioTestMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Bounce audio test"
+            subtitle="Guarded T0075 test: peak gate + ExtraTrees count path. Does not replace Fable."
+            colorStyle="blue"
+            onPress={() => canContinue && onBounceAudioTestMode(setup)}
+          />
+        )}
         {onBounceSideLiveMode && (
           <ModeButton
             disabled={!canContinue}
@@ -168,6 +181,15 @@ export function SetupScreen({
           />
         )}
         <Text style={styles.sectionLabel}>DATA</Text>
+        {onFableTrainingRecorderMode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Fable data recorder"
+            subtitle="Record one WAV, tag the sound type and expected count, then save or discard."
+            colorStyle="blue"
+            onPress={() => canContinue && onFableTrainingRecorderMode(setup)}
+          />
+        )}
         {onAudioVideoPoseMode && (
           <ModeButton
             disabled={!canContinue}

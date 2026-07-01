@@ -9,8 +9,12 @@ import android.util.Base64
 import androidx.core.app.ActivityCompat
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
+import java.io.File
+import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.log10
 import kotlin.math.sqrt
@@ -60,11 +64,19 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         // Duration gate: avvisa sustained ljud (prat, musik)
         const val SUSTAIN_FRAMES    = 8   // 80ms (8 × 10ms)
         const val SUSTAIN_MAX_ABOVE = 5   // om > 5 av 8 frames fortfarande höga → skippa
+
+        // T0076 peak-candidate gate mirrors the offline "Peak fast balanced"
+        // candidate source. The 80 ms lookahead is the local-maximum margin used
+        // offline before the model/veto stage.
+        const val PEAK_LOOKAHEAD_MS = 80.0
+        const val PEAK_ROUGH_HEIGHT_FACTOR = 0.35
     }
 
     @Volatile private var isRunning     = false
     @Volatile private var lastOnsetTime = 0L
     @Volatile private var retriggerMs   = DEFAULT_RETRIGGER_MS
+    @Volatile private var streamThread: Thread? = null
+    @Volatile private var debugRecordingPath: String? = null
 
     // threshold-variabeln används nu som ONSET_RATIO-multiplier från slidern
     // (slider-värdet 0.005–0.15 mappas om till ratio 1.5–4.0 i startStreaming)
@@ -78,6 +90,26 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     @Volatile private var gateMode            = "broadband"
     @Volatile private var spectralGateEnabled = true
     @Volatile private var absMinRms           = ABS_MIN_RMS
+
+    // T0076 guarded peak candidate mode. Disabled on every startStreaming and
+    // enabled only by the Bounce audio test screen after the stream starts.
+    @Volatile private var peakGateEnabled = false
+    @Volatile private var peakSmoothMs = 3.0
+    @Volatile private var peakMinGapMs = 220.0
+    @Volatile private var peakBackgroundWindowMs = 500.0
+    @Volatile private var peakBackgroundExcludeMs = 60.0
+    @Volatile private var peakAbsMin = 0.08
+    @Volatile private var peakRatioMin = 2.0
+    @Volatile private var peakZMin = 0.0
+
+    private val peakEnvRing = DoubleArray(RING_SIZE)
+    private var peakSmoothWindow = DoubleArray(1)
+    private var peakSmoothIdx = 0
+    private var peakSmoothCount = 0
+    private var peakSmoothSum = 0.0
+    private var peakCandidateSample = -1
+    private var peakCandidateValue = 0.0
+    private var peakLastAcceptedSample = -RING_SIZE
 
     // Butterworth ordning 4 bandpass 1500–7000 Hz @ 22050 Hz som biquad-kaskad
     // (scipy.signal.butter(4, [1500, 7000], 'bandpass', fs=22050, output='sos')).
@@ -93,6 +125,18 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
 
     private fun resetBandpassState() {
         for (s in bpState) { s[0] = 0.0; s[1] = 0.0 }
+    }
+
+    private fun resetPeakGateState() {
+        val samples = maxOf(1, (SR * peakSmoothMs / 1000.0).toInt())
+        peakSmoothWindow = DoubleArray(samples)
+        peakSmoothIdx = 0
+        peakSmoothCount = 0
+        peakSmoothSum = 0.0
+        peakCandidateSample = -1
+        peakCandidateValue = 0.0
+        peakLastAcceptedSample = -RING_SIZE
+        peakEnvRing.fill(0.0)
     }
 
     /** Filtrerar en frame kausalt genom biquad-kaskaden och returnerar RMS. */
@@ -138,6 +182,18 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         val spectralPassed: Boolean,
         val ballRatio: Double,
         val flatness: Double,
+        val gateId: String = "adaptive_rms",
+        val peakValue: Double? = null,
+        val peakRatio: Double? = null,
+        val peakZ: Double? = null,
+        val peakLocalMad: Double? = null,
+        val peakSmoothMs: Double? = null,
+        val peakMinGapMs: Double? = null,
+        val peakBackgroundWindowMs: Double? = null,
+        val peakBackgroundExcludeMs: Double? = null,
+        val peakAbsMin: Double? = null,
+        val peakRatioMin: Double? = null,
+        val peakZMin: Double? = null,
     )
 
     // ── ReactMethods ───────────────────────────────────────────────────────────
@@ -165,14 +221,23 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         gateMode            = "broadband"
         spectralGateEnabled = true
         absMinRms           = ABS_MIN_RMS
+        peakGateEnabled     = false
         resetBandpassState()
-        Thread(::streamLoop, "AudioStreamThread").start()
+        resetPeakGateState()
+        val thread = Thread(::streamLoop, "AudioStreamThread")
+        streamThread = thread
+        thread.start()
         promise.resolve("started")
     }
 
     @ReactMethod
     fun stopStreaming(promise: Promise) {
         isRunning = false
+        streamThread?.let { thread ->
+            if (thread != Thread.currentThread()) {
+                try { thread.join(1000) } catch (_: InterruptedException) {}
+            }
+        }
         promise.resolve("stopped")
     }
 
@@ -185,6 +250,12 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     @ReactMethod
     fun setRetriggerMs(ms: Double, promise: Promise) {
         retriggerMs = ms.toLong().coerceIn(0L, 800L)
+        promise.resolve("ok")
+    }
+
+    @ReactMethod
+    fun setDebugRecordingPath(path: String?, promise: Promise) {
+        debugRecordingPath = path?.takeIf { it.isNotBlank() }
         promise.resolve("ok")
     }
 
@@ -204,6 +275,30 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         promise.resolve("ok")
     }
 
+    @ReactMethod
+    fun setPeakGateConfig(
+        enabled: Boolean,
+        smoothMs: Double,
+        minGapMs: Double,
+        backgroundWindowMs: Double,
+        backgroundExcludeMs: Double,
+        absMin: Double,
+        ratioMin: Double,
+        zMin: Double,
+        promise: Promise
+    ) {
+        peakSmoothMs = smoothMs.coerceIn(1.0, 20.0)
+        peakMinGapMs = minGapMs.coerceIn(80.0, 800.0)
+        peakBackgroundWindowMs = backgroundWindowMs.coerceIn(100.0, 2000.0)
+        peakBackgroundExcludeMs = backgroundExcludeMs.coerceIn(0.0, 300.0)
+        peakAbsMin = absMin.coerceIn(0.001, 1.0)
+        peakRatioMin = ratioMin.coerceIn(0.0, 100.0)
+        peakZMin = zMin.coerceIn(-20.0, 1000.0)
+        peakGateEnabled = enabled
+        resetPeakGateState()
+        promise.resolve("ok")
+    }
+
     // ── Huvud-loop ─────────────────────────────────────────────────────────────
 
     private fun streamLoop() {
@@ -213,19 +308,44 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
             MediaRecorder.AudioSource.MIC, SR,
             AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
             maxOf(minBuf, FRAME_SIZE * 8))
+        val debugPath = debugRecordingPath
+        var debugFile: File? = null
+        var debugOut: FileOutputStream? = null
+        var debugDataBytes = 0L
         try {
             rec.startRecording()
+            if (!debugPath.isNullOrBlank()) {
+                debugFile = File(debugPath)
+                debugFile.parentFile?.mkdirs()
+                debugOut = FileOutputStream(debugFile)
+                debugOut.write(wavHeader(0L))
+            }
             val frame = ShortArray(FRAME_SIZE)
 
             while (isRunning) {
                 val read = rec.read(frame, 0, FRAME_SIZE)
                 if (read <= 0) continue
 
-                // Skriv frame till ring-buffer
+                debugOut?.let { out ->
+                    try {
+                        val bytes = shortsToLittleEndianBytes(frame, read)
+                        out.write(bytes)
+                        debugDataBytes += bytes.size.toLong()
+                    } catch (_: Exception) {
+                        try { out.close() } catch (_: Exception) {}
+                        debugOut = null
+                    }
+                }
+
+                // Skriv frame till ring-buffer. Peak-läget läser samma samples
+                // sample-för-sample för att kunna hitta en 3 ms rå amplitudenvelop.
                 for (i in 0 until read) {
                     ring[writePos % RING_SIZE] = frame[i]
+                    if (peakGateEnabled) processPeakSample(frame[i], writePos)
                     writePos++
                 }
+
+                if (peakGateEnabled) continue
 
                 val rms = computeRMS(frame, read)
                 // Gate-RMS: bandpassad om Fable-läget begärt det, annars rå.
@@ -293,9 +413,197 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                 }
             }
         } finally {
-            rec.stop()
+            try { rec.stop() } catch (_: Exception) {}
             rec.release()
+            debugOut?.let { out ->
+                try { out.flush() } catch (_: Exception) {}
+                try { out.close() } catch (_: Exception) {}
+            }
+            debugFile?.let { file ->
+                try { patchWavHeader(file, debugDataBytes) } catch (_: Exception) {}
+            }
+            debugRecordingPath = null
+            streamThread = null
         }
+    }
+
+    private data class PeakLocalStats(val background: Double, val mad: Double)
+
+    private fun processPeakSample(sample: Short, sampleIndex: Int) {
+        val value = abs(sample.toDouble() / 32768.0)
+        if (peakSmoothWindow.isEmpty()) resetPeakGateState()
+        if (peakSmoothCount < peakSmoothWindow.size) {
+            peakSmoothWindow[peakSmoothIdx] = value
+            peakSmoothSum += value
+            peakSmoothCount++
+        } else {
+            peakSmoothSum += value - peakSmoothWindow[peakSmoothIdx]
+            peakSmoothWindow[peakSmoothIdx] = value
+        }
+        peakSmoothIdx = (peakSmoothIdx + 1) % peakSmoothWindow.size
+
+        val envelopeValue = peakSmoothSum / maxOf(1, peakSmoothCount)
+        peakEnvRing[sampleIndex % RING_SIZE] = envelopeValue
+
+        val roughHeight = maxOf(1e-6, peakAbsMin * PEAK_ROUGH_HEIGHT_FACTOR)
+        if (envelopeValue >= roughHeight) {
+            if (peakCandidateSample < 0 || envelopeValue >= peakCandidateValue) {
+                peakCandidateSample = sampleIndex
+                peakCandidateValue = envelopeValue
+            }
+        }
+
+        val lookaheadSamples = maxOf(1, (SR * PEAK_LOOKAHEAD_MS / 1000.0).toInt())
+        if (peakCandidateSample >= 0 && sampleIndex - peakCandidateSample >= lookaheadSamples) {
+            evaluatePeakCandidate(sampleIndex)
+            peakCandidateSample = -1
+            peakCandidateValue = 0.0
+        }
+    }
+
+    private fun evaluatePeakCandidate(currentSampleIndex: Int) {
+        val peakSample = peakCandidateSample
+        if (peakSample < 0) return
+
+        val minGapSamples = maxOf(1, (SR * peakMinGapMs / 1000.0).toInt())
+        if (peakSample - peakLastAcceptedSample < minGapSamples) return
+
+        val stats = peakLocalStats(peakSample)
+        val peakValue = peakCandidateValue
+        val peakRatio = peakValue / maxOf(stats.background, 1e-8)
+        val peakZ = (peakValue - stats.background) / maxOf(stats.mad, 1e-8)
+
+        if (peakValue < peakAbsMin) return
+        if (peakRatio < peakRatioMin) return
+        if (peakZ < peakZMin) return
+
+        val frameRms = frameRmsAt(peakSample)
+        val sampleDelayMs = ((currentSampleIndex - peakSample).toDouble() * 1000.0 / SR).toLong()
+        val onsetTimeMs = System.currentTimeMillis() - sampleDelayMs
+        peakLastAcceptedSample = peakSample
+        lastOnsetTime = onsetTimeMs
+
+        val debug = OnsetDebug(
+            onsetTimeMs = onsetTimeMs,
+            onsetPos = peakSample,
+            rms = frameRms,
+            backgroundRms = stats.background,
+            adaptiveThreshold = peakAbsMin,
+            onsetRatio = peakRatio,
+            retriggerMs = peakMinGapMs.toLong(),
+            spectralPassed = true,
+            ballRatio = 0.0,
+            flatness = 0.0,
+            gateId = "peak_fast_balanced",
+            peakValue = peakValue,
+            peakRatio = peakRatio,
+            peakZ = peakZ,
+            peakLocalMad = stats.mad,
+            peakSmoothMs = peakSmoothMs,
+            peakMinGapMs = peakMinGapMs,
+            peakBackgroundWindowMs = peakBackgroundWindowMs,
+            peakBackgroundExcludeMs = peakBackgroundExcludeMs,
+            peakAbsMin = peakAbsMin,
+            peakRatioMin = peakRatioMin,
+            peakZMin = peakZMin,
+        )
+        scheduleExtraction(peakSample, debug)
+    }
+
+    private fun peakLocalStats(sampleIndex: Int): PeakLocalStats {
+        val excludeSamples = maxOf(0, (SR * peakBackgroundExcludeMs / 1000.0).toInt())
+        val windowSamples = maxOf(1, (SR * peakBackgroundWindowMs / 1000.0).toInt())
+        val end = sampleIndex - excludeSamples
+        val start = end - windowSamples
+        val minSamples = maxOf(16, (0.02 * SR).toInt())
+        var values = readPeakEnvWindow(start, end)
+        if (values.size < minSamples) {
+            values = readPeakEnvWindow(maxOf(0, sampleIndex - windowSamples), sampleIndex)
+        }
+        if (values.isEmpty()) return PeakLocalStats(1e-6, 1e-6)
+        values.sort()
+        val median = medianOfSorted(values)
+        val deviations = DoubleArray(values.size)
+        for (i in values.indices) deviations[i] = abs(values[i] - median)
+        deviations.sort()
+        val mad = medianOfSorted(deviations)
+        return PeakLocalStats(maxOf(median, 1e-8), maxOf(mad, 1e-8))
+    }
+
+    private fun readPeakEnvWindow(startInclusive: Int, endExclusive: Int): DoubleArray {
+        val start = maxOf(0, startInclusive)
+        val end = minOf(writePos, endExclusive)
+        val count = end - start
+        if (count <= 0 || count >= RING_SIZE) return DoubleArray(0)
+        val out = DoubleArray(count)
+        for (i in 0 until count) {
+            out[i] = peakEnvRing[(start + i) % RING_SIZE]
+        }
+        return out
+    }
+
+    private fun medianOfSorted(values: DoubleArray): Double {
+        if (values.isEmpty()) return 0.0
+        val mid = values.size / 2
+        return if (values.size % 2 == 0) (values[mid - 1] + values[mid]) / 2.0 else values[mid]
+    }
+
+    private fun frameRmsAt(startSample: Int): Double {
+        var sum = 0.0
+        for (i in 0 until FRAME_SIZE) {
+            val sample = ring[(startSample + i) % RING_SIZE].toDouble() / 32768.0
+            sum += sample * sample
+        }
+        return sqrt(sum / FRAME_SIZE)
+    }
+
+    private fun shortsToLittleEndianBytes(samples: ShortArray, n: Int): ByteArray {
+        return ByteBuffer.allocate(n * 2)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .apply {
+                for (i in 0 until n) putShort(samples[i])
+            }
+            .array()
+    }
+
+    private fun wavHeader(dataBytes: Long): ByteArray {
+        val byteRate = SR * 2
+        val riffSize = 36L + dataBytes
+        return ByteBuffer.allocate(44)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .apply {
+                put("RIFF".toByteArray(Charsets.US_ASCII))
+                putInt(riffSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                put("WAVE".toByteArray(Charsets.US_ASCII))
+                put("fmt ".toByteArray(Charsets.US_ASCII))
+                putInt(16)
+                putShort(1.toShort())
+                putShort(1.toShort())
+                putInt(SR)
+                putInt(byteRate)
+                putShort(2.toShort())
+                putShort(16.toShort())
+                put("data".toByteArray(Charsets.US_ASCII))
+                putInt(dataBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            }
+            .array()
+    }
+
+    private fun patchWavHeader(file: File, dataBytes: Long) {
+        RandomAccessFile(file, "rw").use { raf ->
+            val riffSize = 36L + dataBytes
+            raf.seek(4)
+            raf.write(intToLittleEndian(riffSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()))
+            raf.seek(40)
+            raf.write(intToLittleEndian(dataBytes.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()))
+        }
+    }
+
+    private fun intToLittleEndian(value: Int): ByteArray {
+        return ByteBuffer.allocate(4)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .putInt(value)
+            .array()
     }
 
     // ── Extrahera klipp i bakgrunden ──────────────────────────────────────────
@@ -326,6 +634,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
 
     private fun emitCandidate(audioB64: String?, debug: OnsetDebug, rejectedReason: String?) {
         val debugMap = Arguments.createMap().apply {
+            putString("gate_id", debug.gateId)
             putDouble("onset_time_ms", debug.onsetTimeMs.toDouble())
             putDouble("onset_pos", debug.onsetPos.toDouble())
             putDouble("rms", debug.rms)
@@ -336,6 +645,17 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
             putBoolean("spectral_passed", debug.spectralPassed)
             putDouble("ball_ratio", debug.ballRatio)
             putDouble("flatness", debug.flatness)
+            debug.peakValue?.let { putDouble("peak_value", it) }
+            debug.peakRatio?.let { putDouble("peak_ratio", it) }
+            debug.peakZ?.let { putDouble("peak_z", it) }
+            debug.peakLocalMad?.let { putDouble("peak_local_mad", it) }
+            debug.peakSmoothMs?.let { putDouble("peak_smooth_ms", it) }
+            debug.peakMinGapMs?.let { putDouble("peak_min_gap_ms", it) }
+            debug.peakBackgroundWindowMs?.let { putDouble("peak_background_window_ms", it) }
+            debug.peakBackgroundExcludeMs?.let { putDouble("peak_background_exclude_ms", it) }
+            debug.peakAbsMin?.let { putDouble("peak_abs_min", it) }
+            debug.peakRatioMin?.let { putDouble("peak_ratio_min", it) }
+            debug.peakZMin?.let { putDouble("peak_z_min", it) }
             if (rejectedReason == null) putNull("native_reject_reason") else putString("native_reject_reason", rejectedReason)
         }
         val payload = Arguments.createMap().apply {

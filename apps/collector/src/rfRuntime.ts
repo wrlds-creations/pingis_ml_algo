@@ -33,13 +33,17 @@ function traverseTree(tree: RfNode[], scaledFeatures: Float64Array, nClasses: nu
   return tree[idx];
 }
 
-export function predictWithRfModel(
+function predictWithRfModelInternal(
   model: RfJsonModel,
   features: Record<string, number>,
+  roundProbabilities: boolean,
 ): RfPrediction {
   const names = model.feature_names;
   const raw = new Float64Array(names.length);
-  for (let i = 0; i < names.length; i++) raw[i] = features[names[i]] ?? 0;
+  for (let i = 0; i < names.length; i++) {
+    const value = features[names[i]] ?? 0;
+    raw[i] = Number.isFinite(value) ? value : 0;
+  }
 
   const scaled = new Float64Array(raw.length);
   for (let i = 0; i < raw.length; i++) {
@@ -60,7 +64,9 @@ export function predictWithRfModel(
   const probabilities: Record<string, number> = {};
   for (let c = 0; c < nClasses; c++) {
     const probability = probSum[c] / nTrees;
-    probabilities[model.labels[c]] = Math.round(probability * 1000) / 1000;
+    probabilities[model.labels[c]] = roundProbabilities
+      ? Math.round(probability * 1000) / 1000
+      : probability;
     if (probability > maxProb) {
       maxProb = probability;
       maxIdx = c;
@@ -69,7 +75,21 @@ export function predictWithRfModel(
 
   return {
     label: model.labels[maxIdx],
-    confidence: Math.round(maxProb * 1000) / 1000,
+    confidence: roundProbabilities ? Math.round(maxProb * 1000) / 1000 : maxProb,
     probabilities,
   };
+}
+
+export function predictWithRfModel(
+  model: RfJsonModel,
+  features: Record<string, number>,
+): RfPrediction {
+  return predictWithRfModelInternal(model, features, true);
+}
+
+export function predictWithRfModelRaw(
+  model: RfJsonModel,
+  features: Record<string, number>,
+): RfPrediction {
+  return predictWithRfModelInternal(model, features, false);
 }

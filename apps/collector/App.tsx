@@ -8,6 +8,8 @@ import { DataCollectionScreen } from './src/DataCollectionScreen';
 import { AudioCollectionScreen } from './src/AudioCollectionScreen';
 import { LiveClassificationScreen } from './src/LiveClassificationScreen';
 import { FableLiveScreen } from './src/FableLiveScreen';
+import { FableTrainingRecorderScreen } from './src/FableTrainingRecorderScreen';
+import { BounceAudioTestScreen } from './src/BounceAudioTestScreen';
 import { BounceSideLiveScreen } from './src/BounceSideLiveScreen';
 import { BounceTestScreen } from './src/BounceTestScreen';
 import { VideoOnlyStrokeCollectionScreen } from './src/VideoOnlyStrokeCollectionScreen';
@@ -19,9 +21,11 @@ type Screen =
   | 'audio_video_pose_collection'
   | 'video_only_stroke_collection'
   | 'video_bounce_side_collection'
+  | 'fable_training_recorder'
   | 'free_recording'
   | 'live_classification'
   | 'fable_live'
+  | 'bounce_audio_test'
   | 'bounce_side_live'
   | 'bounce_free'
   | 'bounce_alternating';
@@ -54,8 +58,10 @@ export default function App() {
           onAudioVideoPoseMode={setup => setState({ screen: 'audio_video_pose_collection', setup })}
           onVideoOnlyStrokeMode={setup => setState({ screen: 'video_only_stroke_collection', setup })}
           onVideoBounceSideMode={setup => setState({ screen: 'video_bounce_side_collection', setup })}
+          onFableTrainingRecorderMode={setup => setState({ screen: 'fable_training_recorder', setup })}
           onLiveMode={setup => setState({ screen: 'live_classification', setup })}
           onFableLiveMode={setup => setState({ screen: 'fable_live', setup })}
+          onBounceAudioTestMode={setup => setState({ screen: 'bounce_audio_test', setup })}
           onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
           onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
           onBounceAlternatingMode={setup =>
@@ -74,10 +80,26 @@ export default function App() {
     );
   }
 
+  if (state.screen === 'bounce_audio_test' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <BounceAudioTestScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
+      </SafeAreaProvider>
+    );
+  }
+
   if (state.screen === 'bounce_side_live' && state.setup) {
     return (
       <SafeAreaProvider>
         <BounceSideLiveScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'fable_training_recorder' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <FableTrainingRecorderScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
       </SafeAreaProvider>
     );
   }
@@ -206,8 +228,10 @@ export default function App() {
         onAudioVideoPoseMode={setup => setState({ screen: 'audio_video_pose_collection', setup })}
         onVideoOnlyStrokeMode={setup => setState({ screen: 'video_only_stroke_collection', setup })}
         onVideoBounceSideMode={setup => setState({ screen: 'video_bounce_side_collection', setup })}
+        onFableTrainingRecorderMode={setup => setState({ screen: 'fable_training_recorder', setup })}
         onLiveMode={setup => setState({ screen: 'live_classification', setup })}
         onFableLiveMode={setup => setState({ screen: 'fable_live', setup })}
+        onBounceAudioTestMode={setup => setState({ screen: 'bounce_audio_test', setup })}
         onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
         onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
         onBounceAlternatingMode={setup =>

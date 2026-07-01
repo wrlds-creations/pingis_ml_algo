@@ -38,6 +38,7 @@ const FABLE_ONSET_THRESHOLD = 0.005; // -> native onset-ratio 1.5
 const FABLE_RETRIGGER_MS = 120;
 const FABLE_ABS_MIN_RMS = 0.0015;
 const FABLE_DEBUG_DIR = `${RNFS.ExternalStorageDirectoryPath}/Download/pingis_sessions/fable_live_debug`;
+const FABLE_CONTINUOUS_WAV_SAMPLE_RATE = 22050;
 
 interface Props { setup: PlayerSetup; onDone: () => void; }
 
@@ -69,6 +70,13 @@ interface FableDebugEvent {
   audio_b64?: string;
 }
 
+interface FableDebugSessionPaths {
+  sessionId: string;
+  jsonPath: string;
+  wavPath: string;
+  wavFilename: string;
+}
+
 /** Skärm-lokala motoröverrides, speglade i debug-dumpen.
  *  -36/-0.85: tätt självstudsande (~380 ms period) höjer uppmätt bakgrund
  *  över -42 dB och flippade motorn till musikläge - 2026-06-12-dumparna
@@ -95,6 +103,17 @@ function labelName(label?: string) {
   }
 }
 
+function buildDebugSessionPaths(startedAtIso: string): FableDebugSessionPaths {
+  const sessionId = `fable_live_session_${startedAtIso.replace(/[:.]/g, '-')}`;
+  const wavFilename = `${sessionId}.wav`;
+  return {
+    sessionId,
+    jsonPath: `${FABLE_DEBUG_DIR}/${sessionId}.json`,
+    wavPath: `${FABLE_DEBUG_DIR}/${wavFilename}`,
+    wavFilename,
+  };
+}
+
 export function FableLiveScreen({ setup, onDone }: Props) {
   const insets = useSafeAreaInsets();
   const [isListening, setIsListening] = useState(false);
@@ -112,17 +131,25 @@ export function FableLiveScreen({ setup, onDone }: Props) {
   const latenciesRef = useRef<number[]>([]);
   const debugEventsRef = useRef<FableDebugEvent[]>([]);
   const startedAtRef = useRef<string | null>(null);
+  const debugSessionPathsRef = useRef<FableDebugSessionPaths | null>(null);
 
   const saveDebugSession = useCallback(async () => {
-    if (debugEventsRef.current.length === 0) return;
+    if (debugEventsRef.current.length === 0 && !debugSessionPathsRef.current) return;
     const stoppedAt = new Date().toISOString();
-    const path = `${FABLE_DEBUG_DIR}/fable_live_session_${stoppedAt.replace(/[:.]/g, '-')}.json`;
+    const sessionPaths = debugSessionPathsRef.current ?? buildDebugSessionPaths(stoppedAt);
     const payload = {
       type: 'fable_live_debug_session',
       model_version: FABLE_MODEL_VERSION,
       player: setup,
       started_at: startedAtRef.current ?? stoppedAt,
       stopped_at: stoppedAt,
+      continuous_audio: {
+        wav_filename: sessionPaths.wavFilename,
+        wav_path: sessionPaths.wavPath,
+        sample_rate_hz: FABLE_CONTINUOUS_WAV_SAMPLE_RATE,
+        format: 'pcm_s16le_mono_wav',
+        source: 'AudioStreamModule mic stream',
+      },
       engine_config: { ...FABLE_DEFAULT_CONFIG, ...FABLE_LIVE_ENGINE_OVERRIDES },
       gate_config: {
         mode: 'bandpass',
@@ -139,8 +166,8 @@ export function FableLiveScreen({ setup, onDone }: Props) {
     };
     try {
       await RNFS.mkdir(FABLE_DEBUG_DIR);
-      await RNFS.writeFile(path, JSON.stringify(payload, null, 2), 'utf8');
-      setSavedDebugPath(path);
+      await RNFS.writeFile(sessionPaths.jsonPath, JSON.stringify(payload, null, 2), 'utf8');
+      setSavedDebugPath(`JSON: ${sessionPaths.jsonPath}\nWAV: ${sessionPaths.wavPath}`);
     } catch {
       setSavedDebugPath('Kunde inte spara fable-debug.');
     }
@@ -148,15 +175,19 @@ export function FableLiveScreen({ setup, onDone }: Props) {
 
   const toggle = useCallback(() => {
     if (isListening) {
-      AudioStream.stopStreaming();
-      setIsListening(false);
-      void saveDebugSession();
+      void (async () => {
+        await AudioStream.stopStreaming();
+        setIsListening(false);
+        await saveDebugSession();
+      })();
       return;
     }
     counterRef.current.reset();
     latenciesRef.current = [];
     debugEventsRef.current = [];
-    startedAtRef.current = new Date().toISOString();
+    const startedAtIso = new Date().toISOString();
+    startedAtRef.current = startedAtIso;
+    debugSessionPathsRef.current = buildDebugSessionPaths(startedAtIso);
     setHitCount(0);
     setEventCount(0);
     setStaleCount(0);
@@ -166,6 +197,8 @@ export function FableLiveScreen({ setup, onDone }: Props) {
     setRecentEvents([]);
     setSavedDebugPath(null);
     void (async () => {
+      await RNFS.mkdir(FABLE_DEBUG_DIR);
+      await AudioStream.setDebugRecordingPath(debugSessionPathsRef.current?.wavPath ?? null);
       await AudioStream.startStreaming(FABLE_ONSET_THRESHOLD);
       // startStreaming återställer gate-konfig till gamla beteendet,
       // så Fable-inställningarna måste sättas EFTER start.
@@ -276,7 +309,18 @@ export function FableLiveScreen({ setup, onDone }: Props) {
     <View style={[styles.root, { paddingTop: insets.top }]}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => { if (isListening) { AudioStream.stopStreaming(); } onDone(); }}>
+        <TouchableOpacity onPress={() => {
+          if (!isListening) {
+            onDone();
+            return;
+          }
+          void (async () => {
+            await AudioStream.stopStreaming();
+            setIsListening(false);
+            await saveDebugSession();
+            onDone();
+          })();
+        }}>
           <Text style={styles.back}>‹ Tillbaka</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Fable-algoritm</Text>
