@@ -1,6 +1,6 @@
 ---
 name: pingis-audio-classification
-description: Work on the pingis audio collection, review, preprocessing, training, model export, live racket-contact detection, table/floor/noise veto behavior, and scripts under this skill.
+description: Work on the pingis audio collection, review, preprocessing, training, model export, live racket-contact detection, table/floor/noise veto behavior, full-WAV Bounce audio test review pages, and scripts under this skill.
 ---
 
 # Skill: pingis-audio-classification
@@ -11,6 +11,8 @@ Load this skill when working on:
 - `AudioCollectionScreen` or audio session JSON files
 - Any file in `skills/pingis-audio-classification/scripts/`
 - Noise filtering or bounce-type detection from microphone input
+- Full-WAV review pages that compare saved `Bounce audio test` app candidates
+  against editable waveform-prefill racket-contact labels
 
 ## Purpose
 Collect labeled audio clips of ping pong ball bounces and train a machine learning
@@ -122,6 +124,46 @@ python skills/pingis-audio-classification/scripts/train_rf_audio.py
 # Start inference API:
 python skills/pingis-audio-classification/scripts/serve_api_audio.py
 ```
+
+## Bounce Audio Test Full-WAV Review Pages
+
+Use this workflow when Love reports that `Bounce audio test` under-counted or
+false-counted and wants to hear the full WAV with markers. It creates the
+review UI pattern used in T0119:
+
+- Grey lines are the actual saved app/native candidates from
+  `bounce_audio_test_debug` JSON.
+- Green labels are editable draft racket-contact labels from a soft waveform
+  peak prefill. They are not truth until Love corrects and saves them.
+
+Prepare artifacts from an already pulled JSON/WAV pair:
+
+```bash
+python skills/pingis-audio-classification/scripts/noise_robust/prepare_bounce_audio_test_review_page.py \
+  --session-id bounce_audio_test_session_YYYY-MM-DDTHH-MM-SS-SSSZ \
+  --raw-dir data/audio/raw/<ticket>/bounce_audio_test_debug \
+  --out-dir data/audio/models/evaluations/<ticket> \
+  --expected-count 30 \
+  --reported-app-count 20 \
+  --port 8799 \
+  --force \
+  --start-server
+```
+
+If `--start-server` is omitted, copy the printed command to start
+`serve_t0053_trigger_review_ui.py` manually. Ask Love to open the URL, listen,
+drag/delete/add green labels, then click **Save labels**.
+
+After labels are saved, compare Love's corrected green labels to the grey app
+candidates:
+
+- Missing green labels with no nearby grey candidate means candidate gate loss.
+- Nearby grey candidates rejected as low probability or Fable-noise veto means
+  second-layer/veto loss.
+- Extra grey candidates in no-bounce sections are false-count risk.
+
+Do not ingest, train, export, or promote from auto-prefilled labels before Love
+saves the review page.
 
 ## New Audio Training Intake
 
