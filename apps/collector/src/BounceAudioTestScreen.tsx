@@ -41,7 +41,9 @@ import {
 import type { PlayerSetup } from './types';
 
 const TEST_ONSET_THRESHOLD = 0.005;
-const DEBUG_DIR = `${RNFS.ExternalStorageDirectoryPath}/Download/pingis_sessions/bounce_audio_test_debug`;
+const PUBLIC_DEBUG_DIR = `${RNFS.ExternalStorageDirectoryPath}/Download/pingis_sessions/bounce_audio_test_debug`;
+const APP_DEBUG_BASE_DIR = RNFS.ExternalDirectoryPath || RNFS.DocumentDirectoryPath;
+const APP_DEBUG_DIR = `${APP_DEBUG_BASE_DIR}/pingis_sessions/bounce_audio_test_debug`;
 const SAMPLE_RATE_HZ = 22050;
 const MAX_AUDIO_DEBUG_CLIPS = 180;
 
@@ -52,6 +54,9 @@ interface Props {
 
 interface DebugSessionPaths {
   sessionId: string;
+  directory: string;
+  storageKind: 'public_downloads' | 'app_external_files';
+  fallbackReason?: string;
   jsonPath: string;
   wavPath: string;
   wavFilename: string;
@@ -106,15 +111,49 @@ function parseNativeEvent(event: NativeAudioBounceEvent): {
   return { audioB64: event.audio_b64 ?? undefined, nativeDebug: event.native_debug };
 }
 
-function buildDebugSessionPaths(startedAtIso: string): DebugSessionPaths {
+function shortError(error: unknown): string {
+  return String(error).slice(0, 160);
+}
+
+function buildDebugSessionPaths(
+  startedAtIso: string,
+  directory = PUBLIC_DEBUG_DIR,
+  storageKind: DebugSessionPaths['storageKind'] = 'public_downloads',
+  fallbackReason?: string,
+): DebugSessionPaths {
   const sessionId = `bounce_audio_test_session_${startedAtIso.replace(/[:.]/g, '-')}`;
   const wavFilename = `${sessionId}.wav`;
   return {
     sessionId,
-    jsonPath: `${DEBUG_DIR}/${sessionId}.json`,
-    wavPath: `${DEBUG_DIR}/${wavFilename}`,
+    directory,
+    storageKind,
+    ...(fallbackReason ? { fallbackReason } : {}),
+    jsonPath: `${directory}/${sessionId}.json`,
+    wavPath: `${directory}/${wavFilename}`,
     wavFilename,
   };
+}
+
+async function ensureWritableDirectory(directory: string): Promise<void> {
+  await RNFS.mkdir(directory);
+  const probePath = `${directory}/.write_probe_${Date.now()}.tmp`;
+  await RNFS.writeFile(probePath, 'ok', 'utf8');
+  await RNFS.unlink(probePath).catch(() => {});
+}
+
+async function prepareDebugSessionPaths(startedAtIso: string): Promise<DebugSessionPaths> {
+  try {
+    await ensureWritableDirectory(PUBLIC_DEBUG_DIR);
+    return buildDebugSessionPaths(startedAtIso);
+  } catch (publicError) {
+    await ensureWritableDirectory(APP_DEBUG_DIR);
+    return buildDebugSessionPaths(
+      startedAtIso,
+      APP_DEBUG_DIR,
+      'app_external_files',
+      shortError(publicError),
+    );
+  }
 }
 
 function displayTime(ms: number) {
@@ -296,6 +335,12 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         format: 'pcm_s16le_mono_wav',
         source: 'AudioStreamModule mic stream',
       },
+      storage: {
+        kind: paths.storageKind,
+        directory: paths.directory,
+        public_downloads_directory: PUBLIC_DEBUG_DIR,
+        fallback_reason: paths.fallbackReason ?? null,
+      },
       peak_gate_config: modelOption.runtimeMode === 'peak_extra_trees' ? BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG : null,
       rms_fable_gate_config: modelOption.runtimeMode === 'rms_fable' ? BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG : null,
       decision_config: {
@@ -315,14 +360,17 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       candidates: cappedDebugRows(rows),
     };
     try {
-      await RNFS.mkdir(DEBUG_DIR);
+      await RNFS.mkdir(paths.directory);
       await RNFS.writeFile(paths.jsonPath, JSON.stringify(payload, null, 2), 'utf8');
-      setSavedDebugPath(`JSON: ${paths.jsonPath}\nWAV: ${paths.wavPath}`);
+      const storageNote = paths.storageKind === 'app_external_files'
+        ? '\nStorage: app external files fallback'
+        : '';
+      setSavedDebugPath(`JSON: ${paths.jsonPath}\nWAV: ${paths.wavPath}${storageNote}`);
       setStatus('Saved debug JSON/WAV.');
       setPendingDebugSession(null);
     } catch (err) {
       setSavedDebugPath(null);
-      setStatus(`Could not save debug: ${String(err).slice(0, 120)}`);
+      setStatus(`Could not save debug: ${shortError(err)}`);
     }
   }, [countUnclear, expectedCount, noiseVetoText, selectedScenarioId, setup, thresholdText]);
 
@@ -333,7 +381,6 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       return;
     }
     const startedAtIso = new Date().toISOString();
-    const paths = buildDebugSessionPaths(startedAtIso);
     const modelSelection = engineRef.current.setModelOption(selectedModelId, typedRuntimeConfig);
     activeRuntimeConfigRef.current = modelSelection.runtimeConfig;
     activeDecisionConfigRef.current = modelSelection.decisionConfig;
@@ -342,7 +389,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     setActiveModelOption(modelSelection.modelOption);
     engineRef.current.reset();
     startedAtRef.current = startedAtIso;
-    pathsRef.current = paths;
+    pathsRef.current = null;
     setHitCount(0);
     setCandidateCount(0);
     setClassifiedCount(0);
@@ -360,7 +407,11 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
 
     void (async () => {
       try {
-        await RNFS.mkdir(DEBUG_DIR);
+        const paths = await prepareDebugSessionPaths(startedAtIso);
+        pathsRef.current = paths;
+        if (paths.storageKind === 'app_external_files') {
+          setStatus('Public Downloads unavailable; using app storage for this test.');
+        }
         await AudioStream.setDebugRecordingPath(paths.wavPath);
         await AudioStream.startStreaming(TEST_ONSET_THRESHOLD);
         if (modelSelection.modelOption.runtimeMode === 'rms_fable') {
@@ -387,7 +438,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
           ? 'Listening with RMS+Fable original gate/counter. p and veto fields are ignored.'
           : `Listening with ${modelSelection.modelOption.shortTitle}, p>=${formatPercent(modelSelection.runtimeConfig.threshold)}, noise veto>=${formatPercent(modelSelection.runtimeConfig.fableNoiseVetoThreshold)}.`);
       } catch (err) {
-        setStatus(`Could not start: ${String(err).slice(0, 120)}`);
+        setStatus(`Could not start: ${shortError(err)}`);
+        startedAtRef.current = null;
+        pathsRef.current = null;
         try { await AudioStream.stopStreaming(); } catch (_) {}
         try { await AudioStream.setDebugRecordingPath(null); } catch (_) {}
       }
