@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0113-android-java-gradle-toolchain-fix`
+`T0122-discard-calibrated-transient-app-experiment`
 
 ## Branch
 
@@ -14,97 +14,76 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Status
 
-`Complete`
+`Completed`
 
 ## Goal
 
-Make Android release builds work permanently on this Windows machine by moving Gradle off Oracle Java 8 and fixing the React Native Gradle plugin's Foojay resolver version for Gradle 9.
+Clean up the dirty worktree after the T0115/T0117/T0118 adaptive/transient/calibrated `Bounce audio test` experiments failed the T0119/T0121 saved-label check. Keep the reusable review helper commit, discard the experimental runtime code, and record the next direction.
 
 ## Dependencies
 
-- T0112 fixed the `Bounce audio test` storage fallback but a new release APK could not be built locally.
-- Current default `java` resolves to Oracle Java 8 via `C:\Program Files (x86)\Common Files\Oracle\Java\javapath\java.exe`.
-- Gradle wrapper is `9.0.0`, which requires Java 17+ to run.
-- Running with Android Studio JBR 21 then exposed React Native Gradle plugin `foojay-resolver-convention` `0.5.0`, which references `JvmVendorSpec.IBM_SEMERU` removed in Gradle 9.
-- Upstream Gradle/Foojay guidance and the React Native issue indicate `foojay-resolver-convention` `1.0.0` is the Gradle 9-compatible fix.
+- T0120 committed the reusable full-WAV review helper.
+- T0121 showed the calibrated transient phone run counted only `18/30` true bounces at `140 ms`, with `10` candidate-gate misses and `2` unmatched counted candidates.
+- Love agreed the unstaged adaptive/transient/calibrated app code should be treated as experimental and cleaned up rather than staged.
 
 ## Allowed Areas
 
 - `CODEX_TASK.md`
 - `PROJECT_CONTEXT.md`
-- `DECISIONS.md`
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
-- `apps/collector/patches/`
-- `apps/collector/node_modules/@react-native/gradle-plugin/settings.gradle.kts` as the source for a `patch-package` patch
-- local user Java/Gradle environment configuration commands
-- Android release build validation/status commands
+- `DECISIONS.md`
+- Restore only these experimental app/runtime files back to `HEAD`:
+  - `apps/collector/android/app/src/main/java/com/collectorapp/AudioStreamModule.kt`
+  - `apps/collector/src/BounceAudioTestScreen.tsx`
+  - `apps/collector/src/NativeAudioStream.ts`
+  - `apps/collector/src/bounceAudioTestEngine.ts`
 
 ## Do Not Touch
 
+- Do not delete raw/generated `data/`.
 - Do not merge to `main`.
-- Do not push.
+- Do not push unless explicitly requested.
 - Do not delete local or device data.
-- Do not revert tracked or user changes.
-- Do not uninstall Oracle Java 8 unless a later explicit approval says legacy Java can be removed.
 - Do not replace or promote production Fable/studs/camera behavior.
-- Do not change `audio_model.json`, `audio_contact_model.json`, `fable_audio_model.json`, `bounce_side_model.json`, T0103/T0104E JSON, or native peak-gate defaults.
 - Do not move raw/generated data into git.
+- Do not train or export a model.
+- Do not discard the committed T0120 review helper.
+- Do not use broad destructive cleanup such as `git reset --hard`.
 
 ## Requirements
 
-- Patch `@react-native/gradle-plugin` so its included build uses `org.gradle.toolchains.foojay-resolver-convention` `1.0.0` instead of `0.5.0`.
-- Generate a `patch-package` patch so the fix survives `npm install`.
-- Set this Windows user/machine build environment so Gradle wrapper uses a Java 17+ runtime instead of Oracle Java 8.
-- Prefer using an existing modern JDK/JBR over uninstalling old Java.
-- Re-run Android release build after the toolchain fix.
-- Keep T0112 app behavior unchanged.
+- Restore only the four experimental app/runtime files listed above.
+- Verify the remaining dirty worktree is docs-only.
+- Record that the adaptive/transient/calibrated gate app changes are abandoned as current code, but their evidence remains useful.
+- Mark the recommended next direction as a new measured candidate-generation approach, likely buffered/sliding-window PCM or hybrid recovery, not another hardcoded peak floor tweak.
 
 ## Non-Goals
 
+- No new app code.
 - No model export/retrain.
-- No app runtime behavior change beyond already-completed T0112.
-- No threshold, dedupe, or native gate behavior changes.
-- No camera/racket-side changes.
-- No new data pull or labeling.
-- No push or main merge.
+- No production/default Fable, studs, or camera behavior change.
+- No APK/reinstall.
+- No cloud/API/AWS changes.
+- No deletion of local analysis/audio files.
 
 ## Acceptance Criteria
 
-- `gradlew.bat assembleRelease` no longer fails on Java 8 or `JvmVendorSpec IBM_SEMERU`.
-- `patch-package` can reapply the React Native Gradle plugin patch.
-- Collector TypeScript validation passes.
-- Root validation passes.
-- `git diff --check` passes.
-- Final answer explains whether Java 8 was left installed and which Java Gradle now uses.
+- The four experimental app/runtime files are restored to `HEAD`.
+- Docs clearly say T0115/T0117/T0118 are historical experiments that were reverted from the current worktree.
+- Current repo state recommends the next audio direction without implying the calibrated transient mode is still active.
+- Root validation and `git diff --check` pass or blockers are documented.
 
 ## Completion Notes
 
-- Left Oracle Java 8 installed for legacy compatibility, but moved this user's Android build environment off it.
-- Set user-level `JAVA_HOME` to `D:\Programs_Installed\Android\Android Studio\jbr`.
-- Set user-level `ANDROID_HOME` and `ANDROID_SDK_ROOT` to `D:\Programs_Installed\Android\Sdk`.
-- Patched `@react-native/gradle-plugin` via `patch-package` so its included build uses `org.gradle.toolchains.foojay-resolver-convention` `1.0.0` instead of `0.5.0`.
-- Verified `patch-package` reapplies the new React Native Gradle plugin patch after install in the short build copy.
-- Direct long-path release build now gets past Java 8, Foojay, and Android SDK configuration, but still fails in native Nitro/CMake path handling.
-- A junction path (`C:\pma`) does not solve the CMake path issue because CMake resolves the real long target path.
-- Created and used a real short physical build copy at `D:\pcr`.
-- Built an arm64 release APK from `D:\pcr\apps\collector\android`.
-- Installed and launched the release APK on connected Android `VOG_L29` (`EHT0219B01004275`).
-- Release APK: `D:\pcr\apps\collector\android\app\build\outputs\apk\release\app-release.apk`.
-- Release APK SHA256: `2304819D60FA1D3382D66486E78206D0CD6396779D6DDC1A3D2A67DF93B98231`.
-- Installed package smoke: `com.collectorapp`, `versionName=1.0`, `versionCode=1`, `lastUpdateTime=2026-07-02 10:49:41`, PID `16598`, resumed `MainActivity`.
-- No model JSON, native gate, production Fable/studs/camera behavior, raw data, push, or `main` merge changed.
+- Restored the four experimental app/runtime files to `HEAD`.
+- The current working tree is docs-only after the restore.
+- The current committed app code keeps `Bounce audio test` to the pre-experiment selector set: `T0103`, `T0104E`, and `RMS+Fable`; the adaptive/transient/calibrated native gate methods are no longer in the worktree.
+- T0115/T0117/T0118 remain documented as historical diagnostics, but are not the current repo state.
+- The T0121 evidence remains the basis for the cleanup: the miss is mostly candidate-generation loss, so the next direction should be a measured buffered/sliding-window PCM or hybrid recovery experiment.
+- No APK, model export, production behavior, push, merge, raw-data deletion, or raw-data git state changed.
 
 ## Validation
 
-- `npx patch-package` in `D:\pcr\apps\collector`
-- `cd D:\pcr\apps\collector\android && .\gradlew.bat clean --no-daemon --console plain`
-- `cd D:\pcr\apps\collector\android && .\gradlew.bat assembleRelease -PreactNativeArchitectures=arm64-v8a --no-daemon --console plain`
-- `adb install -r D:\pcr\apps\collector\android\app\build\outputs\apk\release\app-release.apk`
-- `adb shell am start -n com.collectorapp/.MainActivity`
-- `adb shell pidof com.collectorapp`
-- `adb shell dumpsys package com.collectorapp`
-- `adb shell dumpsys activity activities`
-- Final source-tree `cd apps/collector && npx tsc --noEmit`: passed 2026-07-02.
-- Final source-tree `npm run validate`: passed 2026-07-02.
-- Final source-tree `git diff --check`: passed 2026-07-02 with Windows LF-to-CRLF warnings only.
+- `npm run validate` passed.
+- `git diff --check` passed with existing Windows LF-to-CRLF warnings only.
