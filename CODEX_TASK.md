@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0122-discard-calibrated-transient-app-experiment`
+`T0123-sliding-window-pcm-candidate-audit`
 
 ## Branch
 
@@ -18,13 +18,14 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Clean up the dirty worktree after the T0115/T0117/T0118 adaptive/transient/calibrated `Bounce audio test` experiments failed the T0119/T0121 saved-label check. Keep the reusable review helper commit, discard the experimental runtime code, and record the next direction.
+Evaluate, offline only, whether a buffered/sliding-window PCM candidate generator can recover the bounces missed by the current peak-gate path without obviously exploding talking/handling false candidates.
 
 ## Dependencies
 
-- T0120 committed the reusable full-WAV review helper.
-- T0121 showed the calibrated transient phone run counted only `18/30` true bounces at `140 ms`, with `10` candidate-gate misses and `2` unmatched counted candidates.
-- Love agreed the unstaged adaptive/transient/calibrated app code should be treated as experimental and cleaned up rather than staged.
+- T0121 showed the calibrated transient phone run is mostly candidate-gate limited.
+- T0122 restored the failed adaptive/transient app experiment out of the worktree.
+- Existing reviewed labels are available from T0121 and T0104D/T0104B positive review pages.
+- Existing expected-zero T0104 sessions are available for first-pass hard-negative pressure.
 
 ## Allowed Areas
 
@@ -33,11 +34,8 @@ Clean up the dirty worktree after the T0115/T0117/T0118 adaptive/transient/calib
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
-- Restore only these experimental app/runtime files back to `HEAD`:
-  - `apps/collector/android/app/src/main/java/com/collectorapp/AudioStreamModule.kt`
-  - `apps/collector/src/BounceAudioTestScreen.tsx`
-  - `apps/collector/src/NativeAudioStream.ts`
-  - `apps/collector/src/bounceAudioTestEngine.ts`
+- `skills/pingis-audio-classification/scripts/noise_robust/`
+- ignored local outputs under `data/audio/models/evaluations/t0123_sliding_window_pcm_candidate_audit/`
 
 ## Do Not Touch
 
@@ -48,15 +46,15 @@ Clean up the dirty worktree after the T0115/T0117/T0118 adaptive/transient/calib
 - Do not replace or promote production Fable/studs/camera behavior.
 - Do not move raw/generated data into git.
 - Do not train or export a model.
-- Do not discard the committed T0120 review helper.
-- Do not use broad destructive cleanup such as `git reset --hard`.
+- Do not change app/runtime/model JSON files.
+- Do not install an APK.
 
 ## Requirements
 
-- Restore only the four experimental app/runtime files listed above.
-- Verify the remaining dirty worktree is docs-only.
-- Record that the adaptive/transient/calibrated gate app changes are abandoned as current code, but their evidence remains useful.
-- Mark the recommended next direction as a new measured candidate-generation approach, likely buffered/sliding-window PCM or hybrid recovery, not another hardcoded peak floor tweak.
+- Add an evaluation-only script that loads existing WAVs and reviewed labels.
+- Compare current fixed peak gate, soft peak gate, and several sliding-window PCM candidate configs.
+- Report true-label coverage at `140 ms` and `250 ms`, unmatched candidates on positives, and candidate counts on expected-zero negative sessions.
+- Use T0121 as the critical miss case and T0104D positives/T0104 negatives as broader sanity checks.
 
 ## Non-Goals
 
@@ -66,24 +64,28 @@ Clean up the dirty worktree after the T0115/T0117/T0118 adaptive/transient/calib
 - No APK/reinstall.
 - No cloud/API/AWS changes.
 - No deletion of local analysis/audio files.
+- No claim that a config is production-ready from this audit alone.
 
 ## Acceptance Criteria
 
-- The four experimental app/runtime files are restored to `HEAD`.
-- Docs clearly say T0115/T0117/T0118 are historical experiments that were reverted from the current worktree.
-- Current repo state recommends the next audio direction without implying the calibrated transient mode is still active.
+- Script runs from the repo root and writes ignored CSV/JSON/MD outputs.
+- Report clearly says whether sliding-window candidates improve T0121 and broader positive coverage versus peak gate.
+- Report also shows expected-zero negative candidate load.
 - Root validation and `git diff --check` pass or blockers are documented.
 
 ## Completion Notes
 
-- Restored the four experimental app/runtime files to `HEAD`.
-- The current working tree is docs-only after the restore.
-- The current committed app code keeps `Bounce audio test` to the pre-experiment selector set: `T0103`, `T0104E`, and `RMS+Fable`; the adaptive/transient/calibrated native gate methods are no longer in the worktree.
-- T0115/T0117/T0118 remain documented as historical diagnostics, but are not the current repo state.
-- The T0121 evidence remains the basis for the cleanup: the miss is mostly candidate-generation loss, so the next direction should be a measured buffered/sliding-window PCM or hybrid recovery experiment.
-- No APK, model export, production behavior, push, merge, raw-data deletion, or raw-data git state changed.
+- Added `evaluate_t0123_sliding_window_pcm_candidate_audit.py`, an offline-only evaluator for current fixed peak gate, softer peak gates, and sliding-window PCM candidate generators.
+- Wrote ignored audit outputs under `data/audio/models/evaluations/t0123_sliding_window_pcm_candidate_audit/`.
+- Best positive recall row was `soft_peak_abs003`: `319/330` truth labels matched within `140 ms` (`96.7%`) with `319` expected-zero negative candidates.
+- Best sliding-window row was `sw_raw_abs030_r2_z4`: `318/330` within `140 ms` (`96.4%`) with `311` expected-zero negative candidates.
+- Current fixed peak reference `current_peak_abs008` was `288/330` within `140 ms` (`87.3%`) with `294` expected-zero negative candidates.
+- On the critical T0119/T0121 speaking/counting miss case, current fixed peak found `0/30`, while soft peak and high-pass sliding-window variants found `30/30`.
+- Conclusion: sliding-window/soft PCM candidate generation is promising as a recovery layer, but not as a standalone counter because expected-zero candidate load is still high. The next ticket should pair recovered candidates with a classifier/veto before any app/runtime promotion.
 
 ## Validation
 
-- `npm run validate` passed.
-- `git diff --check` passed with existing Windows LF-to-CRLF warnings only.
+- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0123_sliding_window_pcm_candidate_audit.py`
+- `python skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0123_sliding_window_pcm_candidate_audit.py`
+- `npm run validate`
+- `git diff --check` passed with existing LF/CRLF warnings only.
