@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0124-sliding-window-full-flow-replay`
+`T0127-bounce-audio-soft-peak-test-option`
 
 ## Branch
 
@@ -18,17 +18,15 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Evaluate, offline only, whether replacing the `Bounce audio test` peak candidate timestamps with softer peak or sliding-window PCM candidate timestamps improves the full current T0104E flow:
-
-`Audio WAV -> candidate timestamps -> existing live clip extraction -> Fable features/model -> T0104E ExtraTrees -> threshold/noise veto/smart dedupe -> scored count`
+Add a guarded `Bounce audio test` runtime option that keeps the current T0104E classifier stack but lowers only the peak-candidate absolute floor from `0.08` to `0.03`, so Love can test whether the measured `soft_peak_abs003` recovery helps on real phones.
 
 ## Dependencies
 
 - T0121 showed the failed calibrated transient phone run is partly candidate-gate limited and partly second-layer limited.
-- T0122 restored failed app/runtime experiments out of the worktree.
-- T0123 showed soft/sliding PCM candidate generation can recover most missed true bounces, but produces too many raw candidates to count directly.
-- Existing reviewed labels are available from T0121 and T0104D/T0104B positive review pages.
-- Existing expected-zero T0104 sessions are available for hard-negative pressure.
+- T0122 restored failed adaptive/transient/calibrated app experiments out of the worktree.
+- T0123 showed `soft_peak_abs003` can recover most missed true bounces but should not be counted directly.
+- T0124/T0125 showed soft peak plus existing T0104E improves full-flow recall compared with current peak while still leaving second-layer misses.
+- T0126 showed removing T0104E and using Fable probability alone is not the best current architecture.
 
 ## Allowed Areas
 
@@ -37,8 +35,10 @@ Evaluate, offline only, whether replacing the `Bounce audio test` peak candidate
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
-- `skills/pingis-audio-classification/scripts/noise_robust/`
-- ignored local outputs under `data/audio/models/evaluations/t0124_sliding_window_full_flow_replay/`
+- `apps/collector/src/bounceAudioTestEngine.ts`
+- `apps/collector/src/BounceAudioTestScreen.tsx`
+- `apps/collector/src/NativeAudioStream.ts`
+- `apps/collector/android/app/src/main/java/com/collectorapp/AudioStreamModule.kt`
 
 ## Do Not Touch
 
@@ -49,52 +49,57 @@ Evaluate, offline only, whether replacing the `Bounce audio test` peak candidate
 - Do not replace or promote production Fable/studs/camera behavior.
 - Do not move raw/generated data into git.
 - Do not train or export a new model.
-- Do not change app/runtime/model JSON files.
-- Do not install an APK.
+- Do not change model JSON files.
+- Do not change the production/default `Fable-algoritm`, `Studsdetektor`, `Studs FH/BH LIVE`, or camera behavior.
 
 ## Requirements
 
-- Add an evaluation-only replay script that loads existing WAVs and reviewed labels.
-- Compare current fixed peak, soft peak, and selected sliding-window PCM candidate timestamp methods.
-- For each candidate method, run the existing app-style second layer:
-  - event-centered live clip extraction;
-  - Fable feature extraction and current `fable_audio_model.json`;
-  - exported `fable_extra_trees_candidate_t0104e.json`;
-  - raw ExtraTrees probabilities;
-  - threshold / Fable-noise-veto / smart dedupe.
-- Report positive true counts, misses, false/unmatched counts, and expected-zero negative false counts.
-- Include at least the current app test setting `p=0.25`, Fable-noise veto `0.98`, and a strict reference policy.
+- Add a new selector option in `Bounce audio test`, tentatively `T0104E Soft`.
+- Keep the existing fixed `T0104E` option available for A/B comparison.
+- Use the same T0104E JSON, Fable feature extraction, threshold/noise-veto, decision delay, and smart dedupe.
+- For the soft option, use native peak gate settings matching the measured soft peak row:
+  - raw absolute envelope;
+  - smoothing `3 ms`;
+  - min gap `220 ms`;
+  - background window `500 ms`;
+  - background exclusion `60 ms`;
+  - absolute minimum `0.03`;
+  - ratio minimum `2.0`;
+  - z minimum `0.0`.
+- Make `T0104E Soft` the default diagnostic option for the next phone test.
+- Show the active gate/floor in the UI and save it in `bounce_audio_test_debug` JSON.
+- Keep `RMS+Fable` comparison behavior unchanged.
 
 ## Non-Goals
 
-- No new app code.
 - No model export/retrain.
 - No production/default Fable, studs, or camera behavior change.
-- No APK/reinstall.
 - No cloud/API/AWS changes.
 - No deletion of local analysis/audio files.
-- No claim that a config is production-ready from this audit alone.
+- No claim that this is production-ready before phone validation.
 
 ## Acceptance Criteria
 
-- Script runs from the repo root and writes ignored CSV/JSON/MD outputs.
-- Report clearly compares full-flow counts for current peak, soft peak, and sliding-window candidates.
-- Report identifies whether sliding-window timestamps are better after the existing classifier/veto/dedupe stack, not just before it.
-- Root validation and `git diff --check` pass or blockers are documented.
+- `Bounce audio test` shows a selectable `T0104E Soft` option.
+- Starting that option passes the soft peak gate parameters to native audio streaming.
+- Debug JSON records the selected model, runtime config, and active soft peak gate config.
+- TypeScript validation, Android/Kotlin validation, root validation, and `git diff --check` pass or blockers are documented.
 
 ## Completion Notes
 
-- Added `evaluate_t0124_sliding_window_full_flow_replay.py`, an offline evaluator that runs candidate timestamps through live clip extraction, Fable features/model, exported T0104E ExtraTrees JSON, threshold/noise-veto, and smart dedupe.
-- Wrote ignored outputs under `data/audio/models/evaluations/t0124_sliding_window_full_flow_replay/`.
-- Under the current favored diagnostic setting `p=0.25`, Fable-noise veto `0.98`, and dedupe `180 ms`, best sliding-window row `sw_raw_abs030_r2_z4` scored `288/330` true positives (`87.3%`) with `3` expected-zero negative false counts and `3` positive unmatched counts.
-- The current peak reference `current_peak_abs008` scored `271/330` true positives (`82.1%`) with the same `3` expected-zero negative false counts and `1` positive unmatched count.
-- The softer peak row `soft_peak_abs003` scored `285/330` true positives (`86.4%`) with `4` expected-zero negative false counts.
-- On the critical T0119 speaking/counting clip, current peak produced only `1` candidate and counted `0/30`; soft peak counted `13/30`; the best raw sliding row counted `10/30`. This means recovered timestamps help, but the existing T0104E/Fable decision layer still rejects many hard bounces.
-- Conclusion: replacing the peak picker with sliding-window candidates is promising in full-flow replay, but it is not ready for app promotion without a stronger second-layer/veto or policy tuning because negative false counts remain and T0119 recall is still weak.
+- Added `T0104E Soft` as a separate default option in `Bounce audio test`.
+- The soft option keeps the same T0104E model JSON, Fable-derived feature stack, typed defaults `p=0.25` and Fable-noise veto `0.98`, `500 ms` decision delay, and smart dedupe.
+- The only algorithmic runtime difference is native peak gate absolute floor `0.03` instead of the fixed `0.08`, matching the offline `soft_peak_abs003` row.
+- Fixed `T0104E`, old `T0103`, and `RMS+Fable` remain selectable for A/B comparison.
+- The model selector now wraps into two rows so four options fit on phone screens.
+- Saved `bounce_audio_test_debug` JSON records the active peak gate config, and native candidate debug rows report `gate_id=peak_fast_soft_abs003` when the soft floor is active.
+- No model JSON, production Fable/studs/camera behavior, raw/generated data, merge, push, or production promotion changed.
+- Quick debug/Metro install passed on connected Android `EHT0219B01004275`; package `lastUpdateTime=2026-07-03 00:17:00`, app PID `12134`.
 
 ## Validation
 
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0124_sliding_window_full_flow_replay.py`
-- `python skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0124_sliding_window_full_flow_replay.py`
+- `cd apps/collector && npx tsc --noEmit`
+- `cd apps/collector/android && .\gradlew.bat :app:compileDebugKotlin --no-daemon --console plain`
 - `npm run validate`
 - `git diff --check` passed with existing LF/CRLF warnings only.
+- `.\install-android-dev.ps1`

@@ -101,6 +101,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     @Volatile private var peakAbsMin = 0.08
     @Volatile private var peakRatioMin = 2.0
     @Volatile private var peakZMin = 0.0
+    @Volatile private var peakGateId = "peak_fast_balanced"
 
     private val peakEnvRing = DoubleArray(RING_SIZE)
     private var peakSmoothWindow = DoubleArray(1)
@@ -222,6 +223,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         spectralGateEnabled = true
         absMinRms           = ABS_MIN_RMS
         peakGateEnabled     = false
+        peakGateId          = "peak_fast_balanced"
         resetBandpassState()
         resetPeakGateState()
         val thread = Thread(::streamLoop, "AudioStreamThread")
@@ -294,6 +296,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         peakAbsMin = absMin.coerceIn(0.001, 1.0)
         peakRatioMin = ratioMin.coerceIn(0.0, 100.0)
         peakZMin = zMin.coerceIn(-20.0, 1000.0)
+        peakGateId = if (enabled && peakAbsMin <= 0.035) "peak_fast_soft_abs003" else "peak_fast_balanced"
         peakGateEnabled = enabled
         resetPeakGateState()
         promise.resolve("ok")
@@ -494,7 +497,7 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
             spectralPassed = true,
             ballRatio = 0.0,
             flatness = 0.0,
-            gateId = "peak_fast_balanced",
+            gateId = peakGateId,
             peakValue = peakValue,
             peakRatio = peakRatio,
             peakZ = peakZ,

@@ -28,6 +28,18 @@ export interface CandidateModel extends RfJsonModel {
 export type BounceAudioTestModelMetadata = NonNullable<CandidateModel['metadata']>;
 export type BounceAudioTestRuntimeMode = 'peak_extra_trees' | 'rms_fable';
 
+export interface BounceAudioTestPeakGateConfig {
+  gateId: string;
+  envelope: string;
+  smoothingMs: number;
+  minGapMs: number;
+  backgroundWindowMs: number;
+  backgroundExcludeBeforePeakMs: number;
+  absoluteMinimum: number;
+  ratioMinimum: number;
+  zMinimum: number;
+}
+
 export interface BounceAudioTestModelOption {
   id: string;
   title: string;
@@ -36,6 +48,7 @@ export interface BounceAudioTestModelOption {
   runtimeMode: BounceAudioTestRuntimeMode;
   model?: CandidateModel;
   metadata?: BounceAudioTestModelMetadata;
+  peakGateConfig?: BounceAudioTestPeakGateConfig;
   defaultRuntimeConfig?: BounceAudioTestRuntimeConfig;
 }
 
@@ -71,6 +84,26 @@ const RMS_FABLE_METADATA: BounceAudioTestModelMetadata = {
   gate_config: BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG,
 };
 
+export const BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG: BounceAudioTestPeakGateConfig = {
+  gateId: 'peak_fast_balanced',
+  envelope: 'raw_abs',
+  smoothingMs: 3,
+  minGapMs: 220,
+  backgroundWindowMs: 500,
+  backgroundExcludeBeforePeakMs: 60,
+  absoluteMinimum: 0.08,
+  ratioMinimum: 2.0,
+  zMinimum: 0.0,
+};
+
+export const BOUNCE_AUDIO_TEST_SOFT_PEAK_GATE_CONFIG: BounceAudioTestPeakGateConfig = {
+  ...BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG,
+  gateId: 'peak_fast_soft_abs003',
+  absoluteMinimum: 0.03,
+};
+
+export const BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG = BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG;
+
 export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
   {
     id: 't0103',
@@ -79,14 +112,29 @@ export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
     subtitle: 'current guarded test model',
     runtimeMode: 'peak_extra_trees',
     model: T0103_MODEL,
+    peakGateConfig: BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG,
   },
   {
     id: 't0104e',
     title: 'T0104E candidate',
     shortTitle: 'T0104E',
-    subtitle: 'colleague test default',
+    subtitle: 'fixed peak reference',
     runtimeMode: 'peak_extra_trees',
     model: T0104E_MODEL,
+    peakGateConfig: BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG,
+    defaultRuntimeConfig: {
+      threshold: 0.25,
+      fableNoiseVetoThreshold: 0.98,
+    },
+  },
+  {
+    id: 't0104e_soft',
+    title: 'T0104E soft peak',
+    shortTitle: 'T0104E Soft',
+    subtitle: 'soft candidate gate test',
+    runtimeMode: 'peak_extra_trees',
+    model: T0104E_MODEL,
+    peakGateConfig: BOUNCE_AUDIO_TEST_SOFT_PEAK_GATE_CONFIG,
     defaultRuntimeConfig: {
       threshold: 0.25,
       fableNoiseVetoThreshold: 0.98,
@@ -102,7 +150,7 @@ export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
   },
 ];
 
-export const BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID = 't0104e';
+export const BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID = 't0104e_soft';
 
 export function getBounceAudioTestModelOption(modelId: string): BounceAudioTestModelOption {
   return BOUNCE_AUDIO_TEST_MODEL_OPTIONS.find(option => option.id === modelId)
@@ -144,6 +192,10 @@ export function modelOptionUsesTypedRuntimeConfig(option: BounceAudioTestModelOp
 
 export function getBounceAudioTestModelMetadata(option: BounceAudioTestModelOption): BounceAudioTestModelMetadata {
   return option.model?.metadata ?? option.metadata ?? {};
+}
+
+export function getBounceAudioTestPeakGateConfig(option: BounceAudioTestModelOption): BounceAudioTestPeakGateConfig {
+  return option.peakGateConfig ?? BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG;
 }
 
 function requireCandidateModel(option: BounceAudioTestModelOption): CandidateModel {
@@ -211,18 +263,6 @@ export const BOUNCE_AUDIO_TEST_CONFIG: BounceAudioTestDecisionConfig = {
   decisionDelayMs: 500,
   staleMs: 2500,
 };
-
-export const BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG = {
-  gateId: 'peak_fast_balanced',
-  envelope: 'raw_abs',
-  smoothingMs: 3,
-  minGapMs: 220,
-  backgroundWindowMs: 500,
-  backgroundExcludeBeforePeakMs: 60,
-  absoluteMinimum: 0.08,
-  ratioMinimum: 2.0,
-  zMinimum: 0.0,
-} as const;
 
 const FAR_GAP_MS = 99999;
 const HEIGHT_MIN_GAP_MS = 250;

@@ -23,15 +23,16 @@ import {
   BOUNCE_AUDIO_TEST_CONFIG,
   BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG,
   BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID,
+  BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG,
   BOUNCE_AUDIO_TEST_MODEL_OPTIONS,
   BOUNCE_AUDIO_TEST_MODEL_VERSION,
-  BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG,
   BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG,
   BounceAudioTestEngine,
   defaultRuntimeConfigForModelId,
   decisionConfigForModelId,
   getBounceAudioTestModelMetadata,
   getBounceAudioTestModelOption,
+  getBounceAudioTestPeakGateConfig,
   modelOptionUsesTypedRuntimeConfig,
   type BounceAudioTestDecisionConfig,
   type BounceAudioTestModelOption,
@@ -306,6 +307,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     const decisionConfig = activeDecisionConfigRef.current;
     const modelOption = activeModelOptionRef.current;
     const modelMetadata = engineRef.current.getModelMetadata();
+    const peakGateConfig = modelOption.runtimeMode === 'peak_extra_trees'
+      ? getBounceAudioTestPeakGateConfig(modelOption)
+      : null;
     const payload = {
       type: 'bounce_audio_test_debug_session',
       schema_version: 1,
@@ -341,7 +345,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         public_downloads_directory: PUBLIC_DEBUG_DIR,
         fallback_reason: paths.fallbackReason ?? null,
       },
-      peak_gate_config: modelOption.runtimeMode === 'peak_extra_trees' ? BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG : null,
+      peak_gate_config: peakGateConfig,
       rms_fable_gate_config: modelOption.runtimeMode === 'rms_fable' ? BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG : null,
       decision_config: {
         ...decisionConfig,
@@ -422,15 +426,16 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
             BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.absoluteMinimumRms,
           );
         } else {
+          const peakGateConfig = getBounceAudioTestPeakGateConfig(modelSelection.modelOption);
           await AudioStream.setPeakGateConfig(
             true,
-            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.smoothingMs,
-            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.minGapMs,
-            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.backgroundWindowMs,
-            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.backgroundExcludeBeforePeakMs,
-            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.absoluteMinimum,
-            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.ratioMinimum,
-            BOUNCE_AUDIO_TEST_PEAK_GATE_CONFIG.zMinimum,
+            peakGateConfig.smoothingMs,
+            peakGateConfig.minGapMs,
+            peakGateConfig.backgroundWindowMs,
+            peakGateConfig.backgroundExcludeBeforePeakMs,
+            peakGateConfig.absoluteMinimum,
+            peakGateConfig.ratioMinimum,
+            peakGateConfig.zMinimum,
           );
         }
         setIsListening(true);
@@ -453,7 +458,16 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       setStatus('Stopping...');
       try { await AudioStream.stopStreaming(); } catch (_) {}
       try {
-        await AudioStream.setPeakGateConfig(false, 3, 220, 500, 60, 0.08, 2.0, 0.0);
+        await AudioStream.setPeakGateConfig(
+          false,
+          BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG.smoothingMs,
+          BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG.minGapMs,
+          BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG.backgroundWindowMs,
+          BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG.backgroundExcludeBeforePeakMs,
+          BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG.absoluteMinimum,
+          BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG.ratioMinimum,
+          BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG.zMinimum,
+        );
       } catch (_) {}
       setIsListening(false);
       flushEngine(true);
@@ -537,6 +551,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   const displayedModelMetadata = getBounceAudioTestModelMetadata(displayedModelOption);
   const displayedModelUsesTypedConfig = modelOptionUsesTypedRuntimeConfig(displayedModelOption);
   const displayedCandidateLabel = displayedModelOption.runtimeMode === 'rms_fable' ? 'RMS candidates' : 'peak candidates';
+  const displayedPeakGateConfig = displayedModelOption.runtimeMode === 'peak_extra_trees'
+    ? getBounceAudioTestPeakGateConfig(displayedModelOption)
+    : null;
   const displayedDecisionConfig = isListening || pendingDebugSession
     ? activeDecisionConfigRef.current
     : decisionConfigForModelId(displayedModelOption.id, displayedRuntimeConfig);
@@ -615,6 +632,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
             const selected = option.id === selectedModelId;
             const modelDefaults = defaultRuntimeConfigForModelId(option.id);
             const usesTypedConfig = modelOptionUsesTypedRuntimeConfig(option);
+            const peakGateConfig = usesTypedConfig ? getBounceAudioTestPeakGateConfig(option) : null;
             return (
               <TouchableOpacity
                 key={option.id}
@@ -631,7 +649,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
                   {option.shortTitle}
                 </Text>
                 <Text style={[styles.modelButtonMeta, selected && styles.modelButtonMetaOn]}>
-                  {usesTypedConfig ? `p ${formatPercent(modelDefaults.threshold)}` : 'original gate'}
+                  {usesTypedConfig
+                    ? `p ${formatPercent(modelDefaults.threshold)} abs ${peakGateConfig?.absoluteMinimum.toFixed(3)}`
+                    : 'original gate'}
                 </Text>
               </TouchableOpacity>
             );
@@ -699,7 +719,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
 
       <Text style={styles.configLine}>
         {displayedModelUsesTypedConfig
-          ? `${displayedModelOption.shortTitle} TEST | Peak gate raw abs 3 ms | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${displayedDecisionConfig.smartDedupeMs} ms | delay ${displayedDecisionConfig.decisionDelayMs} ms`
+          ? `${displayedModelOption.shortTitle} TEST | ${displayedPeakGateConfig?.gateId ?? 'peak gate'} abs>=${displayedPeakGateConfig?.absoluteMinimum.toFixed(3)} | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${displayedDecisionConfig.smartDedupeMs} ms | delay ${displayedDecisionConfig.decisionDelayMs} ms`
           : `${displayedModelOption.shortTitle} TEST | RMS bandpass gate | retrigger ${BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.retriggerMs} ms | abs RMS ${BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.absoluteMinimumRms} | original Fable confidence/count logic`}
       </Text>
       <Text style={styles.warningLine}>
@@ -820,9 +840,10 @@ const styles = StyleSheet.create({
   toggleDisabled: { backgroundColor: '#333' },
   toggleText: { color: '#fff', fontSize: 18, fontWeight: '800' },
   modelPanel: { marginHorizontal: 24, marginTop: 4 },
-  modelButtons: { flexDirection: 'row', gap: 8 },
+  modelButtons: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   modelButton: {
-    flex: 1,
+    flexBasis: '47%',
+    flexGrow: 1,
     borderWidth: 1,
     borderColor: '#333',
     borderRadius: 8,
