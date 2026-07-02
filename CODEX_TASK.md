@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0123-sliding-window-pcm-candidate-audit`
+`T0124-sliding-window-full-flow-replay`
 
 ## Branch
 
@@ -18,14 +18,17 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Evaluate, offline only, whether a buffered/sliding-window PCM candidate generator can recover the bounces missed by the current peak-gate path without obviously exploding talking/handling false candidates.
+Evaluate, offline only, whether replacing the `Bounce audio test` peak candidate timestamps with softer peak or sliding-window PCM candidate timestamps improves the full current T0104E flow:
+
+`Audio WAV -> candidate timestamps -> existing live clip extraction -> Fable features/model -> T0104E ExtraTrees -> threshold/noise veto/smart dedupe -> scored count`
 
 ## Dependencies
 
-- T0121 showed the calibrated transient phone run is mostly candidate-gate limited.
-- T0122 restored the failed adaptive/transient app experiment out of the worktree.
+- T0121 showed the failed calibrated transient phone run is partly candidate-gate limited and partly second-layer limited.
+- T0122 restored failed app/runtime experiments out of the worktree.
+- T0123 showed soft/sliding PCM candidate generation can recover most missed true bounces, but produces too many raw candidates to count directly.
 - Existing reviewed labels are available from T0121 and T0104D/T0104B positive review pages.
-- Existing expected-zero T0104 sessions are available for first-pass hard-negative pressure.
+- Existing expected-zero T0104 sessions are available for hard-negative pressure.
 
 ## Allowed Areas
 
@@ -35,7 +38,7 @@ Evaluate, offline only, whether a buffered/sliding-window PCM candidate generato
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
 - `skills/pingis-audio-classification/scripts/noise_robust/`
-- ignored local outputs under `data/audio/models/evaluations/t0123_sliding_window_pcm_candidate_audit/`
+- ignored local outputs under `data/audio/models/evaluations/t0124_sliding_window_full_flow_replay/`
 
 ## Do Not Touch
 
@@ -45,16 +48,22 @@ Evaluate, offline only, whether a buffered/sliding-window PCM candidate generato
 - Do not delete local or device data.
 - Do not replace or promote production Fable/studs/camera behavior.
 - Do not move raw/generated data into git.
-- Do not train or export a model.
+- Do not train or export a new model.
 - Do not change app/runtime/model JSON files.
 - Do not install an APK.
 
 ## Requirements
 
-- Add an evaluation-only script that loads existing WAVs and reviewed labels.
-- Compare current fixed peak gate, soft peak gate, and several sliding-window PCM candidate configs.
-- Report true-label coverage at `140 ms` and `250 ms`, unmatched candidates on positives, and candidate counts on expected-zero negative sessions.
-- Use T0121 as the critical miss case and T0104D positives/T0104 negatives as broader sanity checks.
+- Add an evaluation-only replay script that loads existing WAVs and reviewed labels.
+- Compare current fixed peak, soft peak, and selected sliding-window PCM candidate timestamp methods.
+- For each candidate method, run the existing app-style second layer:
+  - event-centered live clip extraction;
+  - Fable feature extraction and current `fable_audio_model.json`;
+  - exported `fable_extra_trees_candidate_t0104e.json`;
+  - raw ExtraTrees probabilities;
+  - threshold / Fable-noise-veto / smart dedupe.
+- Report positive true counts, misses, false/unmatched counts, and expected-zero negative false counts.
+- Include at least the current app test setting `p=0.25`, Fable-noise veto `0.98`, and a strict reference policy.
 
 ## Non-Goals
 
@@ -69,23 +78,23 @@ Evaluate, offline only, whether a buffered/sliding-window PCM candidate generato
 ## Acceptance Criteria
 
 - Script runs from the repo root and writes ignored CSV/JSON/MD outputs.
-- Report clearly says whether sliding-window candidates improve T0121 and broader positive coverage versus peak gate.
-- Report also shows expected-zero negative candidate load.
+- Report clearly compares full-flow counts for current peak, soft peak, and sliding-window candidates.
+- Report identifies whether sliding-window timestamps are better after the existing classifier/veto/dedupe stack, not just before it.
 - Root validation and `git diff --check` pass or blockers are documented.
 
 ## Completion Notes
 
-- Added `evaluate_t0123_sliding_window_pcm_candidate_audit.py`, an offline-only evaluator for current fixed peak gate, softer peak gates, and sliding-window PCM candidate generators.
-- Wrote ignored audit outputs under `data/audio/models/evaluations/t0123_sliding_window_pcm_candidate_audit/`.
-- Best positive recall row was `soft_peak_abs003`: `319/330` truth labels matched within `140 ms` (`96.7%`) with `319` expected-zero negative candidates.
-- Best sliding-window row was `sw_raw_abs030_r2_z4`: `318/330` within `140 ms` (`96.4%`) with `311` expected-zero negative candidates.
-- Current fixed peak reference `current_peak_abs008` was `288/330` within `140 ms` (`87.3%`) with `294` expected-zero negative candidates.
-- On the critical T0119/T0121 speaking/counting miss case, current fixed peak found `0/30`, while soft peak and high-pass sliding-window variants found `30/30`.
-- Conclusion: sliding-window/soft PCM candidate generation is promising as a recovery layer, but not as a standalone counter because expected-zero candidate load is still high. The next ticket should pair recovered candidates with a classifier/veto before any app/runtime promotion.
+- Added `evaluate_t0124_sliding_window_full_flow_replay.py`, an offline evaluator that runs candidate timestamps through live clip extraction, Fable features/model, exported T0104E ExtraTrees JSON, threshold/noise-veto, and smart dedupe.
+- Wrote ignored outputs under `data/audio/models/evaluations/t0124_sliding_window_full_flow_replay/`.
+- Under the current favored diagnostic setting `p=0.25`, Fable-noise veto `0.98`, and dedupe `180 ms`, best sliding-window row `sw_raw_abs030_r2_z4` scored `288/330` true positives (`87.3%`) with `3` expected-zero negative false counts and `3` positive unmatched counts.
+- The current peak reference `current_peak_abs008` scored `271/330` true positives (`82.1%`) with the same `3` expected-zero negative false counts and `1` positive unmatched count.
+- The softer peak row `soft_peak_abs003` scored `285/330` true positives (`86.4%`) with `4` expected-zero negative false counts.
+- On the critical T0119 speaking/counting clip, current peak produced only `1` candidate and counted `0/30`; soft peak counted `13/30`; the best raw sliding row counted `10/30`. This means recovered timestamps help, but the existing T0104E/Fable decision layer still rejects many hard bounces.
+- Conclusion: replacing the peak picker with sliding-window candidates is promising in full-flow replay, but it is not ready for app promotion without a stronger second-layer/veto or policy tuning because negative false counts remain and T0119 recall is still weak.
 
 ## Validation
 
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0123_sliding_window_pcm_candidate_audit.py`
-- `python skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0123_sliding_window_pcm_candidate_audit.py`
+- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0124_sliding_window_full_flow_replay.py`
+- `python skills/pingis-audio-classification/scripts/noise_robust/evaluate_t0124_sliding_window_full_flow_replay.py`
 - `npm run validate`
 - `git diff --check` passed with existing LF/CRLF warnings only.
