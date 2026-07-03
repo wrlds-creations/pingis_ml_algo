@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0127-bounce-audio-soft-peak-test-option`
+`T0129-hybrid-hard-negative-veto-model`
 
 ## Branch
 
@@ -18,15 +18,14 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Add a guarded `Bounce audio test` runtime option that keeps the current T0104E classifier stack but lowers only the peak-candidate absolute floor from `0.08` to `0.03`, so Love can test whether the measured `soft_peak_abs003` recovery helps on real phones.
+Train and evaluate a learned hard-negative veto that runs only after the existing STIGA `Hybrid` bounce detector has already accepted a clip. Keep the existing Hybrid detector unchanged, and replace the failed hand-written `band_energy_mid` Hybrid 2.0 veto with a learned `hard_positive` / `hard_negative` model if grouped validation shows it preserves bounce recall while removing hard false positives.
 
 ## Dependencies
 
-- T0121 showed the failed calibrated transient phone run is partly candidate-gate limited and partly second-layer limited.
-- T0122 restored failed adaptive/transient/calibrated app experiments out of the worktree.
-- T0123 showed `soft_peak_abs003` can recover most missed true bounces but should not be counted directly.
-- T0124/T0125 showed soft peak plus existing T0104E improves full-flow recall compared with current peak while still leaving second-layer misses.
-- T0126 showed removing T0104E and using Fable probability alone is not the best current architecture.
+- T0127 made soft peak available for app-side candidate generation tests.
+- STIGA `Hybrid` currently works better on the user's Android/iPhone tests than the failed `Hybrid 2.0` hand rule.
+- The failed `Hybrid 2.0` rule used a direct `band_energy_mid` threshold and rejected real bounces in live testing.
+- The latest hard-negative dataset contains racket handling, talking/counting, floor/table/other impacts, background noise, and recent multi-phone positives.
 
 ## Allowed Areas
 
@@ -35,71 +34,64 @@ Add a guarded `Bounce audio test` runtime option that keeps the current T0104E c
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
-- `apps/collector/src/bounceAudioTestEngine.ts`
-- `apps/collector/src/BounceAudioTestScreen.tsx`
-- `apps/collector/src/NativeAudioStream.ts`
-- `apps/collector/android/app/src/main/java/com/collectorapp/AudioStreamModule.kt`
+- `skills/pingis-audio-classification/scripts/noise_robust/`
+- `data/audio/models/evaluations/t0129_hybrid_hard_negative_veto_model/` as ignored local evaluation output
+- If validation is acceptable, `C:\Development\Wrlds\android\stiga-app-v2` files needed to port the learned veto into the guarded `Hybrid 2.0` test option
 
 ## Do Not Touch
 
 - Do not delete raw/generated `data/`.
 - Do not merge to `main`.
-- Do not push unless explicitly requested.
-- Do not delete local or device data.
-- Do not replace or promote production Fable/studs/camera behavior.
-- Do not move raw/generated data into git.
-- Do not train or export a new model.
-- Do not change model JSON files.
-- Do not change the production/default `Fable-algoritm`, `Studsdetektor`, `Studs FH/BH LIVE`, or camera behavior.
+- Do not replace the current working STIGA `Hybrid` mode.
+- Do not add a direct `band_energy_mid` or other single-feature hard-coded veto.
+- Do not promote the learned veto to production/default behavior before phone validation.
+- Do not change camera/rubber-side behavior.
+- Do not use cloud APIs or AWS.
 
 ## Requirements
 
-- Add a new selector option in `Bounce audio test`, tentatively `T0104E Soft`.
-- Keep the existing fixed `T0104E` option available for A/B comparison.
-- Use the same T0104E JSON, Fable feature extraction, threshold/noise-veto, decision delay, and smart dedupe.
-- For the soft option, use native peak gate settings matching the measured soft peak row:
-  - raw absolute envelope;
-  - smoothing `3 ms`;
-  - min gap `220 ms`;
-  - background window `500 ms`;
-  - background exclusion `60 ms`;
-  - absolute minimum `0.03`;
-  - ratio minimum `2.0`;
-  - z minimum `0.0`.
-- Make `T0104E Soft` the default diagnostic option for the next phone test.
-- Show the active gate/floor in the UI and save it in `bounce_audio_test_debug` JSON.
-- Keep `RMS+Fable` comparison behavior unchanged.
+- Train the new layer only on rows that the existing STIGA `Hybrid` stack would accept.
+- Use available app-portable inputs:
+  - existing 62 RF audio features from the clip;
+  - existing binary contact RF probabilities/confidence;
+  - existing 4-class surface RF probabilities/confidence.
+- Export a compact JSON model that can run in the STIGA app without Python/sklearn.
+- Evaluate with grouped out-of-fold validation so one recording/session does not train and test on itself.
+- Report comparison against plain Hybrid:
+  - Hybrid true-positive count and false-positive count after app-style dedupe;
+  - learned-veto true-positive count and false-positive count after app-style dedupe;
+  - false-positive reduction by hard-negative bucket;
+  - true-positive losses by positive bucket.
+- Port only if the learned veto is clearly better than the failed hand rule and does not materially break normal/far/fast/background bounce positives.
 
 ## Non-Goals
 
-- No model export/retrain.
-- No production/default Fable, studs, or camera behavior change.
-- No cloud/API/AWS changes.
-- No deletion of local analysis/audio files.
-- No claim that this is production-ready before phone validation.
+- No new peak picker, sliding-window, or candidate-generation change.
+- No replacement of the existing Hybrid detector.
+- No native app release promotion.
+- No new raw data collection requirement for this ticket.
 
 ## Acceptance Criteria
 
-- `Bounce audio test` shows a selectable `T0104E Soft` option.
-- Starting that option passes the soft peak gate parameters to native audio streaming.
-- Debug JSON records the selected model, runtime config, and active soft peak gate config.
-- TypeScript validation, Android/Kotlin validation, root validation, and `git diff --check` pass or blockers are documented.
+- A reproducible training/evaluation script exists for the learned Hybrid hard-negative veto.
+- The script exports a small portable model JSON and report under the ignored T0129 evaluation folder.
+- If the metrics are acceptable, STIGA `Hybrid 2.0` uses the learned veto behind existing `Hybrid`, while plain `Hybrid` remains unchanged.
+- Validation commands are run where practical, or blockers are documented.
 
 ## Completion Notes
 
-- Added `T0104E Soft` as a separate default option in `Bounce audio test`.
-- The soft option keeps the same T0104E model JSON, Fable-derived feature stack, typed defaults `p=0.25` and Fable-noise veto `0.98`, `500 ms` decision delay, and smart dedupe.
-- The only algorithmic runtime difference is native peak gate absolute floor `0.03` instead of the fixed `0.08`, matching the offline `soft_peak_abs003` row.
-- Fixed `T0104E`, old `T0103`, and `RMS+Fable` remain selectable for A/B comparison.
-- The model selector now wraps into two rows so four options fit on phone screens.
-- Saved `bounce_audio_test_debug` JSON records the active peak gate config, and native candidate debug rows report `gate_id=peak_fast_soft_abs003` when the soft floor is active.
-- No model JSON, production Fable/studs/camera behavior, raw/generated data, merge, push, or production promotion changed.
-- Quick debug/Metro install passed on connected Android `EHT0219B01004275`; package `lastUpdateTime=2026-07-03 00:17:00`, app PID `12134`.
+- Added `skills/pingis-audio-classification/scripts/noise_robust/train_t0129_hybrid_hard_negative_veto.py`.
+- The trainer avoids sklearn and fits a portable `logistic_binary_v1` hard-positive / hard-negative model with numpy.
+- Training rows are only rows accepted by the existing STIGA Hybrid stack.
+- Inputs are app-portable: the existing 62 RF audio features, binary contact RF probabilities/confidence, and 4-class surface RF probabilities/confidence.
+- Grouped out-of-fold validation by `domain_session_id` selected negative weight `1.5`, L2 `0.002`, and hard-positive threshold `0.45`.
+- Plain Hybrid after dedupe scored TP/FP `1518/791`.
+- Learned post-Hybrid veto after dedupe scored TP/FP `1493/37`, losing `25` true positives while removing `754` false positives.
+- Exported ignored local artifacts under `data/audio/models/evaluations/t0129_hybrid_hard_negative_veto_model/`.
+- Ported the exported JSON into the guarded STIGA `Hybrid 2.0` QA option on sibling branch `codex/t0419-studsboll-learned-hybrid-veto`.
+- Plain STIGA `Hybrid` remains unchanged.
 
 ## Validation
 
-- `cd apps/collector && npx tsc --noEmit`
-- `cd apps/collector/android && .\gradlew.bat :app:compileDebugKotlin --no-daemon --console plain`
-- `npm run validate`
-- `git diff --check` passed with existing LF/CRLF warnings only.
-- `.\install-android-dev.ps1`
+- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/train_t0129_hybrid_hard_negative_veto.py`
+- `python skills/pingis-audio-classification/scripts/noise_robust/train_t0129_hybrid_hard_negative_veto.py`
