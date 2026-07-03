@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0129-hybrid-hard-negative-veto-model`
+`T0130-pcen-hybrid-post-filter-audit`
 
 ## Branch
 
@@ -18,14 +18,13 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Train and evaluate a learned hard-negative veto that runs only after the existing STIGA `Hybrid` bounce detector has already accepted a clip. Keep the existing Hybrid detector unchanged, and replace the failed hand-written `band_energy_mid` Hybrid 2.0 veto with a learned `hard_positive` / `hard_negative` model if grouped validation shows it preserves bounce recall while removing hard false positives.
+Evaluate whether PCEN-derived audio features can create a safer post-Hybrid hard-negative filter for the STIGA `Hybrid 2.0` QA path. Keep the existing STIGA `Hybrid` detector unchanged, and do not port another live veto until the offline evidence is strong enough to justify phone testing.
 
 ## Dependencies
 
-- T0127 made soft peak available for app-side candidate generation tests.
-- STIGA `Hybrid` currently works better on the user's Android/iPhone tests than the failed `Hybrid 2.0` hand rule.
-- The failed `Hybrid 2.0` rule used a direct `band_energy_mid` threshold and rejected real bounces in live testing.
-- The latest hard-negative dataset contains racket handling, talking/counting, floor/table/other impacts, background noise, and recent multi-phone positives.
+- T0129 trained a learned post-Hybrid hard-negative veto, but live phone testing showed it was too strict: Hybrid 2.0 saw candidates yet dropped most clear bounces.
+- The candidate row dataset already contains noise-robust/PCEN-style columns such as `feat_nr_pcen_max`, `feat_nr_pcen_mean`, and `feat_nr_pcen_std`.
+- Plain STIGA `Hybrid` is currently the recall baseline because it worked best across the user's Android/iPhone checks.
 
 ## Allowed Areas
 
@@ -35,63 +34,64 @@ Train and evaluate a learned hard-negative veto that runs only after the existin
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
 - `skills/pingis-audio-classification/scripts/noise_robust/`
-- `data/audio/models/evaluations/t0129_hybrid_hard_negative_veto_model/` as ignored local evaluation output
-- If validation is acceptable, `C:\Development\Wrlds\android\stiga-app-v2` files needed to port the learned veto into the guarded `Hybrid 2.0` test option
+- `data/audio/models/evaluations/t0130_pcen_hybrid_post_filter/` as ignored local evaluation output
 
 ## Do Not Touch
 
 - Do not delete raw/generated `data/`.
 - Do not merge to `main`.
 - Do not replace the current working STIGA `Hybrid` mode.
-- Do not add a direct `band_energy_mid` or other single-feature hard-coded veto.
-- Do not promote the learned veto to production/default behavior before phone validation.
+- Do not port a new veto to `stiga-app-v2` unless the offline result is clearly worth a phone test.
+- Do not add a single-feature hard-coded veto.
 - Do not change camera/rubber-side behavior.
 - Do not use cloud APIs or AWS.
 
 ## Requirements
 
-- Train the new layer only on rows that the existing STIGA `Hybrid` stack would accept.
-- Use available app-portable inputs:
-  - existing 62 RF audio features from the clip;
-  - existing binary contact RF probabilities/confidence;
-  - existing 4-class surface RF probabilities/confidence.
-- Export a compact JSON model that can run in the STIGA app without Python/sklearn.
-- Evaluate with grouped out-of-fold validation so one recording/session does not train and test on itself.
-- Report comparison against plain Hybrid:
-  - Hybrid true-positive count and false-positive count after app-style dedupe;
-  - learned-veto true-positive count and false-positive count after app-style dedupe;
-  - false-positive reduction by hard-negative bucket;
-  - true-positive losses by positive bucket.
-- Port only if the learned veto is clearly better than the failed hand rule and does not materially break normal/far/fast/background bounce positives.
+- Train/evaluate only on rows that the existing STIGA `Hybrid` stack would accept.
+- Compare at least:
+  - T0129-style RF/probability feature baseline;
+  - PCEN-only features;
+  - RF/probability features plus PCEN features;
+  - broader noise-robust PCEN/transient/spectral feature groups if present in the row CSV.
+- Use grouped out-of-fold validation by session/domain.
+- Report plain Hybrid TP/FP and candidate post-filter TP/FP after app-style dedupe.
+- Prefer a high-recall veto setting: almost never reject true bounces offline, even if it removes fewer false positives.
+- Export a local JSON only if a PCEN variant is worth future app QA.
 
 ## Non-Goals
 
-- No new peak picker, sliding-window, or candidate-generation change.
-- No replacement of the existing Hybrid detector.
-- No native app release promotion.
-- No new raw data collection requirement for this ticket.
+- No new peak picker or candidate-generation change.
+- No replacement of existing Hybrid.
+- No Android/iOS/TestFlight build.
+- No model promotion into production/default app behavior.
 
 ## Acceptance Criteria
 
-- A reproducible training/evaluation script exists for the learned Hybrid hard-negative veto.
-- The script exports a small portable model JSON and report under the ignored T0129 evaluation folder.
-- If the metrics are acceptable, STIGA `Hybrid 2.0` uses the learned veto behind existing `Hybrid`, while plain `Hybrid` remains unchanged.
-- Validation commands are run where practical, or blockers are documented.
+- A reproducible PCEN post-filter audit script exists.
+- The script writes a report comparing PCEN variants against plain Hybrid and the T0129 feature baseline.
+- The report states whether PCEN is worth porting to STIGA for another Hybrid 2.0 phone test.
+- Source-of-truth docs are updated with the conclusion.
 
 ## Completion Notes
 
-- Added `skills/pingis-audio-classification/scripts/noise_robust/train_t0129_hybrid_hard_negative_veto.py`.
-- The trainer avoids sklearn and fits a portable `logistic_binary_v1` hard-positive / hard-negative model with numpy.
-- Training rows are only rows accepted by the existing STIGA Hybrid stack.
-- Inputs are app-portable: the existing 62 RF audio features, binary contact RF probabilities/confidence, and 4-class surface RF probabilities/confidence.
-- Grouped out-of-fold validation by `domain_session_id` selected negative weight `1.5`, L2 `0.002`, and hard-positive threshold `0.45`.
-- Plain Hybrid after dedupe scored TP/FP `1518/791`.
-- Learned post-Hybrid veto after dedupe scored TP/FP `1493/37`, losing `25` true positives while removing `754` false positives.
-- Exported ignored local artifacts under `data/audio/models/evaluations/t0129_hybrid_hard_negative_veto_model/`.
-- Ported the exported JSON into the guarded STIGA `Hybrid 2.0` QA option on sibling branch `codex/t0419-studsboll-learned-hybrid-veto`.
-- Plain STIGA `Hybrid` remains unchanged.
+- Added `train_t0130_pcen_hybrid_post_filter.py`.
+- Ran grouped OOF sweeps on Hybrid-accepted rows for:
+  - T0129-style RF/probability baseline;
+  - PCEN-only;
+  - PCEN context/noise-robust features;
+  - RF/probability plus PCEN;
+  - RF/probability plus PCEN plus transient/spectral columns.
+- Plain Hybrid baseline after dedupe: `1518` TP / `791` FP.
+- PCEN-only kept all true positives but removed only `9` false positives.
+- PCEN context kept all true positives but removed only `5` false positives.
+- Best offline row was `rf_prob_plus_pcen_transient_spectral`: `1515` TP / `190` FP, losing `3` true positives and removing `601` false positives.
+- That best row depends on `td_*` and `sp_*` transient/spectral columns that the current STIGA runtime does not compute, so the exported ignored JSON is not a safe drop-in app port.
+- Recommendation: do not port T0130 directly. Next ticket should either implement/parity-test the missing transient/spectral feature extractor in STIGA, or test a gentler already-portable RF/probability post-filter as a guarded comparison.
 
 ## Validation
 
-- `python -m py_compile skills/pingis-audio-classification/scripts/noise_robust/train_t0129_hybrid_hard_negative_veto.py`
-- `python skills/pingis-audio-classification/scripts/noise_robust/train_t0129_hybrid_hard_negative_veto.py`
+- `python -m py_compile skills\pingis-audio-classification\scripts\noise_robust\train_t0130_pcen_hybrid_post_filter.py`
+- `python skills\pingis-audio-classification\scripts\noise_robust\train_t0130_pcen_hybrid_post_filter.py`
+- `git diff --check`
+- `npm run validate`
