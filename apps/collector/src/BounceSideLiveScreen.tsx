@@ -1,9 +1,10 @@
 /**
  * Studs FH/BH LIVE
  *
- * Camera starts immediately for aiming. The visible racket tracker draws a box
- * continuously; START only starts the audio bounce counter. Fable audio remains
- * the bounce trigger, and the tracker color decides FH/BH when it is fresh.
+ * Camera starts immediately for aiming. START only starts the audio bounce
+ * counter. The original and v2 modes use the continuous racket tracker for
+ * side decisions; v3 keeps tracker metadata for debug but decides side from the
+ * wrist-crop model.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -33,11 +34,19 @@ import {
   BOUNCE_SIDE_MODEL_VERSION,
 } from './bounceSideInference';
 import { detectAudioContact } from './audioContactEngine';
+import { getAudioDetectionConfig } from './audioDetectionConfig';
 import type { PlayerSetup } from './types';
 
 const ONSET_THRESHOLD = 0.005;
 const RETRIGGER_MS = 120;
 const ABS_MIN_RMS = 0.0015;
+const HYBRID_AUDIO_CONFIG = getAudioDetectionConfig('normal', 'hybrid');
+const HYBRID_ONSET_THRESHOLD = HYBRID_AUDIO_CONFIG.onset_threshold;
+const HYBRID_RETRIGGER_MS = 220;
+const HYBRID_ABS_MIN_RMS = ABS_MIN_RMS;
+const HYBRID_CONTACT_THRESHOLD = HYBRID_AUDIO_CONFIG.contact_confidence_min;
+const HYBRID_SURFACE_VETO_CONFIDENCE = HYBRID_AUDIO_CONFIG.surface_veto_confidence ?? 0.75;
+const HYBRID_DEDUP_MS = HYBRID_AUDIO_CONFIG.merge_window_ms;
 const HYBRID22_ONSET_THRESHOLD = 0.005;
 const HYBRID22_RETRIGGER_MS = 220;
 const HYBRID22_ABS_MIN_RMS = 0.003;
@@ -56,7 +65,8 @@ const TRACKER_VERSION = 'color_shape_tracker_v3_2026_06_26';
 
 type LiveSide = 'forehand' | 'backhand' | 'uncertain';
 type ForehandColor = 'red' | 'black';
-type AudioTriggerMode = 'fable' | 'hybrid22';
+type AudioTriggerMode = 'fable' | 'hybrid' | 'hybrid22';
+type SideDecisionMode = 'tracker' | 'wrist_crop';
 
 interface LiveDebugEvent {
   onset_time_ms: number;
@@ -121,6 +131,7 @@ interface Props {
   setup: PlayerSetup;
   onDone: () => void;
   audioTriggerMode?: AudioTriggerMode;
+  sideDecisionMode?: SideDecisionMode;
 }
 
 function parseNativeEvent(event: NativeAudioBounceEvent): {
@@ -186,9 +197,17 @@ function visibleTrack(track: BounceSideRacketTrack | null): BounceSideRacketTrac
   return track;
 }
 
-export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable' }: Props) {
+export function BounceSideLiveScreen({
+  setup,
+  onDone,
+  audioTriggerMode = 'fable',
+  sideDecisionMode = 'tracker',
+}: Props) {
   const insets = useSafeAreaInsets();
+  const isHybrid = audioTriggerMode === 'hybrid';
   const isHybrid22 = audioTriggerMode === 'hybrid22';
+  const usesAudioContactEngine = isHybrid || isHybrid22;
+  const usesWristCropSide = sideDecisionMode === 'wrist_crop';
   const [isRunning, setIsRunning] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraViewReady, setCameraViewReady] = useState(false);
@@ -198,6 +217,7 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
   const [lastSide, setLastSide] = useState<{ side: LiveSide; confidence: number; source: string } | null>(null);
   const [latestTrack, setLatestTrack] = useState<BounceSideRacketTrack | null>(null);
   const [forehandColor, setForehandColor] = useState<ForehandColor>('red');
+  const [audioOnlyMode, setAudioOnlyMode] = useState(false);
   const [statusText, setStatusText] = useState('Startar kamera...');
 
   const counterRef = useRef(new FableCounter({ loudBgDb: -36, loudConfidence: 0.85 }));
@@ -219,6 +239,8 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
       model: BOUNCE_SIDE_MODEL_VERSION,
       tracker: TRACKER_VERSION,
       audio_trigger_mode: audioTriggerMode,
+      side_decision_mode: sideDecisionMode,
+      audio_only_count_mode: audioOnlyMode,
       audio_trigger_config: isHybrid22 ? {
         contact_threshold: HYBRID22_CONTACT_THRESHOLD,
         surface_veto_confidence: HYBRID22_SURFACE_VETO_CONFIDENCE,
@@ -232,6 +254,18 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
           mode: 'broadband',
           spectral_gate: true,
           abs_min_rms: HYBRID22_ABS_MIN_RMS,
+        },
+      } : isHybrid ? {
+        detection_mode: 'hybrid',
+        contact_threshold: HYBRID_CONTACT_THRESHOLD,
+        surface_veto_confidence: HYBRID_SURFACE_VETO_CONFIDENCE,
+        dedup_ms: HYBRID_DEDUP_MS,
+        native_gate: {
+          onset_threshold: HYBRID_ONSET_THRESHOLD,
+          retrigger_ms: HYBRID_RETRIGGER_MS,
+          mode: 'bandpass',
+          spectral_gate: false,
+          abs_min_rms: HYBRID_ABS_MIN_RMS,
         },
       } : {
         onset_threshold: ONSET_THRESHOLD,
@@ -250,10 +284,13 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
       .catch(() => {});
     debugEventsRef.current = [];
     audioCandidatesRef.current = [];
-  }, [audioTriggerMode, isHybrid22, setup]);
+  }, [audioOnlyMode, audioTriggerMode, isHybrid, isHybrid22, setup, sideDecisionMode]);
 
   const startCameraForAiming = useCallback(async () => {
-    if (cameraStartedRef.current) return true;
+    if (cameraStartedRef.current) {
+      setCameraReady(true);
+      return true;
+    }
     if (!cameraViewReadyRef.current) {
       setStatusText('Startar kameravy...');
       return false;
@@ -271,6 +308,19 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
     setStatusText('Rikta kameran sa att racketen syns. Tryck STARTA nar du vill rakna.');
     return true;
   }, []);
+
+  const stopCameraPreview = useCallback(() => {
+    void BounceSideLive.stopCamera().catch(() => {});
+    cameraStartedRef.current = false;
+    setCameraReady(false);
+  }, []);
+
+  const restartCameraForAiming = useCallback(async () => {
+    await BounceSideLive.stopCamera().catch(() => {});
+    cameraStartedRef.current = false;
+    setCameraReady(false);
+    return startCameraForAiming();
+  }, [startCameraForAiming]);
 
   const stopCounting = useCallback((message = 'Stoppad. Kameran ar kvar for riktning.') => {
     AudioStream.stopStreaming();
@@ -302,7 +352,7 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
             return;
           }
         }
-        const cameraOk = await startCameraForAiming();
+        const cameraOk = audioOnlyMode ? true : await startCameraForAiming();
         if (!cameraOk) return;
         counterRef.current.reset();
         debugEventsRef.current = [];
@@ -312,29 +362,41 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
         setBhCount(0);
         setUncertainCount(0);
         setLastSide(null);
-        await AudioStream.startStreaming(isHybrid22 ? HYBRID22_ONSET_THRESHOLD : ONSET_THRESHOLD);
-        await AudioStream.setRetriggerMs(isHybrid22 ? HYBRID22_RETRIGGER_MS : RETRIGGER_MS);
+        await AudioStream.startStreaming(
+          isHybrid22 ? HYBRID22_ONSET_THRESHOLD : isHybrid ? HYBRID_ONSET_THRESHOLD : ONSET_THRESHOLD,
+        );
+        await AudioStream.setRetriggerMs(
+          isHybrid22 ? HYBRID22_RETRIGGER_MS : isHybrid ? HYBRID_RETRIGGER_MS : RETRIGGER_MS,
+        );
         if (isHybrid22) {
           await AudioStream.setGateConfig('broadband', true, HYBRID22_ABS_MIN_RMS);
+        } else if (isHybrid) {
+          await AudioStream.setGateConfig('bandpass', false, HYBRID_ABS_MIN_RMS);
         } else {
           await AudioStream.setGateConfig('bandpass', false, ABS_MIN_RMS);
         }
         setIsRunning(true);
-        setStatusText(isHybrid22
-          ? 'Hybrid 2.2 lyssnar och kameran avgor FH/BH. Studsa bollen pa racketen!'
-          : 'Lyssnar och tittar. Studsa bollen pa racketen!');
+        setStatusText(audioOnlyMode
+          ? 'Endast ljud: godkanda ljudstudsar raknas som OSAKER.'
+          : isHybrid22
+            ? (usesWristCropSide
+                ? 'Hybrid 2.2 lyssnar. FH/BH avgors med handledscrop efter varje studs.'
+                : 'Hybrid 2.2 lyssnar och kameran avgor FH/BH. Studsa bollen pa racketen!')
+            : isHybrid
+              ? 'Hybrid lyssnar. FH/BH avgors med handledscrop efter varje studs.'
+              : 'Lyssnar och tittar. Studsa bollen pa racketen!');
       } catch (error) {
         setStatusText(`Kunde inte starta: ${String((error as Error)?.message ?? error)}`);
       }
     })();
-  }, [isHybrid22, isRunning, startCameraForAiming, stopCounting]);
+  }, [audioOnlyMode, isHybrid, isHybrid22, isRunning, startCameraForAiming, stopCounting, usesWristCropSide]);
 
   useEffect(() => {
-    if (!cameraViewReady) return;
+    if (!cameraViewReady || audioOnlyMode) return;
     void startCameraForAiming().catch(error => {
       setStatusText(`Kunde inte starta kamera: ${String((error as Error)?.message ?? error)}`);
     });
-  }, [cameraViewReady, startCameraForAiming]);
+  }, [audioOnlyMode, cameraViewReady, startCameraForAiming]);
 
   useEffect(() => {
     return () => {
@@ -361,15 +423,21 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
           const onsetTimeMs = nativeDebug?.onset_time_ms ?? Date.now();
           const frameRms = nativeDebug?.rms ?? 0;
           const pcm = decodeBase64PCM(audioB64);
-          const audioDecision = isHybrid22 ? (() => {
+          const audioDecision = usesAudioContactEngine ? (() => {
+            const contactThreshold = isHybrid22 ? HYBRID22_CONTACT_THRESHOLD : HYBRID_CONTACT_THRESHOLD;
+            const surfaceVetoConfidence = isHybrid22
+              ? HYBRID22_SURFACE_VETO_CONFIDENCE
+              : HYBRID_SURFACE_VETO_CONFIDENCE;
+            const dedupMs = isHybrid22 ? HYBRID22_DEDUP_MS : HYBRID_DEDUP_MS;
             const decision = detectAudioContact({
               detectedAtMs: onsetTimeMs,
               pcm,
-              confidenceThreshold: HYBRID22_CONTACT_THRESHOLD,
-              dedupMs: HYBRID22_DEDUP_MS,
+              confidenceThreshold: contactThreshold,
+              dedupMs,
               lastQualifiedTsMs: hybridLastQualifiedTsRef.current,
-              surfaceVetoConfidence: HYBRID22_SURFACE_VETO_CONFIDENCE,
-              detectionMode: 'hybrid22',
+              surfaceVetoConfidence,
+              detectionMode: audioTriggerMode === 'hybrid22' ? 'hybrid22' : 'hybrid',
+              config: audioTriggerMode === 'hybrid' ? HYBRID_AUDIO_CONFIG : undefined,
               hybrid22ContactThreshold: HYBRID22_CONTACT_THRESHOLD,
               hybrid22VetoThreshold: HYBRID22_VETO_THRESHOLD,
               hybrid22VetoBypassEnabled: HYBRID22_VETO_BYPASS_ENABLED,
@@ -429,8 +497,92 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
           }
           if (!audioDecision.counted) return;
 
+          if (audioOnlyMode) {
+            const track = lostTrack();
+            const resolved = {
+              side: 'uncertain' as LiveSide,
+              confidence: audioDecision.confidence ?? 0,
+              decisionSource: 'audio_only',
+            };
+            setUncertainCount(n => n + 1);
+            setLastSide({ side: resolved.side, confidence: resolved.confidence, source: resolved.decisionSource });
+
+            if (debugEventsRef.current.length < 300) {
+              debugEventsRef.current.push({
+                onset_time_ms: onsetTimeMs,
+                side: resolved.side,
+                confidence: resolved.confidence,
+                decision_source: resolved.decisionSource,
+                tracker_version: TRACKER_VERSION,
+                track_tracked: track.tracked,
+                track_label: track.label,
+                track_color: track.color,
+                track_confidence: track.confidence,
+                track_source: track.source,
+                track_frame_delay_ms: track.frame_delay_ms,
+                track_x: track.x,
+                track_y: track.y,
+                track_width: track.width,
+                track_height: track.height,
+                track_red_score: track.red_score,
+                track_dark_score: track.dark_score,
+                track_area_ratio: track.area_ratio,
+                track_fill_ratio: track.fill_ratio,
+                audio_label: audioDecision.label ?? 'unknown',
+                audio_confidence: audioDecision.confidence ?? 0,
+                audio_contact_threshold: audioDecision.contactThreshold,
+                audio_surface_label: audioDecision.surfaceLabel,
+                audio_surface_confidence: audioDecision.surfaceConfidence,
+                audio_hybrid_veto_probability: audioDecision.hybridVetoProbability,
+                audio_hybrid_veto_threshold: audioDecision.hybridVetoThreshold,
+                audio_hybrid_veto_bypassed: audioDecision.hybridVetoBypassed,
+                audio_hybrid_veto_bypass_threshold: audioDecision.hybridVetoBypassThreshold,
+              });
+            }
+            return;
+          }
+
           const track = await BounceSideLive.getRacketTrack(onsetTimeMs).catch(() => lostTrack());
-          const resolved = resolveTrackSide(track, forehandColorRef.current);
+          let resolved = resolveTrackSide(track, forehandColorRef.current);
+          const cropDebug: Partial<LiveDebugEvent> = {};
+
+          try {
+            const crop = await BounceSideLive.captureCrop(onsetTimeMs);
+            const binary = atob(crop.rgb_b64);
+            const rgb = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
+            const features = bounceSideFeatures(rgb, crop.roi_source);
+            const prediction = predictBounceSide(features);
+            const cropResolved = resolveBounceSide(
+              features,
+              prediction,
+              forehandColorRef.current,
+              SIDE_MIN_CONFIDENCE,
+            );
+            cropDebug.raw_side = cropResolved.rawLabel;
+            cropDebug.raw_confidence = cropResolved.rawConfidence;
+            cropDebug.probabilities = prediction.probabilities;
+            cropDebug.visible_color = cropResolved.visibleColor;
+            cropDebug.color_confidence = cropResolved.colorConfidence;
+            cropDebug.red_total = cropResolved.redTotal;
+            cropDebug.dark_total = cropResolved.darkTotal;
+            cropDebug.roi_source = crop.roi_source;
+            cropDebug.crop_frame_delay_ms = crop.frame_delay_ms;
+            cropDebug.rgb_b64 = crop.rgb_b64;
+            if (usesWristCropSide) {
+              resolved = {
+                side: cropResolved.side,
+                confidence: cropResolved.confidence,
+                decisionSource: `wrist_crop_${cropResolved.decisionSource}`,
+              };
+            }
+          } catch (error) {
+            cropDebug.crop_error = String((error as Error)?.message ?? error);
+            if (usesWristCropSide) {
+              resolved = { side: 'uncertain', confidence: 0, decisionSource: 'wrist_crop_error' };
+            }
+          }
+
           if (resolved.side === 'forehand') setFhCount(n => n + 1);
           else if (resolved.side === 'backhand') setBhCount(n => n + 1);
           else setUncertainCount(n => n + 1);
@@ -465,34 +617,8 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
             audio_hybrid_veto_threshold: audioDecision.hybridVetoThreshold,
             audio_hybrid_veto_bypassed: audioDecision.hybridVetoBypassed,
             audio_hybrid_veto_bypass_threshold: audioDecision.hybridVetoBypassThreshold,
+            ...cropDebug,
           };
-
-          try {
-            const crop = await BounceSideLive.captureCrop(onsetTimeMs);
-            const binary = atob(crop.rgb_b64);
-            const rgb = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
-            const features = bounceSideFeatures(rgb, crop.roi_source);
-            const prediction = predictBounceSide(features);
-            const cropResolved = resolveBounceSide(
-              features,
-              prediction,
-              forehandColorRef.current,
-              SIDE_MIN_CONFIDENCE,
-            );
-            debugEvent.raw_side = cropResolved.rawLabel;
-            debugEvent.raw_confidence = cropResolved.rawConfidence;
-            debugEvent.probabilities = prediction.probabilities;
-            debugEvent.visible_color = cropResolved.visibleColor;
-            debugEvent.color_confidence = cropResolved.colorConfidence;
-            debugEvent.red_total = cropResolved.redTotal;
-            debugEvent.dark_total = cropResolved.darkTotal;
-            debugEvent.roi_source = crop.roi_source;
-            debugEvent.crop_frame_delay_ms = crop.frame_delay_ms;
-            debugEvent.rgb_b64 = crop.rgb_b64;
-          } catch (error) {
-            debugEvent.crop_error = String((error as Error)?.message ?? error);
-          }
 
           if (debugEventsRef.current.length < 300) {
             debugEventsRef.current.push(debugEvent);
@@ -504,9 +630,10 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
     });
 
     return () => sub.remove();
-  }, [isHybrid22, isRunning]);
+  }, [audioOnlyMode, audioTriggerMode, isHybrid22, isRunning, usesAudioContactEngine, usesWristCropSide]);
 
-  const shownTrack = visibleTrack(latestTrack);
+  const shouldShowTrackerOverlay = !usesWristCropSide;
+  const shownTrack = shouldShowTrackerOverlay ? visibleTrack(latestTrack) : null;
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
@@ -515,9 +642,19 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
         <TouchableOpacity onPress={() => { stopAll(); onDone(); }}>
           <Text style={styles.back}>{'<'} Tillbaka</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>{isHybrid22 ? 'Studs FH/BH LIVE v2' : 'Studs FH/BH LIVE'}</Text>
+        <Text style={styles.title}>
+          {isHybrid22
+            ? (usesWristCropSide ? 'Studs FH/BH LIVE v3' : 'Studs FH/BH LIVE v2')
+            : isHybrid && usesWristCropSide
+              ? 'Studs FH/BH LIVE v4'
+              : 'Studs FH/BH LIVE'}
+        </Text>
         <Text style={styles.subtitle}>
-          {isHybrid22 ? `Hybrid 2.2 audio + ${TRACKER_VERSION}` : TRACKER_VERSION}
+          {isHybrid22
+            ? (usesWristCropSide ? 'Hybrid 2.2 audio + wrist crop side' : `Hybrid 2.2 audio + ${TRACKER_VERSION}`)
+            : isHybrid && usesWristCropSide
+              ? 'Hybrid audio + wrist crop side'
+            : TRACKER_VERSION}
         </Text>
       </View>
 
@@ -530,28 +667,30 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
             setCameraViewReady(true);
           }}
         />
-        {shownTrack ? (
-          <View
-            pointerEvents="none"
-            style={[
-              styles.trackBox,
-              {
-                left: `${shownTrack.x * 100}%`,
-                top: `${shownTrack.y * 100}%`,
-                width: `${shownTrack.width * 100}%`,
-                height: `${shownTrack.height * 100}%`,
-              },
-            ]}
-          >
-            <Text style={styles.trackLabel} numberOfLines={1}>
-              {shownTrack.label} {(shownTrack.confidence * 100).toFixed(0)}%
-            </Text>
-          </View>
-        ) : (
-          <View pointerEvents="none" style={styles.trackerBadge}>
-            <Text style={styles.trackerBadgeText}>{cameraReady ? 'racket lost' : 'camera starting'}</Text>
-          </View>
-        )}
+        {shouldShowTrackerOverlay ? (
+          shownTrack ? (
+            <View
+              pointerEvents="none"
+              style={[
+                styles.trackBox,
+                {
+                  left: `${shownTrack.x * 100}%`,
+                  top: `${shownTrack.y * 100}%`,
+                  width: `${shownTrack.width * 100}%`,
+                  height: `${shownTrack.height * 100}%`,
+                },
+              ]}
+            >
+              <Text style={styles.trackLabel} numberOfLines={1}>
+                {shownTrack.label} {(shownTrack.confidence * 100).toFixed(0)}%
+              </Text>
+            </View>
+          ) : (
+            <View pointerEvents="none" style={styles.trackerBadge}>
+              <Text style={styles.trackerBadgeText}>{cameraReady ? 'racket lost' : 'camera starting'}</Text>
+            </View>
+          )
+        ) : null}
         {lastSide ? (
           <View style={[
             styles.sideBadge,
@@ -598,9 +737,49 @@ export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable'
       </View>
 
       <TouchableOpacity
-        style={[styles.toggle, isRunning ? styles.toggleStop : styles.toggleStart, !cameraReady && styles.toggleDisabled]}
+        style={[
+          styles.audioOnlyToggle,
+          audioOnlyMode && styles.audioOnlyToggleActive,
+          isRunning && styles.audioOnlyToggleDisabled,
+        ]}
+        onPress={() => {
+          if (!isRunning) {
+            setAudioOnlyMode(value => {
+              const nextValue = !value;
+              if (nextValue) {
+                stopCameraPreview();
+                setStatusText('Audio only: kameran anvands inte for rakning. Tryck STARTA.');
+              } else {
+                void restartCameraForAiming().catch(error => {
+                  setStatusText(`Kunde inte starta kamera: ${String((error as Error)?.message ?? error)}`);
+                });
+              }
+              return nextValue;
+            });
+          }
+        }}
+        disabled={isRunning}
+      >
+        <Text style={[styles.audioOnlyTitle, audioOnlyMode && styles.audioOnlyTitleActive]}>
+          {audioOnlyMode ? 'Audio only: ON' : 'Audio only: OFF'}
+        </Text>
+        <Text style={styles.audioOnlyHint}>
+          {isRunning
+            ? 'Stoppa for att andra'
+            : audioOnlyMode
+              ? 'Skippar kamera/FH-BH och raknar allt som OSAKER'
+              : 'Anvander kamera/FH-BH efter ljudstuds'}
+        </Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[
+          styles.toggle,
+          isRunning ? styles.toggleStop : styles.toggleStart,
+          !isRunning && !audioOnlyMode && !cameraReady && styles.toggleDisabled,
+        ]}
         onPress={toggle}
-        disabled={!cameraReady && !isRunning}
+        disabled={!isRunning && !audioOnlyMode && !cameraReady}
       >
         <Text style={styles.toggleText}>{isRunning ? 'STOPPA' : 'STARTA'}</Text>
       </TouchableOpacity>
@@ -664,6 +843,21 @@ const styles = StyleSheet.create({
   colorBtnActive: { borderColor: '#2ecc71', backgroundColor: '#12351f' },
   colorTxt: { color: '#888', fontSize: 13 },
   colorTxtActive: { color: '#fff', fontWeight: '700' },
+  audioOnlyToggle: {
+    marginHorizontal: 16,
+    marginTop: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+    backgroundColor: '#101010',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+  },
+  audioOnlyToggleActive: { borderColor: '#31f06a', backgroundColor: '#102b19' },
+  audioOnlyToggleDisabled: { opacity: 0.65 },
+  audioOnlyTitle: { color: '#aaa', fontSize: 14, fontWeight: '800' },
+  audioOnlyTitleActive: { color: '#31f06a' },
+  audioOnlyHint: { color: '#777', fontSize: 11, marginTop: 2 },
   toggle: { marginHorizontal: 24, marginVertical: 10, paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
   toggleStart: { backgroundColor: '#1d6f42' },
   toggleStop: { backgroundColor: '#8e2b2b' },

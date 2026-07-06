@@ -199,7 +199,9 @@ export function detectAudioContact({
     label: prediction.label as AudioDetectionEvent['label'],
     confidence: prediction.confidence,
     probabilities: prediction.probabilities,
-    contact_threshold: activeDetectionMode === 'hybrid22' ? activeConfidenceThreshold : undefined,
+    contact_threshold: activeDetectionMode === 'hybrid' || activeDetectionMode === 'hybrid22'
+      ? activeConfidenceThreshold
+      : undefined,
     surface_label: surfacePrediction.label as AudioDetectionEvent['surface_label'],
     surface_confidence: surfacePrediction.confidence,
     surface_probabilities: surfacePrediction.probabilities,

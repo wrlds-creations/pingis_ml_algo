@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0131-studs-fhbh-live-v2-hybrid22`
+`T0135-fix-fhbh-audio-only-camera-dependency`
 
 ## Branch
 
@@ -18,20 +18,12 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Add a separate collector UI entry named `Studs FH/BH LIVE v2` that keeps the current camera/rubber-side flow but uses the STIGA `Hybrid 2.2` bounce-audio setup as the sound trigger.
+Fix the `Studs FH/BH LIVE` audio-only toggle so audio-only mode truly starts from microphone/audio without requiring camera readiness, and so switching back to camera mode can recover the camera preview.
 
 ## Dependencies
 
-- The existing `Studs FH/BH LIVE` screen uses Fable audio as the bounce trigger and then uses the live racket color tracker for FH/BH side.
-- The STIGA app has a tested `Hybrid 2.2` audio path:
-  - PCM audio;
-  - adaptive RMS/spectral candidate gate;
-  - centered clip extraction;
-  - binary racket-contact RF;
-  - 4-class surface veto;
-  - T0129 learned hard-negative veto;
-  - Android defaults: contact `0.25`, veto `0.01`, bypass enabled at `0.61`, dedupe about `180-220 ms`.
-- The collector already contains the binary contact model, 4-class surface model, RF runtime, and audio feature extractor.
+- T0134 added the first audio-only comparison toggle.
+- Love reported that audio-only did not work and that toggling between on/off could leave the camera unable to recover.
 
 ## Allowed Areas
 
@@ -40,67 +32,48 @@ Add a separate collector UI entry named `Studs FH/BH LIVE v2` that keeps the cur
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
-- `apps/collector/App.tsx`
-- `apps/collector/src/SetupScreen.tsx`
 - `apps/collector/src/BounceSideLiveScreen.tsx`
-- `apps/collector/src/audioContactEngine.ts`
-- `apps/collector/src/types.ts`
-- `apps/collector/src/logisticRuntime.ts`
-- `apps/collector/src/models/hybrid_hard_negative_veto_t0129_logreg.json`
 
 ## Do Not Touch
 
-- Do not change the existing `Studs FH/BH LIVE` behavior.
-- Do not change camera/rubber-side native tracking unless required for the new audio route.
-- Do not replace `fable_audio_model.json`, `audio_model.json`, or `audio_contact_model.json`.
+- Do not change native Android camera/audio modules.
+- Do not retrain or replace any model JSON.
 - Do not change `Bounce audio test`.
+- Do not change STIGA app code.
 - Do not delete raw/generated `data/` or `raw/`.
 - Do not merge to `main`.
 - Do not use cloud APIs or AWS.
 
 ## Requirements
 
-- Add a new visible setup entry: `Studs FH/BH LIVE v2`.
-- Route v2 separately from the current `Studs FH/BH LIVE`.
-- Reuse the existing camera tracker and side counting behavior.
-- Use Hybrid 2.2-style audio decisions for v2:
-  - contact RF raw `racket_contact` probability threshold `0.25`;
-  - surface veto at confidence `0.75`;
-  - T0129 learned hard-negative veto threshold `0.01`;
-  - bypass learned veto when raw contact probability is greater than `0.61`;
-  - app-side dedupe/grouping around the STIGA defaults.
-- Native candidate gate should use the collector native RMS/spectral gate, not the old Fable bandpass-only setup.
-- Keep v1 Fable audio path unchanged.
-- Include useful debug metadata in v2 debug JSON candidates.
+- In audio-only mode, `STARTA` must not require `cameraReady`.
+- In audio-only mode, starting a run must not call `startCameraForAiming` before audio starts.
+- Switching audio-only off while not running should attempt to start/recover the camera preview.
+- If the native camera is already started but React state lost `cameraReady`, recover the state.
+- Preserve T0134 behavior: accepted audio bounces count immediately as `OSAKER`, skip tracker/crop side work, and save `decision_source=audio_only`.
 
 ## Non-Goals
 
-- No new model training.
-- No TestFlight or STIGA app changes.
-- No release APK unless requested separately.
-- No user-facing production promotion beyond the explicit v2 test entry.
+- No new model or threshold changes.
+- No new route.
+- No production promotion.
 
 ## Acceptance Criteria
 
-- `Studs FH/BH LIVE` still opens the old path.
-- `Studs FH/BH LIVE v2` opens a new path using Hybrid 2.2 audio.
+- `Audio only: ON` can start counting even if camera preview is not ready.
+- Switching `Audio only` off while stopped attempts to restore the camera preview.
+- Existing camera-side behavior remains unchanged when audio-only is off.
 - TypeScript validates.
-- Source-of-truth docs record the new guarded test entry and remaining risks.
+- Docs record the bug fix.
 
 ## Completion Notes
 
-- Added `Studs FH/BH LIVE v2` as a separate setup entry and route.
-- Kept the existing `Studs FH/BH LIVE` Fable-triggered route unchanged.
-- Added portable logistic runtime support and bundled `hybrid_hard_negative_veto_t0129_logreg.json`.
-- Extended the collector audio contact engine with `hybrid22`:
-  - raw binary contact RF threshold `0.25`;
-  - 4-class surface veto confidence `0.75`;
-  - T0129 learned hard-negative veto threshold `0.01`;
-  - learned-veto bypass when raw contact probability is greater than `0.61`;
-  - app-side dedupe `180 ms`.
-- V2 starts native audio with broadband RMS plus spectral gate (`abs_min_rms=0.003`, `retrigger_ms=220`) and keeps the same live racket tracker for FH/BH/uncertain side decisions.
-- Debug dumps now include the selected audio trigger mode/config plus Hybrid 2.2 decision metadata.
-- No native Android code, model retraining, release build, install, push, merge, raw data, or `main` promotion changed.
+- Fixed audio-only startup so `STARTA` is enabled when `Audio only: ON` even if the camera is not ready.
+- Audio-only runs no longer call `startCameraForAiming` before audio starts.
+- Turning `Audio only` on stops/releases the camera preview.
+- Turning `Audio only` off forces a camera stop/start recovery attempt.
+- Preserved T0134 audio-only counting behavior: accepted audio bounces count immediately as `OSAKER` with `decision_source=audio_only`.
+- No native Android code, model JSON, `Bounce audio test`, raw/generated data, release build, push, merge, or production promotion changed.
 
 ## Validation
 

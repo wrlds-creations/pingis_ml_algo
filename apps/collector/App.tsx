@@ -28,6 +28,8 @@ type Screen =
   | 'bounce_audio_test'
   | 'bounce_side_live'
   | 'bounce_side_live_v2'
+  | 'bounce_side_live_v3'
+  | 'bounce_side_live_v4'
   | 'bounce_free'
   | 'bounce_alternating';
 
@@ -65,6 +67,8 @@ export default function App() {
           onBounceAudioTestMode={setup => setState({ screen: 'bounce_audio_test', setup })}
           onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
           onBounceSideLiveV2Mode={setup => setState({ screen: 'bounce_side_live_v2', setup })}
+          onBounceSideLiveV3Mode={setup => setState({ screen: 'bounce_side_live_v3', setup })}
+          onBounceSideLiveV4Mode={setup => setState({ screen: 'bounce_side_live_v4', setup })}
           onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
           onBounceAlternatingMode={setup =>
             setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_alternating' })
@@ -104,6 +108,32 @@ export default function App() {
         <BounceSideLiveScreen
           setup={state.setup}
           audioTriggerMode="hybrid22"
+          onDone={() => setState({ screen: 'setup' })}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'bounce_side_live_v3' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <BounceSideLiveScreen
+          setup={state.setup}
+          audioTriggerMode="hybrid22"
+          sideDecisionMode="wrist_crop"
+          onDone={() => setState({ screen: 'setup' })}
+        />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'bounce_side_live_v4' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <BounceSideLiveScreen
+          setup={state.setup}
+          audioTriggerMode="hybrid"
+          sideDecisionMode="wrist_crop"
           onDone={() => setState({ screen: 'setup' })}
         />
       </SafeAreaProvider>
@@ -248,6 +278,8 @@ export default function App() {
         onBounceAudioTestMode={setup => setState({ screen: 'bounce_audio_test', setup })}
         onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
         onBounceSideLiveV2Mode={setup => setState({ screen: 'bounce_side_live_v2', setup })}
+        onBounceSideLiveV3Mode={setup => setState({ screen: 'bounce_side_live_v3', setup })}
+        onBounceSideLiveV4Mode={setup => setState({ screen: 'bounce_side_live_v4', setup })}
         onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
         onBounceAlternatingMode={setup =>
           setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_alternating' })

@@ -26,6 +26,8 @@ interface Props {
   onBounceAudioTestMode?: (setup: PlayerSetup) => void;
   onBounceSideLiveMode?: (setup: PlayerSetup) => void;
   onBounceSideLiveV2Mode?: (setup: PlayerSetup) => void;
+  onBounceSideLiveV3Mode?: (setup: PlayerSetup) => void;
+  onBounceSideLiveV4Mode?: (setup: PlayerSetup) => void;
   onBounceFreeMode?: (setup: PlayerSetup) => void;
   onBounceAlternatingMode?: (setup: PlayerSetup) => void;
 }
@@ -43,6 +45,8 @@ export function SetupScreen({
   onBounceAudioTestMode,
   onBounceSideLiveMode,
   onBounceSideLiveV2Mode,
+  onBounceSideLiveV3Mode,
+  onBounceSideLiveV4Mode,
   onBounceFreeMode,
   onBounceAlternatingMode,
 }: Props) {
@@ -189,6 +193,24 @@ export function SetupScreen({
             subtitle="Hybrid 2.2 audio trigger + same live racket-side camera tracker."
             colorStyle="orange"
             onPress={() => canContinue && onBounceSideLiveV2Mode(setup)}
+          />
+        )}
+        {onBounceSideLiveV3Mode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Studs FH/BH LIVE v3"
+            subtitle="Hybrid 2.2 audio trigger + wrist crop FH/BH side model."
+            colorStyle="purple"
+            onPress={() => canContinue && onBounceSideLiveV3Mode(setup)}
+          />
+        )}
+        {onBounceSideLiveV4Mode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Studs FH/BH LIVE v4"
+            subtitle="Hybrid audio trigger + wrist crop FH/BH side model."
+            colorStyle="blue"
+            onPress={() => canContinue && onBounceSideLiveV4Mode(setup)}
           />
         )}
         <Text style={styles.sectionLabel}>DATA</Text>
