@@ -27,6 +27,7 @@ type Screen =
   | 'fable_live'
   | 'bounce_audio_test'
   | 'bounce_side_live'
+  | 'bounce_side_live_v2'
   | 'bounce_free'
   | 'bounce_alternating';
 
@@ -63,6 +64,7 @@ export default function App() {
           onFableLiveMode={setup => setState({ screen: 'fable_live', setup })}
           onBounceAudioTestMode={setup => setState({ screen: 'bounce_audio_test', setup })}
           onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
+          onBounceSideLiveV2Mode={setup => setState({ screen: 'bounce_side_live_v2', setup })}
           onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
           onBounceAlternatingMode={setup =>
             setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_alternating' })
@@ -92,6 +94,18 @@ export default function App() {
     return (
       <SafeAreaProvider>
         <BounceSideLiveScreen setup={state.setup} onDone={() => setState({ screen: 'setup' })} />
+      </SafeAreaProvider>
+    );
+  }
+
+  if (state.screen === 'bounce_side_live_v2' && state.setup) {
+    return (
+      <SafeAreaProvider>
+        <BounceSideLiveScreen
+          setup={state.setup}
+          audioTriggerMode="hybrid22"
+          onDone={() => setState({ screen: 'setup' })}
+        />
       </SafeAreaProvider>
     );
   }
@@ -233,6 +247,7 @@ export default function App() {
         onFableLiveMode={setup => setState({ screen: 'fable_live', setup })}
         onBounceAudioTestMode={setup => setState({ screen: 'bounce_audio_test', setup })}
         onBounceSideLiveMode={setup => setState({ screen: 'bounce_side_live', setup })}
+        onBounceSideLiveV2Mode={setup => setState({ screen: 'bounce_side_live_v2', setup })}
         onBounceFreeMode={setup => setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_free' })}
         onBounceAlternatingMode={setup =>
           setState({ screen: 'calibration', setup, calibrationTarget: 'bounce_alternating' })

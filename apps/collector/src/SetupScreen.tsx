@@ -25,6 +25,7 @@ interface Props {
   onFableLiveMode?: (setup: PlayerSetup) => void;
   onBounceAudioTestMode?: (setup: PlayerSetup) => void;
   onBounceSideLiveMode?: (setup: PlayerSetup) => void;
+  onBounceSideLiveV2Mode?: (setup: PlayerSetup) => void;
   onBounceFreeMode?: (setup: PlayerSetup) => void;
   onBounceAlternatingMode?: (setup: PlayerSetup) => void;
 }
@@ -41,6 +42,7 @@ export function SetupScreen({
   onFableLiveMode,
   onBounceAudioTestMode,
   onBounceSideLiveMode,
+  onBounceSideLiveV2Mode,
   onBounceFreeMode,
   onBounceAlternatingMode,
 }: Props) {
@@ -178,6 +180,15 @@ export function SetupScreen({
             subtitle="Kameran igång: räknar studsar via ljudet och avgör forehand-/backhandsida i realtid."
             colorStyle="gold"
             onPress={() => canContinue && onBounceSideLiveMode(setup)}
+          />
+        )}
+        {onBounceSideLiveV2Mode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Studs FH/BH LIVE v2"
+            subtitle="Hybrid 2.2 audio trigger + same live racket-side camera tracker."
+            colorStyle="orange"
+            onPress={() => canContinue && onBounceSideLiveV2Mode(setup)}
           />
         )}
         <Text style={styles.sectionLabel}>DATA</Text>

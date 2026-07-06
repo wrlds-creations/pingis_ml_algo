@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0130-pcen-hybrid-post-filter-audit`
+`T0131-studs-fhbh-live-v2-hybrid22`
 
 ## Branch
 
@@ -18,13 +18,20 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Evaluate whether PCEN-derived audio features can create a safer post-Hybrid hard-negative filter for the STIGA `Hybrid 2.0` QA path. Keep the existing STIGA `Hybrid` detector unchanged, and do not port another live veto until the offline evidence is strong enough to justify phone testing.
+Add a separate collector UI entry named `Studs FH/BH LIVE v2` that keeps the current camera/rubber-side flow but uses the STIGA `Hybrid 2.2` bounce-audio setup as the sound trigger.
 
 ## Dependencies
 
-- T0129 trained a learned post-Hybrid hard-negative veto, but live phone testing showed it was too strict: Hybrid 2.0 saw candidates yet dropped most clear bounces.
-- The candidate row dataset already contains noise-robust/PCEN-style columns such as `feat_nr_pcen_max`, `feat_nr_pcen_mean`, and `feat_nr_pcen_std`.
-- Plain STIGA `Hybrid` is currently the recall baseline because it worked best across the user's Android/iPhone checks.
+- The existing `Studs FH/BH LIVE` screen uses Fable audio as the bounce trigger and then uses the live racket color tracker for FH/BH side.
+- The STIGA app has a tested `Hybrid 2.2` audio path:
+  - PCM audio;
+  - adaptive RMS/spectral candidate gate;
+  - centered clip extraction;
+  - binary racket-contact RF;
+  - 4-class surface veto;
+  - T0129 learned hard-negative veto;
+  - Android defaults: contact `0.25`, veto `0.01`, bypass enabled at `0.61`, dedupe about `180-220 ms`.
+- The collector already contains the binary contact model, 4-class surface model, RF runtime, and audio feature extractor.
 
 ## Allowed Areas
 
@@ -33,65 +40,70 @@ Evaluate whether PCEN-derived audio features can create a safer post-Hybrid hard
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
-- `skills/pingis-audio-classification/scripts/noise_robust/`
-- `data/audio/models/evaluations/t0130_pcen_hybrid_post_filter/` as ignored local evaluation output
+- `apps/collector/App.tsx`
+- `apps/collector/src/SetupScreen.tsx`
+- `apps/collector/src/BounceSideLiveScreen.tsx`
+- `apps/collector/src/audioContactEngine.ts`
+- `apps/collector/src/types.ts`
+- `apps/collector/src/logisticRuntime.ts`
+- `apps/collector/src/models/hybrid_hard_negative_veto_t0129_logreg.json`
 
 ## Do Not Touch
 
-- Do not delete raw/generated `data/`.
+- Do not change the existing `Studs FH/BH LIVE` behavior.
+- Do not change camera/rubber-side native tracking unless required for the new audio route.
+- Do not replace `fable_audio_model.json`, `audio_model.json`, or `audio_contact_model.json`.
+- Do not change `Bounce audio test`.
+- Do not delete raw/generated `data/` or `raw/`.
 - Do not merge to `main`.
-- Do not replace the current working STIGA `Hybrid` mode.
-- Do not port a new veto to `stiga-app-v2` unless the offline result is clearly worth a phone test.
-- Do not add a single-feature hard-coded veto.
-- Do not change camera/rubber-side behavior.
 - Do not use cloud APIs or AWS.
 
 ## Requirements
 
-- Train/evaluate only on rows that the existing STIGA `Hybrid` stack would accept.
-- Compare at least:
-  - T0129-style RF/probability feature baseline;
-  - PCEN-only features;
-  - RF/probability features plus PCEN features;
-  - broader noise-robust PCEN/transient/spectral feature groups if present in the row CSV.
-- Use grouped out-of-fold validation by session/domain.
-- Report plain Hybrid TP/FP and candidate post-filter TP/FP after app-style dedupe.
-- Prefer a high-recall veto setting: almost never reject true bounces offline, even if it removes fewer false positives.
-- Export a local JSON only if a PCEN variant is worth future app QA.
+- Add a new visible setup entry: `Studs FH/BH LIVE v2`.
+- Route v2 separately from the current `Studs FH/BH LIVE`.
+- Reuse the existing camera tracker and side counting behavior.
+- Use Hybrid 2.2-style audio decisions for v2:
+  - contact RF raw `racket_contact` probability threshold `0.25`;
+  - surface veto at confidence `0.75`;
+  - T0129 learned hard-negative veto threshold `0.01`;
+  - bypass learned veto when raw contact probability is greater than `0.61`;
+  - app-side dedupe/grouping around the STIGA defaults.
+- Native candidate gate should use the collector native RMS/spectral gate, not the old Fable bandpass-only setup.
+- Keep v1 Fable audio path unchanged.
+- Include useful debug metadata in v2 debug JSON candidates.
 
 ## Non-Goals
 
-- No new peak picker or candidate-generation change.
-- No replacement of existing Hybrid.
-- No Android/iOS/TestFlight build.
-- No model promotion into production/default app behavior.
+- No new model training.
+- No TestFlight or STIGA app changes.
+- No release APK unless requested separately.
+- No user-facing production promotion beyond the explicit v2 test entry.
 
 ## Acceptance Criteria
 
-- A reproducible PCEN post-filter audit script exists.
-- The script writes a report comparing PCEN variants against plain Hybrid and the T0129 feature baseline.
-- The report states whether PCEN is worth porting to STIGA for another Hybrid 2.0 phone test.
-- Source-of-truth docs are updated with the conclusion.
+- `Studs FH/BH LIVE` still opens the old path.
+- `Studs FH/BH LIVE v2` opens a new path using Hybrid 2.2 audio.
+- TypeScript validates.
+- Source-of-truth docs record the new guarded test entry and remaining risks.
 
 ## Completion Notes
 
-- Added `train_t0130_pcen_hybrid_post_filter.py`.
-- Ran grouped OOF sweeps on Hybrid-accepted rows for:
-  - T0129-style RF/probability baseline;
-  - PCEN-only;
-  - PCEN context/noise-robust features;
-  - RF/probability plus PCEN;
-  - RF/probability plus PCEN plus transient/spectral columns.
-- Plain Hybrid baseline after dedupe: `1518` TP / `791` FP.
-- PCEN-only kept all true positives but removed only `9` false positives.
-- PCEN context kept all true positives but removed only `5` false positives.
-- Best offline row was `rf_prob_plus_pcen_transient_spectral`: `1515` TP / `190` FP, losing `3` true positives and removing `601` false positives.
-- That best row depends on `td_*` and `sp_*` transient/spectral columns that the current STIGA runtime does not compute, so the exported ignored JSON is not a safe drop-in app port.
-- Recommendation: do not port T0130 directly. Next ticket should either implement/parity-test the missing transient/spectral feature extractor in STIGA, or test a gentler already-portable RF/probability post-filter as a guarded comparison.
+- Added `Studs FH/BH LIVE v2` as a separate setup entry and route.
+- Kept the existing `Studs FH/BH LIVE` Fable-triggered route unchanged.
+- Added portable logistic runtime support and bundled `hybrid_hard_negative_veto_t0129_logreg.json`.
+- Extended the collector audio contact engine with `hybrid22`:
+  - raw binary contact RF threshold `0.25`;
+  - 4-class surface veto confidence `0.75`;
+  - T0129 learned hard-negative veto threshold `0.01`;
+  - learned-veto bypass when raw contact probability is greater than `0.61`;
+  - app-side dedupe `180 ms`.
+- V2 starts native audio with broadband RMS plus spectral gate (`abs_min_rms=0.003`, `retrigger_ms=220`) and keeps the same live racket tracker for FH/BH/uncertain side decisions.
+- Debug dumps now include the selected audio trigger mode/config plus Hybrid 2.2 decision metadata.
+- No native Android code, model retraining, release build, install, push, merge, raw data, or `main` promotion changed.
 
 ## Validation
 
-- `python -m py_compile skills\pingis-audio-classification\scripts\noise_robust\train_t0130_pcen_hybrid_post_filter.py`
-- `python skills\pingis-audio-classification\scripts\noise_robust\train_t0130_pcen_hybrid_post_filter.py`
-- `git diff --check`
+- `cd apps/collector && npx tsc --noEmit`
 - `npm run validate`
+- `git diff --check` (passed with existing Windows LF-to-CRLF warnings only)

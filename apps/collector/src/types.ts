@@ -228,13 +228,15 @@ export type AudioReviewAnchorRule = 'attack_start';
 export type AudioReviewMotionLabel = 'forehand' | 'backhand' | 'unknown' | 'none';
 export type AudioVideoSyncSource = 'manual' | 'auto_peak';
 export type AudioDetectionSensitivity = 'strict' | 'normal' | 'sensitive';
-export type AudioDetectionMode = 'hybrid' | 'four_class_only' | 'binary_only';
+export type AudioDetectionMode = 'hybrid' | 'hybrid22' | 'four_class_only' | 'binary_only';
 export type AudioDetectionIgnoredReason =
   | 'not_racket_contact'
   | 'low_confidence'
   | 'dedup'
   | 'same_label_duplicate'
   | 'surface_veto'
+  | 'hybrid22_hard_negative_veto'
+  | 'hybrid22_veto_unavailable'
   | 'group_duplicate'
   | 'not_preset_relevant';
 export type AudioContactKind = 'racket_bounce';
@@ -539,9 +541,15 @@ export interface AudioDetectionEvent {
   label: AudioContactLabel;
   confidence: number;
   probabilities: Record<string, number>;
+  contact_threshold?: number;
   surface_label?: AudioLabel;
   surface_confidence?: number;
   surface_probabilities?: Record<string, number>;
+  hybrid_veto_probability?: number;
+  hybrid_veto_threshold?: number;
+  hybrid_veto_bypassed?: boolean;
+  hybrid_veto_bypass_threshold?: number;
+  mid_band_energy?: number;
   group_id?: number;
   group_status?: 'best_candidate' | 'ignored_duplicate' | 'standalone';
   qualified: boolean;

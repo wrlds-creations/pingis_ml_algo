@@ -32,11 +32,21 @@ import {
   resolveBounceSide,
   BOUNCE_SIDE_MODEL_VERSION,
 } from './bounceSideInference';
+import { detectAudioContact } from './audioContactEngine';
 import type { PlayerSetup } from './types';
 
 const ONSET_THRESHOLD = 0.005;
 const RETRIGGER_MS = 120;
 const ABS_MIN_RMS = 0.0015;
+const HYBRID22_ONSET_THRESHOLD = 0.005;
+const HYBRID22_RETRIGGER_MS = 220;
+const HYBRID22_ABS_MIN_RMS = 0.003;
+const HYBRID22_CONTACT_THRESHOLD = 0.25;
+const HYBRID22_SURFACE_VETO_CONFIDENCE = 0.75;
+const HYBRID22_VETO_THRESHOLD = 0.01;
+const HYBRID22_VETO_BYPASS_ENABLED = true;
+const HYBRID22_VETO_BYPASS_THRESHOLD = 0.61;
+const HYBRID22_DEDUP_MS = 180;
 const SIDE_MIN_CONFIDENCE = 0.6;
 const TRACK_MAX_DELAY_MS = 500;
 const TRACK_MIN_CONFIDENCE = 0.95;
@@ -46,6 +56,7 @@ const TRACKER_VERSION = 'color_shape_tracker_v3_2026_06_26';
 
 type LiveSide = 'forehand' | 'backhand' | 'uncertain';
 type ForehandColor = 'red' | 'black';
+type AudioTriggerMode = 'fable' | 'hybrid22';
 
 interface LiveDebugEvent {
   onset_time_ms: number;
@@ -79,6 +90,13 @@ interface LiveDebugEvent {
   crop_error?: string;
   audio_label: string;
   audio_confidence: number;
+  audio_contact_threshold?: number;
+  audio_surface_label?: string;
+  audio_surface_confidence?: number;
+  audio_hybrid_veto_probability?: number;
+  audio_hybrid_veto_threshold?: number;
+  audio_hybrid_veto_bypassed?: boolean;
+  audio_hybrid_veto_bypass_threshold?: number;
   rgb_b64?: string;
 }
 
@@ -89,10 +107,21 @@ interface LiveAudioCandidate {
   reject_reason?: string;
   audio_label?: string;
   audio_confidence?: number;
+  audio_contact_threshold?: number;
+  audio_surface_label?: string;
+  audio_surface_confidence?: number;
+  audio_hybrid_veto_probability?: number;
+  audio_hybrid_veto_threshold?: number;
+  audio_hybrid_veto_bypassed?: boolean;
+  audio_hybrid_veto_bypass_threshold?: number;
   bg_mode?: string;
 }
 
-interface Props { setup: PlayerSetup; onDone: () => void; }
+interface Props {
+  setup: PlayerSetup;
+  onDone: () => void;
+  audioTriggerMode?: AudioTriggerMode;
+}
 
 function parseNativeEvent(event: NativeAudioBounceEvent): {
   audioB64?: string;
@@ -157,8 +186,9 @@ function visibleTrack(track: BounceSideRacketTrack | null): BounceSideRacketTrac
   return track;
 }
 
-export function BounceSideLiveScreen({ setup, onDone }: Props) {
+export function BounceSideLiveScreen({ setup, onDone, audioTriggerMode = 'fable' }: Props) {
   const insets = useSafeAreaInsets();
+  const isHybrid22 = audioTriggerMode === 'hybrid22';
   const [isRunning, setIsRunning] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraViewReady, setCameraViewReady] = useState(false);
@@ -171,6 +201,7 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
   const [statusText, setStatusText] = useState('Startar kamera...');
 
   const counterRef = useRef(new FableCounter({ loudBgDb: -36, loudConfidence: 0.85 }));
+  const hybridLastQualifiedTsRef = useRef<number | undefined>(undefined);
   const forehandColorRef = useRef<ForehandColor>('red');
   const cameraViewReadyRef = useRef(false);
   const cameraStartedRef = useRef(false);
@@ -187,6 +218,28 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
     const payload = {
       model: BOUNCE_SIDE_MODEL_VERSION,
       tracker: TRACKER_VERSION,
+      audio_trigger_mode: audioTriggerMode,
+      audio_trigger_config: isHybrid22 ? {
+        contact_threshold: HYBRID22_CONTACT_THRESHOLD,
+        surface_veto_confidence: HYBRID22_SURFACE_VETO_CONFIDENCE,
+        hybrid_veto_threshold: HYBRID22_VETO_THRESHOLD,
+        hybrid_veto_bypass_enabled: HYBRID22_VETO_BYPASS_ENABLED,
+        hybrid_veto_bypass_threshold: HYBRID22_VETO_BYPASS_THRESHOLD,
+        dedup_ms: HYBRID22_DEDUP_MS,
+        native_gate: {
+          onset_threshold: HYBRID22_ONSET_THRESHOLD,
+          retrigger_ms: HYBRID22_RETRIGGER_MS,
+          mode: 'broadband',
+          spectral_gate: true,
+          abs_min_rms: HYBRID22_ABS_MIN_RMS,
+        },
+      } : {
+        onset_threshold: ONSET_THRESHOLD,
+        retrigger_ms: RETRIGGER_MS,
+        mode: 'bandpass',
+        spectral_gate: false,
+        abs_min_rms: ABS_MIN_RMS,
+      },
       setup,
       forehand_color: forehandColorRef.current,
       events,
@@ -197,7 +250,7 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
       .catch(() => {});
     debugEventsRef.current = [];
     audioCandidatesRef.current = [];
-  }, [setup]);
+  }, [audioTriggerMode, isHybrid22, setup]);
 
   const startCameraForAiming = useCallback(async () => {
     if (cameraStartedRef.current) return true;
@@ -254,20 +307,27 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
         counterRef.current.reset();
         debugEventsRef.current = [];
         audioCandidatesRef.current = [];
+        hybridLastQualifiedTsRef.current = undefined;
         setFhCount(0);
         setBhCount(0);
         setUncertainCount(0);
         setLastSide(null);
-        await AudioStream.startStreaming(ONSET_THRESHOLD);
-        await AudioStream.setRetriggerMs(RETRIGGER_MS);
-        await AudioStream.setGateConfig('bandpass', false, ABS_MIN_RMS);
+        await AudioStream.startStreaming(isHybrid22 ? HYBRID22_ONSET_THRESHOLD : ONSET_THRESHOLD);
+        await AudioStream.setRetriggerMs(isHybrid22 ? HYBRID22_RETRIGGER_MS : RETRIGGER_MS);
+        if (isHybrid22) {
+          await AudioStream.setGateConfig('broadband', true, HYBRID22_ABS_MIN_RMS);
+        } else {
+          await AudioStream.setGateConfig('bandpass', false, ABS_MIN_RMS);
+        }
         setIsRunning(true);
-        setStatusText('Lyssnar och tittar. Studsa bollen pa racketen!');
+        setStatusText(isHybrid22
+          ? 'Hybrid 2.2 lyssnar och kameran avgor FH/BH. Studsa bollen pa racketen!'
+          : 'Lyssnar och tittar. Studsa bollen pa racketen!');
       } catch (error) {
         setStatusText(`Kunde inte starta: ${String((error as Error)?.message ?? error)}`);
       }
     })();
-  }, [isRunning, startCameraForAiming, stopCounting]);
+  }, [isHybrid22, isRunning, startCameraForAiming, stopCounting]);
 
   useEffect(() => {
     if (!cameraViewReady) return;
@@ -301,19 +361,73 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
           const onsetTimeMs = nativeDebug?.onset_time_ms ?? Date.now();
           const frameRms = nativeDebug?.rms ?? 0;
           const pcm = decodeBase64PCM(audioB64);
-          const result = counterRef.current.process(pcm, onsetTimeMs, frameRms, Date.now());
+          const audioDecision = isHybrid22 ? (() => {
+            const decision = detectAudioContact({
+              detectedAtMs: onsetTimeMs,
+              pcm,
+              confidenceThreshold: HYBRID22_CONTACT_THRESHOLD,
+              dedupMs: HYBRID22_DEDUP_MS,
+              lastQualifiedTsMs: hybridLastQualifiedTsRef.current,
+              surfaceVetoConfidence: HYBRID22_SURFACE_VETO_CONFIDENCE,
+              detectionMode: 'hybrid22',
+              hybrid22ContactThreshold: HYBRID22_CONTACT_THRESHOLD,
+              hybrid22VetoThreshold: HYBRID22_VETO_THRESHOLD,
+              hybrid22VetoBypassEnabled: HYBRID22_VETO_BYPASS_ENABLED,
+              hybrid22VetoBypassThreshold: HYBRID22_VETO_BYPASS_THRESHOLD,
+            });
+            if (decision.qualified) {
+              hybridLastQualifiedTsRef.current = onsetTimeMs;
+            }
+            return {
+              counted: decision.qualified,
+              rejectReason: decision.ignored_reason,
+              label: decision.label,
+              confidence: decision.confidence,
+              contactThreshold: decision.contact_threshold,
+              surfaceLabel: decision.surface_label,
+              surfaceConfidence: decision.surface_confidence,
+              hybridVetoProbability: decision.hybrid_veto_probability,
+              hybridVetoThreshold: decision.hybrid_veto_threshold,
+              hybridVetoBypassed: decision.hybrid_veto_bypassed,
+              hybridVetoBypassThreshold: decision.hybrid_veto_bypass_threshold,
+              bgMode: undefined,
+            };
+          })() : (() => {
+            const result = counterRef.current.process(pcm, onsetTimeMs, frameRms, Date.now());
+            return {
+              counted: result.counted,
+              rejectReason: result.rejectReason,
+              label: result.prediction?.label,
+              confidence: result.prediction?.confidence,
+              contactThreshold: undefined,
+              surfaceLabel: undefined,
+              surfaceConfidence: undefined,
+              hybridVetoProbability: undefined,
+              hybridVetoThreshold: undefined,
+              hybridVetoBypassed: undefined,
+              hybridVetoBypassThreshold: undefined,
+              bgMode: result.bgMode,
+            };
+          })();
           if (audioCandidatesRef.current.length < 600) {
             audioCandidatesRef.current.push({
               onset_time_ms: onsetTimeMs,
               frame_rms: frameRms,
-              counted: result.counted,
-              reject_reason: result.rejectReason,
-              audio_label: result.prediction?.label,
-              audio_confidence: result.prediction?.confidence,
-              bg_mode: result.bgMode,
+              counted: audioDecision.counted,
+              reject_reason: audioDecision.rejectReason,
+              audio_label: audioDecision.label,
+              audio_confidence: audioDecision.confidence,
+              audio_contact_threshold: audioDecision.contactThreshold,
+              audio_surface_label: audioDecision.surfaceLabel,
+              audio_surface_confidence: audioDecision.surfaceConfidence,
+              audio_hybrid_veto_probability: audioDecision.hybridVetoProbability,
+              audio_hybrid_veto_threshold: audioDecision.hybridVetoThreshold,
+              audio_hybrid_veto_bypassed: audioDecision.hybridVetoBypassed,
+              audio_hybrid_veto_bypass_threshold: audioDecision.hybridVetoBypassThreshold,
+              bg_mode: audioDecision.bgMode,
             });
           }
-          if (!result.counted) return;
+          if (!audioDecision.counted) return;
 
           const track = await BounceSideLive.getRacketTrack(onsetTimeMs).catch(() => lostTrack());
           const resolved = resolveTrackSide(track, forehandColorRef.current);
@@ -342,8 +456,15 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
             track_dark_score: track.dark_score,
             track_area_ratio: track.area_ratio,
             track_fill_ratio: track.fill_ratio,
-            audio_label: result.prediction?.label ?? 'unknown',
-            audio_confidence: result.prediction?.confidence ?? 0,
+            audio_label: audioDecision.label ?? 'unknown',
+            audio_confidence: audioDecision.confidence ?? 0,
+            audio_contact_threshold: audioDecision.contactThreshold,
+            audio_surface_label: audioDecision.surfaceLabel,
+            audio_surface_confidence: audioDecision.surfaceConfidence,
+            audio_hybrid_veto_probability: audioDecision.hybridVetoProbability,
+            audio_hybrid_veto_threshold: audioDecision.hybridVetoThreshold,
+            audio_hybrid_veto_bypassed: audioDecision.hybridVetoBypassed,
+            audio_hybrid_veto_bypass_threshold: audioDecision.hybridVetoBypassThreshold,
           };
 
           try {
@@ -383,7 +504,7 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
     });
 
     return () => sub.remove();
-  }, [isRunning]);
+  }, [isHybrid22, isRunning]);
 
   const shownTrack = visibleTrack(latestTrack);
 
@@ -394,8 +515,10 @@ export function BounceSideLiveScreen({ setup, onDone }: Props) {
         <TouchableOpacity onPress={() => { stopAll(); onDone(); }}>
           <Text style={styles.back}>{'<'} Tillbaka</Text>
         </TouchableOpacity>
-        <Text style={styles.title}>Studs FH/BH LIVE</Text>
-        <Text style={styles.subtitle}>{TRACKER_VERSION}</Text>
+        <Text style={styles.title}>{isHybrid22 ? 'Studs FH/BH LIVE v2' : 'Studs FH/BH LIVE'}</Text>
+        <Text style={styles.subtitle}>
+          {isHybrid22 ? `Hybrid 2.2 audio + ${TRACKER_VERSION}` : TRACKER_VERSION}
+        </Text>
       </View>
 
       <View style={styles.cameraWrap}>
