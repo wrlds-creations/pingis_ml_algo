@@ -3,8 +3,10 @@
  *
  * Camera starts immediately for aiming. START only starts the audio bounce
  * counter. The original and v2 modes use the continuous racket tracker for
- * side decisions; v3 keeps tracker metadata for debug but decides side from the
- * wrist-crop model.
+ * side decisions; v3/v4 keep tracker metadata for debug but decide side from
+ * the wrist-crop model; v5 queues wrist-crop side work behind accepted audio
+ * bounces so the audio listener is not blocked by crop/model latency; v6
+ * collects crop evidence during the run and resolves FH/BH after STOP.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -62,11 +64,35 @@ const TRACK_MIN_CONFIDENCE = 0.95;
 const TRACK_VISIBLE_MIN_CONFIDENCE = 0.95;
 const TRACK_EVENT_NAME = 'onBounceSideRacketTrack';
 const TRACKER_VERSION = 'color_shape_tracker_v3_2026_06_26';
+const CROP_RGB_SIZE = 64;
+const CROP_PREVIEW_SIZE = 16;
+const POST_CROP_CAPTURE_DELAY_MS = 160;
+const POST_CROP_OFFSETS_MS = [-220, -140, -70, 0, 70];
+const POST_CROP_PREFERRED_DELAY_MS = -80;
+const POST_EVIDENCE_WAIT_TIMEOUT_MS = 12000;
 
 type LiveSide = 'forehand' | 'backhand' | 'uncertain';
 type ForehandColor = 'red' | 'black';
 type AudioTriggerMode = 'fable' | 'hybrid' | 'hybrid22';
-type SideDecisionMode = 'tracker' | 'wrist_crop';
+type SideDecisionMode = 'tracker' | 'wrist_crop' | 'wrist_crop_queue' | 'wrist_crop_post';
+
+interface PostCropCandidateDebug {
+  target_offset_ms: number;
+  actual_delay_ms: number;
+  crop_frame_delay_ms: number;
+  roi_source: string;
+  side: LiveSide;
+  confidence: number;
+  decision_source: string;
+  raw_side: string;
+  raw_confidence: number;
+  visible_color: string;
+  color_confidence: number;
+  red_total: number;
+  dark_total: number;
+  score: number;
+  rgb_b64?: string;
+}
 
 interface LiveDebugEvent {
   onset_time_ms: number;
@@ -98,6 +124,10 @@ interface LiveDebugEvent {
   roi_source?: string;
   crop_frame_delay_ms?: number;
   crop_error?: string;
+  post_processing_mode?: boolean;
+  post_selected_offset_ms?: number;
+  post_selected_actual_delay_ms?: number;
+  post_crop_candidates?: PostCropCandidateDebug[];
   audio_label: string;
   audio_confidence: number;
   audio_contact_threshold?: number;
@@ -125,6 +155,61 @@ interface LiveAudioCandidate {
   audio_hybrid_veto_bypassed?: boolean;
   audio_hybrid_veto_bypass_threshold?: number;
   bg_mode?: string;
+}
+
+interface CropPreview {
+  pixels: string[];
+  roiSource: string;
+  frameDelayMs: number;
+  side: LiveSide;
+  confidence: number;
+  decisionSource: string;
+  rawSide: string;
+  rawConfidence: number;
+  visibleColor: string;
+  redTotal: number;
+  darkTotal: number;
+}
+
+interface PostCropCandidate {
+  targetOffsetMs: number;
+  actualDelayMs: number;
+  cropFrameDelayMs: number;
+  roiSource: string;
+  score: number;
+  resolved: { side: LiveSide; confidence: number; decisionSource: string };
+  cropDebug: Partial<LiveDebugEvent>;
+  preview: CropPreview;
+  debug: PostCropCandidateDebug;
+}
+
+interface AudioDecision {
+  counted: boolean;
+  rejectReason?: string;
+  label?: string;
+  confidence?: number;
+  contactThreshold?: number;
+  surfaceLabel?: string;
+  surfaceConfidence?: number;
+  hybridVetoProbability?: number;
+  hybridVetoThreshold?: number;
+  hybridVetoBypassed?: boolean;
+  hybridVetoBypassThreshold?: number;
+  bgMode?: string;
+}
+
+interface QueuedSideJob {
+  id: number;
+  sessionId: number;
+  onsetTimeMs: number;
+  audioDecision: AudioDecision;
+}
+
+interface PostSideJob extends QueuedSideJob {
+  status: 'pending' | 'capturing' | 'ready' | 'error';
+  candidates: PostCropCandidate[];
+  track?: BounceSideRacketTrack;
+  error?: string;
 }
 
 interface Props {
@@ -197,6 +282,144 @@ function visibleTrack(track: BounceSideRacketTrack | null): BounceSideRacketTrac
   return track;
 }
 
+function toHexByte(value: number): string {
+  return Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, '0');
+}
+
+function buildCropPreview(
+  rgb: Uint8Array,
+  meta: Omit<CropPreview, 'pixels'>,
+): CropPreview {
+  const pixels: string[] = [];
+  const block = CROP_RGB_SIZE / CROP_PREVIEW_SIZE;
+  for (let py = 0; py < CROP_PREVIEW_SIZE; py += 1) {
+    for (let px = 0; px < CROP_PREVIEW_SIZE; px += 1) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let y = py * block; y < (py + 1) * block; y += 1) {
+        for (let x = px * block; x < (px + 1) * block; x += 1) {
+          const i = (y * CROP_RGB_SIZE + x) * 3;
+          r += rgb[i];
+          g += rgb[i + 1];
+          b += rgb[i + 2];
+        }
+      }
+      const n = block * block;
+      pixels.push(`#${toHexByte(r / n)}${toHexByte(g / n)}${toHexByte(b / n)}`);
+    }
+  }
+  return { ...meta, pixels };
+}
+
+function scorePostCropCandidate(params: {
+  actualDelayMs: number;
+  confidence: number;
+  decisionSource: string;
+  roiSource: string;
+  side: LiveSide;
+}): number {
+  const timingDistance = Math.abs(params.actualDelayMs - POST_CROP_PREFERRED_DELAY_MS);
+  const timingScore = Math.max(0, 1 - timingDistance / 360);
+  const sourceScore = params.roiSource === 'wrist_anchor' ? 0.14 : -0.08;
+  const decisionScore = params.decisionSource.includes('visible_color') ? 0.14
+    : params.decisionSource.includes('model') ? 0.04
+      : -0.1;
+  const sidePenalty = params.side === 'uncertain' ? 0.28 : 0;
+  return params.confidence * 0.62 + timingScore * 0.28 + sourceScore + decisionScore - sidePenalty;
+}
+
+function classifyPostCropCandidate(
+  crop: { rgb_b64: string; roi_source: string; frame_delay_ms: number },
+  targetOffsetMs: number,
+  forehandColor: ForehandColor,
+): PostCropCandidate {
+  const binary = atob(crop.rgb_b64);
+  const rgb = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
+  const features = bounceSideFeatures(rgb, crop.roi_source);
+  const prediction = predictBounceSide(features);
+  const cropResolved = resolveBounceSide(
+    features,
+    prediction,
+    forehandColor,
+    SIDE_MIN_CONFIDENCE,
+  );
+  const resolved = {
+    side: cropResolved.side,
+    confidence: cropResolved.confidence,
+    decisionSource: `wrist_crop_post_${cropResolved.decisionSource}`,
+  };
+  const actualDelayMs = targetOffsetMs + crop.frame_delay_ms;
+  const score = scorePostCropCandidate({
+    actualDelayMs,
+    confidence: resolved.confidence,
+    decisionSource: resolved.decisionSource,
+    roiSource: crop.roi_source,
+    side: resolved.side,
+  });
+  const cropDebug: Partial<LiveDebugEvent> = {
+    raw_side: cropResolved.rawLabel,
+    raw_confidence: cropResolved.rawConfidence,
+    probabilities: prediction.probabilities,
+    visible_color: cropResolved.visibleColor,
+    color_confidence: cropResolved.colorConfidence,
+    red_total: cropResolved.redTotal,
+    dark_total: cropResolved.darkTotal,
+    roi_source: crop.roi_source,
+    crop_frame_delay_ms: crop.frame_delay_ms,
+    rgb_b64: crop.rgb_b64,
+  };
+  const preview = buildCropPreview(rgb, {
+    roiSource: crop.roi_source,
+    frameDelayMs: actualDelayMs,
+    side: resolved.side,
+    confidence: resolved.confidence,
+    decisionSource: resolved.decisionSource,
+    rawSide: cropResolved.rawLabel,
+    rawConfidence: cropResolved.rawConfidence,
+    visibleColor: cropResolved.visibleColor,
+    redTotal: cropResolved.redTotal,
+    darkTotal: cropResolved.darkTotal,
+  });
+  const debug: PostCropCandidateDebug = {
+    target_offset_ms: targetOffsetMs,
+    actual_delay_ms: actualDelayMs,
+    crop_frame_delay_ms: crop.frame_delay_ms,
+    roi_source: crop.roi_source,
+    side: resolved.side,
+    confidence: resolved.confidence,
+    decision_source: resolved.decisionSource,
+    raw_side: cropResolved.rawLabel,
+    raw_confidence: cropResolved.rawConfidence,
+    visible_color: cropResolved.visibleColor,
+    color_confidence: cropResolved.colorConfidence,
+    red_total: cropResolved.redTotal,
+    dark_total: cropResolved.darkTotal,
+    score,
+    rgb_b64: crop.rgb_b64,
+  };
+  return {
+    targetOffsetMs,
+    actualDelayMs,
+    cropFrameDelayMs: crop.frame_delay_ms,
+    roiSource: crop.roi_source,
+    score,
+    resolved,
+    cropDebug,
+    preview,
+    debug,
+  };
+}
+
+function pickPostCropCandidate(candidates: PostCropCandidate[]): PostCropCandidate | null {
+  let best: PostCropCandidate | null = null;
+  for (const candidate of candidates) {
+    if (!best || candidate.score > best.score) best = candidate;
+  }
+  return best;
+}
+
 export function BounceSideLiveScreen({
   setup,
   onDone,
@@ -208,6 +431,9 @@ export function BounceSideLiveScreen({
   const isHybrid22 = audioTriggerMode === 'hybrid22';
   const usesAudioContactEngine = isHybrid || isHybrid22;
   const usesWristCropSide = sideDecisionMode === 'wrist_crop';
+  const usesQueuedWristCropSide = sideDecisionMode === 'wrist_crop_queue';
+  const usesPostWristCropSide = sideDecisionMode === 'wrist_crop_post';
+  const usesAnyWristCropSide = usesWristCropSide || usesQueuedWristCropSide || usesPostWristCropSide;
   const [isRunning, setIsRunning] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraViewReady, setCameraViewReady] = useState(false);
@@ -218,6 +444,13 @@ export function BounceSideLiveScreen({
   const [latestTrack, setLatestTrack] = useState<BounceSideRacketTrack | null>(null);
   const [forehandColor, setForehandColor] = useState<ForehandColor>('red');
   const [audioOnlyMode, setAudioOnlyMode] = useState(false);
+  const [lastCropPreview, setLastCropPreview] = useState<CropPreview | null>(null);
+  const [sideQueueSize, setSideQueueSize] = useState(0);
+  const [sideQueueProcessing, setSideQueueProcessing] = useState(false);
+  const [postAudioCount, setPostAudioCount] = useState(0);
+  const [postEvidenceReadyCount, setPostEvidenceReadyCount] = useState(0);
+  const [postProcessing, setPostProcessing] = useState(false);
+  const [postResultsReady, setPostResultsReady] = useState(false);
   const [statusText, setStatusText] = useState('Startar kamera...');
 
   const counterRef = useRef(new FableCounter({ loudBgDb: -36, loudConfidence: 0.85 }));
@@ -228,6 +461,12 @@ export function BounceSideLiveScreen({
   const busyRef = useRef(false);
   const debugEventsRef = useRef<LiveDebugEvent[]>([]);
   const audioCandidatesRef = useRef<LiveAudioCandidate[]>([]);
+  const sideQueueRef = useRef<QueuedSideJob[]>([]);
+  const sideQueueProcessingRef = useRef(false);
+  const postSideJobsRef = useRef<PostSideJob[]>([]);
+  const postCapturePromisesRef = useRef<Promise<void>[]>([]);
+  const sideSessionIdRef = useRef(0);
+  const nextSideJobIdRef = useRef(1);
   forehandColorRef.current = forehandColor;
 
   const writeDebugDump = useCallback(() => {
@@ -241,6 +480,11 @@ export function BounceSideLiveScreen({
       audio_trigger_mode: audioTriggerMode,
       side_decision_mode: sideDecisionMode,
       audio_only_count_mode: audioOnlyMode,
+      side_queue_pending_count: sideQueueRef.current.length,
+      side_queue_processing: sideQueueProcessingRef.current,
+      post_processing_mode: usesPostWristCropSide,
+      post_audio_count: postSideJobsRef.current.length,
+      post_evidence_ready_count: postSideJobsRef.current.filter(job => job.status === 'ready' || job.status === 'error').length,
       audio_trigger_config: isHybrid22 ? {
         contact_threshold: HYBRID22_CONTACT_THRESHOLD,
         surface_veto_confidence: HYBRID22_SURFACE_VETO_CONFIDENCE,
@@ -322,12 +566,308 @@ export function BounceSideLiveScreen({
     return startCameraForAiming();
   }, [startCameraForAiming]);
 
+  const resetSideQueue = useCallback(() => {
+    sideSessionIdRef.current += 1;
+    sideQueueRef.current = [];
+    postSideJobsRef.current = [];
+    postCapturePromisesRef.current = [];
+    nextSideJobIdRef.current = 1;
+    setSideQueueSize(0);
+    setPostAudioCount(0);
+    setPostEvidenceReadyCount(0);
+    setPostProcessing(false);
+    setPostResultsReady(false);
+    if (!sideQueueProcessingRef.current) {
+      setSideQueueProcessing(false);
+    }
+  }, []);
+
+  const processWristCropJob = useCallback(async (job: QueuedSideJob) => {
+    if (job.sessionId !== sideSessionIdRef.current) return;
+
+    const track = await BounceSideLive.getRacketTrack(job.onsetTimeMs).catch(() => lostTrack());
+    let resolved: { side: LiveSide; confidence: number; decisionSource: string } = {
+      side: 'uncertain',
+      confidence: 0,
+      decisionSource: 'wrist_crop_queue_pending',
+    };
+    const cropDebug: Partial<LiveDebugEvent> = {};
+    let cropPreview: CropPreview | null = null;
+
+    try {
+      const crop = await BounceSideLive.captureCrop(job.onsetTimeMs);
+      const binary = atob(crop.rgb_b64);
+      const rgb = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) rgb[i] = binary.charCodeAt(i);
+      const features = bounceSideFeatures(rgb, crop.roi_source);
+      const prediction = predictBounceSide(features);
+      const cropResolved = resolveBounceSide(
+        features,
+        prediction,
+        forehandColorRef.current,
+        SIDE_MIN_CONFIDENCE,
+      );
+
+      resolved = {
+        side: cropResolved.side,
+        confidence: cropResolved.confidence,
+        decisionSource: `wrist_crop_queue_${cropResolved.decisionSource}`,
+      };
+      cropDebug.raw_side = cropResolved.rawLabel;
+      cropDebug.raw_confidence = cropResolved.rawConfidence;
+      cropDebug.probabilities = prediction.probabilities;
+      cropDebug.visible_color = cropResolved.visibleColor;
+      cropDebug.color_confidence = cropResolved.colorConfidence;
+      cropDebug.red_total = cropResolved.redTotal;
+      cropDebug.dark_total = cropResolved.darkTotal;
+      cropDebug.roi_source = crop.roi_source;
+      cropDebug.crop_frame_delay_ms = crop.frame_delay_ms;
+      cropDebug.rgb_b64 = crop.rgb_b64;
+      cropPreview = buildCropPreview(rgb, {
+        roiSource: crop.roi_source,
+        frameDelayMs: crop.frame_delay_ms,
+        side: resolved.side,
+        confidence: resolved.confidence,
+        decisionSource: resolved.decisionSource,
+        rawSide: cropResolved.rawLabel,
+        rawConfidence: cropResolved.rawConfidence,
+        visibleColor: cropResolved.visibleColor,
+        redTotal: cropResolved.redTotal,
+        darkTotal: cropResolved.darkTotal,
+      });
+    } catch (error) {
+      cropDebug.crop_error = String((error as Error)?.message ?? error);
+      resolved = { side: 'uncertain', confidence: 0, decisionSource: 'wrist_crop_queue_error' };
+      cropPreview = null;
+    }
+
+    if (job.sessionId !== sideSessionIdRef.current) return;
+
+    if (resolved.side === 'forehand') setFhCount(n => n + 1);
+    else if (resolved.side === 'backhand') setBhCount(n => n + 1);
+    else setUncertainCount(n => n + 1);
+    setLastSide({ side: resolved.side, confidence: resolved.confidence, source: resolved.decisionSource });
+    setLastCropPreview(cropPreview);
+
+    if (debugEventsRef.current.length < 300) {
+      debugEventsRef.current.push({
+        onset_time_ms: job.onsetTimeMs,
+        side: resolved.side,
+        confidence: resolved.confidence,
+        decision_source: resolved.decisionSource,
+        tracker_version: TRACKER_VERSION,
+        track_tracked: track.tracked,
+        track_label: track.label,
+        track_color: track.color,
+        track_confidence: track.confidence,
+        track_source: track.source,
+        track_frame_delay_ms: track.frame_delay_ms,
+        track_x: track.x,
+        track_y: track.y,
+        track_width: track.width,
+        track_height: track.height,
+        track_red_score: track.red_score,
+        track_dark_score: track.dark_score,
+        track_area_ratio: track.area_ratio,
+        track_fill_ratio: track.fill_ratio,
+        audio_label: job.audioDecision.label ?? 'unknown',
+        audio_confidence: job.audioDecision.confidence ?? 0,
+        audio_contact_threshold: job.audioDecision.contactThreshold,
+        audio_surface_label: job.audioDecision.surfaceLabel,
+        audio_surface_confidence: job.audioDecision.surfaceConfidence,
+        audio_hybrid_veto_probability: job.audioDecision.hybridVetoProbability,
+        audio_hybrid_veto_threshold: job.audioDecision.hybridVetoThreshold,
+        audio_hybrid_veto_bypassed: job.audioDecision.hybridVetoBypassed,
+        audio_hybrid_veto_bypass_threshold: job.audioDecision.hybridVetoBypassThreshold,
+        ...cropDebug,
+      });
+    }
+  }, []);
+
+  const processSideQueue = useCallback(() => {
+    if (sideQueueProcessingRef.current) return;
+    sideQueueProcessingRef.current = true;
+    setSideQueueProcessing(true);
+
+    void (async () => {
+      try {
+        while (sideQueueRef.current.length > 0) {
+          const job = sideQueueRef.current.shift();
+          setSideQueueSize(sideQueueRef.current.length);
+          if (job) {
+            await processWristCropJob(job);
+          }
+        }
+      } finally {
+        sideQueueProcessingRef.current = false;
+        setSideQueueProcessing(false);
+        setSideQueueSize(sideQueueRef.current.length);
+      }
+    })();
+  }, [processWristCropJob]);
+
+  const updatePostEvidenceReadyCount = useCallback(() => {
+    setPostEvidenceReadyCount(
+      postSideJobsRef.current.filter(job => job.status === 'ready' || job.status === 'error').length,
+    );
+  }, []);
+
+  const capturePostSideEvidence = useCallback((job: PostSideJob) => {
+    const capturePromise = (async () => {
+      job.status = 'capturing';
+      await new Promise<void>(resolve => setTimeout(() => resolve(), POST_CROP_CAPTURE_DELAY_MS));
+      if (job.sessionId !== sideSessionIdRef.current) return;
+      job.track = await BounceSideLive.getRacketTrack(job.onsetTimeMs).catch(() => lostTrack());
+
+      const candidates: PostCropCandidate[] = [];
+      const errors: string[] = [];
+      for (const offsetMs of POST_CROP_OFFSETS_MS) {
+        if (job.sessionId !== sideSessionIdRef.current) return;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const crop = await BounceSideLive.captureCrop(job.onsetTimeMs + offsetMs);
+          candidates.push(classifyPostCropCandidate(crop, offsetMs, forehandColorRef.current));
+        } catch (error) {
+          errors.push(`${offsetMs}:${String((error as Error)?.message ?? error)}`);
+        }
+      }
+
+      if (job.sessionId !== sideSessionIdRef.current) return;
+      job.candidates = candidates;
+      if (candidates.length > 0) {
+        job.status = 'ready';
+      } else {
+        job.status = 'error';
+        job.error = errors.join('; ') || 'no_crop_candidates';
+      }
+      updatePostEvidenceReadyCount();
+    })();
+
+    let trackedPromise: Promise<void>;
+    trackedPromise = capturePromise.finally(() => {
+      postCapturePromisesRef.current = postCapturePromisesRef.current.filter(promise => promise !== trackedPromise);
+    });
+    postCapturePromisesRef.current.push(trackedPromise);
+  }, [updatePostEvidenceReadyCount]);
+
+  const waitForPostEvidenceIdle = useCallback(async (timeoutMs = POST_EVIDENCE_WAIT_TIMEOUT_MS) => {
+    const startedAt = Date.now();
+    while (postCapturePromisesRef.current.length > 0) {
+      if (Date.now() - startedAt > timeoutMs) return;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise(resolve => setTimeout(() => resolve(undefined), 50));
+    }
+  }, []);
+
+  const finalizePostSideResults = useCallback(async (message = 'Klar. FH/BH beraknat efter stopp.') => {
+    setPostProcessing(true);
+    setStatusText('Bearbetar FH/BH efter stopp...');
+    await waitForPostEvidenceIdle();
+
+    let nextFh = 0;
+    let nextBh = 0;
+    let nextUncertain = 0;
+    let lastPreview: CropPreview | null = null;
+    let lastResolved: { side: LiveSide; confidence: number; source: string } | null = null;
+
+    for (const job of postSideJobsRef.current) {
+      const selected = pickPostCropCandidate(job.candidates);
+      const track = job.track ?? await BounceSideLive.getRacketTrack(job.onsetTimeMs).catch(() => lostTrack());
+      const resolved = selected?.resolved ?? {
+        side: 'uncertain' as LiveSide,
+        confidence: 0,
+        decisionSource: job.error ? 'wrist_crop_post_no_evidence' : 'wrist_crop_post_unavailable',
+      };
+
+      if (resolved.side === 'forehand') nextFh += 1;
+      else if (resolved.side === 'backhand') nextBh += 1;
+      else nextUncertain += 1;
+
+      if (selected) {
+        lastPreview = selected.preview;
+      }
+      lastResolved = { side: resolved.side, confidence: resolved.confidence, source: resolved.decisionSource };
+
+      if (debugEventsRef.current.length < 300) {
+        debugEventsRef.current.push({
+          onset_time_ms: job.onsetTimeMs,
+          side: resolved.side,
+          confidence: resolved.confidence,
+          decision_source: resolved.decisionSource,
+          tracker_version: TRACKER_VERSION,
+          track_tracked: track.tracked,
+          track_label: track.label,
+          track_color: track.color,
+          track_confidence: track.confidence,
+          track_source: track.source,
+          track_frame_delay_ms: track.frame_delay_ms,
+          track_x: track.x,
+          track_y: track.y,
+          track_width: track.width,
+          track_height: track.height,
+          track_red_score: track.red_score,
+          track_dark_score: track.dark_score,
+          track_area_ratio: track.area_ratio,
+          track_fill_ratio: track.fill_ratio,
+          audio_label: job.audioDecision.label ?? 'unknown',
+          audio_confidence: job.audioDecision.confidence ?? 0,
+          audio_contact_threshold: job.audioDecision.contactThreshold,
+          audio_surface_label: job.audioDecision.surfaceLabel,
+          audio_surface_confidence: job.audioDecision.surfaceConfidence,
+          audio_hybrid_veto_probability: job.audioDecision.hybridVetoProbability,
+          audio_hybrid_veto_threshold: job.audioDecision.hybridVetoThreshold,
+          audio_hybrid_veto_bypassed: job.audioDecision.hybridVetoBypassed,
+          audio_hybrid_veto_bypass_threshold: job.audioDecision.hybridVetoBypassThreshold,
+          post_processing_mode: true,
+          post_selected_offset_ms: selected?.targetOffsetMs,
+          post_selected_actual_delay_ms: selected?.actualDelayMs,
+          post_crop_candidates: job.candidates.map(candidate => candidate.debug),
+          crop_error: selected ? undefined : job.error,
+          ...(selected?.cropDebug ?? {}),
+        });
+      }
+    }
+
+    setFhCount(nextFh);
+    setBhCount(nextBh);
+    setUncertainCount(nextUncertain);
+    setLastCropPreview(lastPreview);
+    setLastSide(lastResolved);
+    setPostProcessing(false);
+    setPostResultsReady(true);
+    setStatusText(`${message} Total ${postSideJobsRef.current.length}: FH ${nextFh}, BH ${nextBh}, OSAKER ${nextUncertain}.`);
+    writeDebugDump();
+  }, [waitForPostEvidenceIdle, writeDebugDump]);
+
+  const waitForSideQueueIdle = useCallback(async (timeoutMs = 5000) => {
+    const startedAt = Date.now();
+    while (sideQueueProcessingRef.current || sideQueueRef.current.length > 0) {
+      if (Date.now() - startedAt > timeoutMs) return;
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise(resolve => setTimeout(() => resolve(undefined), 50));
+    }
+  }, []);
+
   const stopCounting = useCallback((message = 'Stoppad. Kameran ar kvar for riktning.') => {
     AudioStream.stopStreaming();
     setIsRunning(false);
+    if (usesPostWristCropSide) {
+      void finalizePostSideResults('Stoppad. Efterbearbetning klar.');
+      return;
+    }
+    if (usesQueuedWristCropSide && (sideQueueProcessingRef.current || sideQueueRef.current.length > 0)) {
+      const pending = sideQueueRef.current.length + (sideQueueProcessingRef.current ? 1 : 0);
+      setStatusText(`Bearbetar ${pending} sidcrop innan debug sparas...`);
+      void (async () => {
+        await waitForSideQueueIdle();
+        writeDebugDump();
+        setStatusText(message);
+      })();
+      return;
+    }
     writeDebugDump();
     setStatusText(message);
-  }, [writeDebugDump]);
+  }, [finalizePostSideResults, usesPostWristCropSide, usesQueuedWristCropSide, waitForSideQueueIdle, writeDebugDump]);
 
   const stopAll = useCallback(() => {
     AudioStream.stopStreaming();
@@ -335,10 +875,12 @@ export function BounceSideLiveScreen({
     cameraStartedRef.current = false;
     setCameraReady(false);
     setIsRunning(false);
+    resetSideQueue();
     writeDebugDump();
-  }, [writeDebugDump]);
+  }, [resetSideQueue, writeDebugDump]);
 
   const toggle = useCallback(() => {
+    if (postProcessing) return;
     if (isRunning) {
       stopCounting();
       return;
@@ -358,10 +900,12 @@ export function BounceSideLiveScreen({
         debugEventsRef.current = [];
         audioCandidatesRef.current = [];
         hybridLastQualifiedTsRef.current = undefined;
+        resetSideQueue();
         setFhCount(0);
         setBhCount(0);
         setUncertainCount(0);
         setLastSide(null);
+        setLastCropPreview(null);
         await AudioStream.startStreaming(
           isHybrid22 ? HYBRID22_ONSET_THRESHOLD : isHybrid ? HYBRID_ONSET_THRESHOLD : ONSET_THRESHOLD,
         );
@@ -382,14 +926,30 @@ export function BounceSideLiveScreen({
             ? (usesWristCropSide
                 ? 'Hybrid 2.2 lyssnar. FH/BH avgors med handledscrop efter varje studs.'
                 : 'Hybrid 2.2 lyssnar och kameran avgor FH/BH. Studsa bollen pa racketen!')
-            : isHybrid
-              ? 'Hybrid lyssnar. FH/BH avgors med handledscrop efter varje studs.'
+          : isHybrid
+            ? (usesQueuedWristCropSide
+                ? 'Hybrid lyssnar. Ljudstudsar koas och FH/BH bearbetas efterat.'
+                : usesPostWristCropSide
+                  ? 'Hybrid lyssnar. Samlar crop-evidens; FH/BH visas efter STOPPA.'
+                : 'Hybrid lyssnar. FH/BH avgors med handledscrop efter varje studs.')
               : 'Lyssnar och tittar. Studsa bollen pa racketen!');
       } catch (error) {
         setStatusText(`Kunde inte starta: ${String((error as Error)?.message ?? error)}`);
       }
     })();
-  }, [audioOnlyMode, isHybrid, isHybrid22, isRunning, startCameraForAiming, stopCounting, usesWristCropSide]);
+  }, [
+    audioOnlyMode,
+    isHybrid,
+    isHybrid22,
+    isRunning,
+    postProcessing,
+    resetSideQueue,
+    startCameraForAiming,
+    stopCounting,
+    usesPostWristCropSide,
+    usesQueuedWristCropSide,
+    usesWristCropSide,
+  ]);
 
   useEffect(() => {
     if (!cameraViewReady || audioOnlyMode) return;
@@ -416,8 +976,9 @@ export function BounceSideLiveScreen({
 
     const sub = AudioStreamEmitter.addListener('onBounceDetected', (event: NativeAudioBounceEvent) => {
       const { audioB64, nativeDebug } = parseNativeEvent(event);
-      if (!audioB64 || busyRef.current) return;
-      busyRef.current = true;
+      if (!audioB64) return;
+      if (!usesQueuedWristCropSide && busyRef.current) return;
+      if (!usesQueuedWristCropSide) busyRef.current = true;
       void (async () => {
         try {
           const onsetTimeMs = nativeDebug?.onset_time_ms ?? Date.now();
@@ -542,9 +1103,40 @@ export function BounceSideLiveScreen({
             return;
           }
 
+          if (usesPostWristCropSide) {
+            const job: PostSideJob = {
+              id: nextSideJobIdRef.current,
+              sessionId: sideSessionIdRef.current,
+              onsetTimeMs,
+              audioDecision,
+              status: 'pending',
+              candidates: [],
+            };
+            nextSideJobIdRef.current += 1;
+            postSideJobsRef.current.push(job);
+            setPostAudioCount(postSideJobsRef.current.length);
+            setStatusText(`Samlar ljudstudsar: ${postSideJobsRef.current.length}. FH/BH visas efter STOPPA.`);
+            capturePostSideEvidence(job);
+            return;
+          }
+
+          if (usesQueuedWristCropSide) {
+            sideQueueRef.current.push({
+              id: nextSideJobIdRef.current,
+              sessionId: sideSessionIdRef.current,
+              onsetTimeMs,
+              audioDecision,
+            });
+            nextSideJobIdRef.current += 1;
+            setSideQueueSize(sideQueueRef.current.length);
+            processSideQueue();
+            return;
+          }
+
           const track = await BounceSideLive.getRacketTrack(onsetTimeMs).catch(() => lostTrack());
           let resolved = resolveTrackSide(track, forehandColorRef.current);
           const cropDebug: Partial<LiveDebugEvent> = {};
+          let cropPreview: CropPreview | null = null;
 
           try {
             const crop = await BounceSideLive.captureCrop(onsetTimeMs);
@@ -575,9 +1167,22 @@ export function BounceSideLiveScreen({
                 confidence: cropResolved.confidence,
                 decisionSource: `wrist_crop_${cropResolved.decisionSource}`,
               };
+              cropPreview = buildCropPreview(rgb, {
+                roiSource: crop.roi_source,
+                frameDelayMs: crop.frame_delay_ms,
+                side: resolved.side,
+                confidence: resolved.confidence,
+                decisionSource: resolved.decisionSource,
+                rawSide: cropResolved.rawLabel,
+                rawConfidence: cropResolved.rawConfidence,
+                visibleColor: cropResolved.visibleColor,
+                redTotal: cropResolved.redTotal,
+                darkTotal: cropResolved.darkTotal,
+              });
             }
           } catch (error) {
             cropDebug.crop_error = String((error as Error)?.message ?? error);
+            setLastCropPreview(null);
             if (usesWristCropSide) {
               resolved = { side: 'uncertain', confidence: 0, decisionSource: 'wrist_crop_error' };
             }
@@ -620,20 +1225,34 @@ export function BounceSideLiveScreen({
             ...cropDebug,
           };
 
+          if (cropPreview) setLastCropPreview(cropPreview);
+
           if (debugEventsRef.current.length < 300) {
             debugEventsRef.current.push(debugEvent);
           }
         } finally {
-          busyRef.current = false;
+          if (!usesQueuedWristCropSide) busyRef.current = false;
         }
       })();
     });
 
     return () => sub.remove();
-  }, [audioOnlyMode, audioTriggerMode, isHybrid22, isRunning, usesAudioContactEngine, usesWristCropSide]);
+  }, [
+    audioOnlyMode,
+    audioTriggerMode,
+    capturePostSideEvidence,
+    isHybrid22,
+    isRunning,
+    processSideQueue,
+    usesAudioContactEngine,
+    usesPostWristCropSide,
+    usesQueuedWristCropSide,
+    usesWristCropSide,
+  ]);
 
-  const shouldShowTrackerOverlay = !usesWristCropSide;
+  const shouldShowTrackerOverlay = !usesAnyWristCropSide;
   const shownTrack = shouldShowTrackerOverlay ? visibleTrack(latestTrack) : null;
+  const sideQueueDisplayCount = sideQueueSize + (sideQueueProcessing ? 1 : 0);
 
   return (
     <View style={[styles.root, { paddingTop: insets.top }]}>
@@ -643,14 +1262,22 @@ export function BounceSideLiveScreen({
           <Text style={styles.back}>{'<'} Tillbaka</Text>
         </TouchableOpacity>
         <Text style={styles.title}>
-          {isHybrid22
+          {usesPostWristCropSide
+            ? 'Studs FH/BH LIVE v6'
+            : usesQueuedWristCropSide
+            ? 'Studs FH/BH LIVE v5'
+            : isHybrid22
             ? (usesWristCropSide ? 'Studs FH/BH LIVE v3' : 'Studs FH/BH LIVE v2')
             : isHybrid && usesWristCropSide
               ? 'Studs FH/BH LIVE v4'
               : 'Studs FH/BH LIVE'}
         </Text>
         <Text style={styles.subtitle}>
-          {isHybrid22
+          {usesPostWristCropSide
+            ? 'Hybrid audio + post-session wrist crop side'
+            : usesQueuedWristCropSide
+            ? 'Hybrid audio + queued wrist crop side'
+            : isHybrid22
             ? (usesWristCropSide ? 'Hybrid 2.2 audio + wrist crop side' : `Hybrid 2.2 audio + ${TRACKER_VERSION}`)
             : isHybrid && usesWristCropSide
               ? 'Hybrid audio + wrist crop side'
@@ -701,6 +1328,30 @@ export function BounceSideLiveScreen({
             </Text>
           </View>
         ) : null}
+        {usesAnyWristCropSide && lastCropPreview ? (
+          <View pointerEvents="none" style={styles.cropPreviewCard}>
+            <View style={styles.cropPreviewGrid}>
+              {lastCropPreview.pixels.map((color, index) => (
+                <View
+                  // eslint-disable-next-line react/no-array-index-key
+                  key={index}
+                  style={[styles.cropPreviewPixel, { backgroundColor: color }]}
+                />
+              ))}
+            </View>
+            <View style={styles.cropPreviewTextWrap}>
+              <Text style={styles.cropPreviewTitle}>
+                crop {lastCropPreview.side === 'forehand' ? 'FH' : lastCropPreview.side === 'backhand' ? 'BH' : 'OSAKER'} {(lastCropPreview.confidence * 100).toFixed(0)}%
+              </Text>
+              <Text style={styles.cropPreviewText}>
+                {lastCropPreview.visibleColor} r{(lastCropPreview.redTotal * 100).toFixed(0)} d{(lastCropPreview.darkTotal * 100).toFixed(0)}
+              </Text>
+              <Text style={styles.cropPreviewText}>
+                {lastCropPreview.roiSource} {lastCropPreview.frameDelayMs.toFixed(0)}ms
+              </Text>
+            </View>
+          </View>
+        ) : null}
       </View>
 
       <View style={styles.countRow}>
@@ -740,10 +1391,10 @@ export function BounceSideLiveScreen({
         style={[
           styles.audioOnlyToggle,
           audioOnlyMode && styles.audioOnlyToggleActive,
-          isRunning && styles.audioOnlyToggleDisabled,
+          (isRunning || postProcessing) && styles.audioOnlyToggleDisabled,
         ]}
         onPress={() => {
-          if (!isRunning) {
+          if (!isRunning && !postProcessing) {
             setAudioOnlyMode(value => {
               const nextValue = !value;
               if (nextValue) {
@@ -758,7 +1409,7 @@ export function BounceSideLiveScreen({
             });
           }
         }}
-        disabled={isRunning}
+        disabled={isRunning || postProcessing}
       >
         <Text style={[styles.audioOnlyTitle, audioOnlyMode && styles.audioOnlyTitleActive]}>
           {audioOnlyMode ? 'Audio only: ON' : 'Audio only: OFF'}
@@ -772,16 +1423,50 @@ export function BounceSideLiveScreen({
         </Text>
       </TouchableOpacity>
 
+      {usesPostWristCropSide ? (
+        <View style={styles.queueStatus}>
+          <Text style={styles.queueStatusTitle}>
+            {postProcessing
+              ? `Post-processing ${postEvidenceReadyCount}/${postAudioCount}`
+              : postResultsReady
+                ? `Final result: ${postAudioCount} audio bounces`
+                : isRunning
+                  ? `Collected audio: ${postAudioCount}`
+                  : 'Post-session FH/BH: ready'}
+          </Text>
+          <Text style={styles.queueStatusHint}>
+            {postProcessing
+              ? 'Valjer basta crop per studs och raknar FH/BH'
+              : isRunning
+                ? `Crop evidence ready: ${postEvidenceReadyCount}/${postAudioCount}`
+                : 'Tryck STOPPA for att rakna FH/BH fran sparade crop-fonster'}
+          </Text>
+        </View>
+      ) : null}
+
+      {usesQueuedWristCropSide ? (
+        <View style={styles.queueStatus}>
+          <Text style={styles.queueStatusTitle}>
+            {sideQueueDisplayCount > 0 ? `Side queue: ${sideQueueDisplayCount}` : 'Side queue: ready'}
+          </Text>
+          <Text style={styles.queueStatusHint}>
+            {sideQueueProcessing
+              ? 'Bearbetar crop/model efter ljudstuds'
+              : 'Ljud kan fortsatta medan FH/BH kommer ikapp'}
+          </Text>
+        </View>
+      ) : null}
+
       <TouchableOpacity
         style={[
           styles.toggle,
           isRunning ? styles.toggleStop : styles.toggleStart,
-          !isRunning && !audioOnlyMode && !cameraReady && styles.toggleDisabled,
+          ((!isRunning && !audioOnlyMode && !cameraReady) || postProcessing) && styles.toggleDisabled,
         ]}
         onPress={toggle}
-        disabled={!isRunning && !audioOnlyMode && !cameraReady}
+        disabled={postProcessing || (!isRunning && !audioOnlyMode && !cameraReady)}
       >
-        <Text style={styles.toggleText}>{isRunning ? 'STOPPA' : 'STARTA'}</Text>
+        <Text style={styles.toggleText}>{postProcessing ? 'BEARBETAR' : isRunning ? 'STOPPA' : 'STARTA'}</Text>
       </TouchableOpacity>
 
       <Text style={styles.statusText}>{statusText}</Text>
@@ -833,6 +1518,31 @@ const styles = StyleSheet.create({
   badgeBh: { backgroundColor: 'rgba(241,196,15,0.85)' },
   badgeUncertain: { backgroundColor: 'rgba(150,150,150,0.85)' },
   sideBadgeTxt: { color: '#000', fontWeight: '800', fontSize: 16 },
+  cropPreviewCard: {
+    position: 'absolute',
+    right: 10,
+    bottom: 10,
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.18)',
+    padding: 8,
+    borderRadius: 8,
+    maxWidth: 210,
+  },
+  cropPreviewGrid: {
+    width: 64,
+    height: 64,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    backgroundColor: '#111',
+  },
+  cropPreviewPixel: { width: 4, height: 4 },
+  cropPreviewTextWrap: { flexShrink: 1 },
+  cropPreviewTitle: { color: '#fff', fontSize: 11, fontWeight: '800' },
+  cropPreviewText: { color: '#bbb', fontSize: 10, fontFamily: 'monospace' },
   countRow: { flexDirection: 'row', gap: 12, paddingHorizontal: 12 },
   countBox: { flex: 1, alignItems: 'center', backgroundColor: '#101010', borderRadius: 12, paddingVertical: 10 },
   countValue: { fontSize: 44, fontWeight: '800' },
@@ -858,6 +1568,18 @@ const styles = StyleSheet.create({
   audioOnlyTitle: { color: '#aaa', fontSize: 14, fontWeight: '800' },
   audioOnlyTitleActive: { color: '#31f06a' },
   audioOnlyHint: { color: '#777', fontSize: 11, marginTop: 2 },
+  queueStatus: {
+    marginHorizontal: 16,
+    marginTop: 8,
+    borderWidth: 1,
+    borderColor: '#25466b',
+    backgroundColor: '#071522',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+  },
+  queueStatusTitle: { color: '#8fd0ff', fontSize: 13, fontWeight: '800' },
+  queueStatusHint: { color: '#8da4b8', fontSize: 11, marginTop: 2 },
   toggle: { marginHorizontal: 24, marginVertical: 10, paddingVertical: 14, borderRadius: 10, alignItems: 'center' },
   toggleStart: { backgroundColor: '#1d6f42' },
   toggleStop: { backgroundColor: '#8e2b2b' },

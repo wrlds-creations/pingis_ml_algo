@@ -177,7 +177,7 @@ class BounceSideLiveModule(private val ctx: ReactApplicationContext)
 
     private val frameLock = Any()
     private val frameBuffer = ArrayDeque<FrameRec>()
-    private val maxBufferedFrames = 16
+    private val maxBufferedFrames = 60
 
     private val trackLock = Any()
     private val trackBuffer = ArrayDeque<RacketTrackRec>()

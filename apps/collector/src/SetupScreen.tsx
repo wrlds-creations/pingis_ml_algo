@@ -28,6 +28,8 @@ interface Props {
   onBounceSideLiveV2Mode?: (setup: PlayerSetup) => void;
   onBounceSideLiveV3Mode?: (setup: PlayerSetup) => void;
   onBounceSideLiveV4Mode?: (setup: PlayerSetup) => void;
+  onBounceSideLiveV5Mode?: (setup: PlayerSetup) => void;
+  onBounceSideLiveV6Mode?: (setup: PlayerSetup) => void;
   onBounceFreeMode?: (setup: PlayerSetup) => void;
   onBounceAlternatingMode?: (setup: PlayerSetup) => void;
 }
@@ -47,6 +49,8 @@ export function SetupScreen({
   onBounceSideLiveV2Mode,
   onBounceSideLiveV3Mode,
   onBounceSideLiveV4Mode,
+  onBounceSideLiveV5Mode,
+  onBounceSideLiveV6Mode,
   onBounceFreeMode,
   onBounceAlternatingMode,
 }: Props) {
@@ -211,6 +215,24 @@ export function SetupScreen({
             subtitle="Hybrid audio trigger + wrist crop FH/BH side model."
             colorStyle="blue"
             onPress={() => canContinue && onBounceSideLiveV4Mode(setup)}
+          />
+        )}
+        {onBounceSideLiveV5Mode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Studs FH/BH LIVE v5"
+            subtitle="Hybrid audio trigger + queued wrist-crop side jobs."
+            colorStyle="green"
+            onPress={() => canContinue && onBounceSideLiveV5Mode(setup)}
+          />
+        )}
+        {onBounceSideLiveV6Mode && (
+          <ModeButton
+            disabled={!canContinue}
+            title="Studs FH/BH LIVE v6"
+            subtitle="Hybrid audio trigger + post-session FH/BH side processing."
+            colorStyle="gold"
+            onPress={() => canContinue && onBounceSideLiveV6Mode(setup)}
           />
         )}
         <Text style={styles.sectionLabel}>DATA</Text>
