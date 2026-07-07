@@ -2,6 +2,7 @@
 
 # ML training data - can grow to hundreds of MB
 /data/
+/raw/
 
 # Python
 __pycache__/
@@ -15,6 +16,10 @@ venv/
 # Local dependency/debug downloads
 tmp_media3_*/
 tmp_media3_*.zip
+
+# Local generated Edge Impulse SDK exports. Keep wrappers in git, not SDK drops.
+/apps/collector/android/app/src/main/cpp/edge_impulse_local/
+/apps/collector/android/app/src/main/jniLibs/**/libedge_impulse_pingpong.so
 
 # Model artifacts (keep .tflite in git, exclude large checkpoints)
 *.pkl

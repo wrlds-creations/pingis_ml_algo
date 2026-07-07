@@ -239,6 +239,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   const [selectedModelId, setSelectedModelId] = useState(BOUNCE_AUDIO_TEST_DEFAULT_MODEL_ID);
   const selectedModelOption = getBounceAudioTestModelOption(selectedModelId);
   const selectedModelUsesTypedConfig = modelOptionUsesTypedRuntimeConfig(selectedModelOption);
+  const selectedModelUsesNoiseVeto = selectedModelOption.runtimeMode === 'peak_extra_trees';
   const [activeModelOption, setActiveModelOption] = useState<BounceAudioTestModelOption>(defaultModelOption);
   const [selectedScenarioId, setSelectedScenarioId] = useState(TEST_SCENARIOS[0].id);
   const [expectedCount, setExpectedCount] = useState('');
@@ -256,19 +257,24 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   const typedRuntimeConfig = useMemo(() => {
     if (!selectedModelUsesTypedConfig) return defaultRuntimeConfigForModelId(selectedModelId);
     const threshold = parseProbabilityInput(thresholdText);
+    if (selectedModelOption.runtimeMode === 'edge_impulse_native') {
+      if (threshold === null) return null;
+      return { threshold, fableNoiseVetoThreshold: 1.0 };
+    }
     const fableNoiseVetoThreshold = parseProbabilityInput(noiseVetoText);
     if (threshold === null || fableNoiseVetoThreshold === null) return null;
     return { threshold, fableNoiseVetoThreshold };
-  }, [noiseVetoText, selectedModelId, selectedModelUsesTypedConfig, thresholdText]);
+  }, [noiseVetoText, selectedModelId, selectedModelOption.runtimeMode, selectedModelUsesTypedConfig, thresholdText]);
 
   const configError = useMemo(() => {
     if (!selectedModelUsesTypedConfig) return null;
     const threshold = parseProbabilityInput(thresholdText);
     if (threshold === null) return 'p threshold must be 0-1 or 0-100%.';
+    if (selectedModelOption.runtimeMode === 'edge_impulse_native') return null;
     const veto = parseProbabilityInput(noiseVetoText);
     if (veto === null) return 'Noise veto must be 0-1 or 0-100%.';
     return null;
-  }, [noiseVetoText, selectedModelUsesTypedConfig, thresholdText]);
+  }, [noiseVetoText, selectedModelOption.runtimeMode, selectedModelUsesTypedConfig, thresholdText]);
 
   const syncSnapshot = useCallback(() => {
     const rows = engineRef.current.getRows();
@@ -307,7 +313,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     const decisionConfig = activeDecisionConfigRef.current;
     const modelOption = activeModelOptionRef.current;
     const modelMetadata = engineRef.current.getModelMetadata();
-    const peakGateConfig = modelOption.runtimeMode === 'peak_extra_trees'
+    const peakGateConfig = modelOption.runtimeMode === 'peak_extra_trees' || modelOption.runtimeMode === 'edge_impulse_native'
       ? getBounceAudioTestPeakGateConfig(modelOption)
       : null;
     const payload = {
@@ -407,7 +413,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     setCountUnclear(false);
     setStatus(modelSelection.modelOption.runtimeMode === 'rms_fable'
       ? 'Starting RMS + Fable stream...'
-      : 'Starting peak-gate stream...');
+      : modelSelection.modelOption.runtimeMode === 'edge_impulse_native'
+        ? 'Starting Edge Impulse stream...'
+        : 'Starting peak-gate stream...');
 
     void (async () => {
       try {
@@ -437,17 +445,23 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
             peakGateConfig.ratioMinimum,
             peakGateConfig.zMinimum,
           );
+          if (modelSelection.modelOption.runtimeMode === 'edge_impulse_native') {
+            await AudioStream.setEdgeImpulseConfig(true, modelSelection.runtimeConfig.threshold);
+          }
         }
         setIsListening(true);
         setStatus(modelSelection.modelOption.runtimeMode === 'rms_fable'
           ? 'Listening with RMS+Fable original gate/counter. p and veto fields are ignored.'
-          : `Listening with ${modelSelection.modelOption.shortTitle}, p>=${formatPercent(modelSelection.runtimeConfig.threshold)}, noise veto>=${formatPercent(modelSelection.runtimeConfig.fableNoiseVetoThreshold)}.`);
+          : modelSelection.modelOption.runtimeMode === 'edge_impulse_native'
+            ? `Listening with ${modelSelection.modelOption.shortTitle}, Edge Impulse p>=${formatPercent(modelSelection.runtimeConfig.threshold)}. Noise veto is ignored.`
+            : `Listening with ${modelSelection.modelOption.shortTitle}, p>=${formatPercent(modelSelection.runtimeConfig.threshold)}, noise veto>=${formatPercent(modelSelection.runtimeConfig.fableNoiseVetoThreshold)}.`);
       } catch (err) {
         setStatus(`Could not start: ${shortError(err)}`);
         startedAtRef.current = null;
         pathsRef.current = null;
         try { await AudioStream.stopStreaming(); } catch (_) {}
         try { await AudioStream.setDebugRecordingPath(null); } catch (_) {}
+        try { await AudioStream.setEdgeImpulseConfig(false, 0.6); } catch (_) {}
       }
     })();
   }, [configError, isListening, pendingDebugSession, selectedModelId, typedRuntimeConfig]);
@@ -457,6 +471,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
     void (async () => {
       setStatus('Stopping...');
       try { await AudioStream.stopStreaming(); } catch (_) {}
+      try { await AudioStream.setEdgeImpulseConfig(false, 0.6); } catch (_) {}
       try {
         await AudioStream.setPeakGateConfig(
           false,
@@ -532,6 +547,7 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   useEffect(() => () => {
     if (isListening) {
       AudioStream.stopStreaming().catch(() => {});
+      AudioStream.setEdgeImpulseConfig(false, 0.6).catch(() => {});
       AudioStream.setDebugRecordingPath(null).catch(() => {});
     }
   }, [isListening]);
@@ -550,8 +566,12 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
   const displayedModelOption = isListening || pendingDebugSession ? activeModelOption : selectedModelOption;
   const displayedModelMetadata = getBounceAudioTestModelMetadata(displayedModelOption);
   const displayedModelUsesTypedConfig = modelOptionUsesTypedRuntimeConfig(displayedModelOption);
-  const displayedCandidateLabel = displayedModelOption.runtimeMode === 'rms_fable' ? 'RMS candidates' : 'peak candidates';
-  const displayedPeakGateConfig = displayedModelOption.runtimeMode === 'peak_extra_trees'
+  const displayedCandidateLabel = displayedModelOption.runtimeMode === 'rms_fable'
+    ? 'RMS candidates'
+    : displayedModelOption.runtimeMode === 'edge_impulse_native'
+      ? 'EI peak candidates'
+      : 'peak candidates';
+  const displayedPeakGateConfig = displayedModelOption.runtimeMode === 'peak_extra_trees' || displayedModelOption.runtimeMode === 'edge_impulse_native'
     ? getBounceAudioTestPeakGateConfig(displayedModelOption)
     : null;
   const displayedDecisionConfig = isListening || pendingDebugSession
@@ -682,12 +702,12 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
           <TextInput
             style={[
               styles.configInput,
-              !selectedModelUsesTypedConfig && styles.configInputDisabled,
-              selectedModelUsesTypedConfig && parseProbabilityInput(noiseVetoText) === null && styles.configInputError,
+              !selectedModelUsesNoiseVeto && styles.configInputDisabled,
+              selectedModelUsesNoiseVeto && parseProbabilityInput(noiseVetoText) === null && styles.configInputError,
             ]}
             value={noiseVetoText}
             onChangeText={setNoiseVetoText}
-            editable={canEditConfig && selectedModelUsesTypedConfig}
+            editable={canEditConfig && selectedModelUsesNoiseVeto}
             keyboardType="default"
             placeholder={formatProbabilityInput(BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG.fableNoiseVetoThreshold)}
             placeholderTextColor="#555"
@@ -696,7 +716,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
         </View>
       </View>
       <Text style={styles.configHint}>
-        {selectedModelUsesTypedConfig
+        {selectedModelOption.runtimeMode === 'edge_impulse_native'
+          ? 'Edge Impulse uses p threshold as Bounce probability. Noise veto is ignored for this option.'
+          : selectedModelUsesTypedConfig
           ? 'Type decimals or percents: 0.575, 57.5%, or 100% to disable noise veto.'
           : 'RMS+Fable uses the original Fable counter. p threshold and noise veto are ignored for this option.'}
       </Text>
@@ -718,7 +740,9 @@ export function BounceAudioTestScreen({ setup, onDone }: Props) {
       </TouchableOpacity>
 
       <Text style={styles.configLine}>
-        {displayedModelUsesTypedConfig
+        {displayedModelOption.runtimeMode === 'edge_impulse_native'
+          ? `${displayedModelOption.shortTitle} TEST | ${displayedPeakGateConfig?.gateId ?? 'peak gate'} abs>=${displayedPeakGateConfig?.absoluteMinimum.toFixed(3)} | Edge Impulse Bounce p>=${formatPercent(displayedRuntimeConfig.threshold)} | dedupe ${displayedDecisionConfig.smartDedupeMs} ms`
+          : displayedModelUsesTypedConfig
           ? `${displayedModelOption.shortTitle} TEST | ${displayedPeakGateConfig?.gateId ?? 'peak gate'} abs>=${displayedPeakGateConfig?.absoluteMinimum.toFixed(3)} | p>=${formatPercent(displayedRuntimeConfig.threshold)} | Fable noise veto ${displayedRuntimeConfig.fableNoiseVetoThreshold >= 1 ? 'off' : `>=${formatPercent(displayedRuntimeConfig.fableNoiseVetoThreshold)}`} | dedupe ${displayedDecisionConfig.smartDedupeMs} ms | delay ${displayedDecisionConfig.decisionDelayMs} ms`
           : `${displayedModelOption.shortTitle} TEST | RMS bandpass gate | retrigger ${BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.retriggerMs} ms | abs RMS ${BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG.absoluteMinimumRms} | original Fable confidence/count logic`}
       </Text>

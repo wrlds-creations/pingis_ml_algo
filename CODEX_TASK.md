@@ -6,7 +6,7 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Ticket ID
 
-`T0138-fhbh-live-v6-post-session-side-processing`
+`T0139-bounce-audio-edge-impulse-v4-test`
 
 ## Branch
 
@@ -18,13 +18,13 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Add `Studs FH/BH LIVE v6` as a guarded comparison screen focused on more accurate FH/BH detection after a run. V6 should collect accepted audio bounces and timestamped camera crop evidence while the user bounces, then process FH/BH/OSAKER after the user presses STOP instead of trying to show side results live.
+Add the downloaded Edge Impulse `pingpong-cpp-mcu-v4-impulse-#1.zip` model as a guarded Android-only comparison option inside `Bounce audio test`, so Love can test whether the external MFE/TFLite Micro model detects racket bounces better than the current local candidates.
 
 ## Dependencies
 
-- T0137 added `Studs FH/BH LIVE v5`, which queues wrist-crop side jobs so crop/model latency does not block the audio listener.
-- V5 already uses the native camera frame buffer and `captureCrop(targetTimeMs)` to select the frame nearest an audio timestamp.
-- Love reported one-side bouncing works better than alternating; alternating needs better timestamp/crop evidence and can trade realtime feedback for final accuracy.
+- Edge Impulse export exists locally at `C:\Development\Wrlds\edgeImpulse\pingpong-cpp-mcu-v4-impulse-#1.zip`.
+- The zip is a generated C++ MCU SDK/model export, not a small JSON model. Generated SDK contents should not be committed.
+- `Bounce audio test` already supports selectable diagnostic audio runtimes and debug JSON/WAV output.
 
 ## Allowed Areas
 
@@ -33,15 +33,22 @@ Add `Studs FH/BH LIVE v6` as a guarded comparison screen focused on more accurat
 - `REPO_CURRENT_STATE.md`
 - `ITERATION_LOG.md`
 - `DECISIONS.md`
-- `apps/collector/App.tsx`
-- `apps/collector/src/SetupScreen.tsx`
-- `apps/collector/src/BounceSideLiveScreen.tsx`
-- `apps/collector/android/app/src/main/java/com/collectorapp/BounceSideLiveModule.kt`
+- `.gitignore`
+- `apps/collector/src/NativeAudioStream.ts`
+- `apps/collector/src/bounceAudioTestEngine.ts`
+- `apps/collector/src/BounceAudioTestScreen.tsx`
+- `apps/collector/android/app/build.gradle`
+- `apps/collector/android/app/src/main/java/com/collectorapp/AudioStreamModule.kt`
+- `apps/collector/android/app/src/main/java/com/collectorapp/EdgeImpulsePingpongBridge.kt`
+- `apps/collector/android/app/src/main/cpp/CMakeLists.txt`
+- `apps/collector/android/app/src/main/cpp/edge_impulse_pingpong_jni.cpp`
 
 ## Do Not Touch
 
 - Do not retrain or replace any model JSON.
-- Do not change `Bounce audio test`.
+- Do not commit the generated Edge Impulse SDK/export folder.
+- Do not promote Edge Impulse as the default production counter.
+- Do not change `Studs FH/BH LIVE` entries.
 - Do not change STIGA app code.
 - Do not delete raw/generated `data/` or `raw/`.
 - Do not merge to `main`.
@@ -49,50 +56,49 @@ Add `Studs FH/BH LIVE v6` as a guarded comparison screen focused on more accurat
 
 ## Requirements
 
-- Add a new setup entry and route named `Studs FH/BH LIVE v6`.
-- Base v6 on v5's Hybrid audio trigger and wrist-crop side model.
-- During a run, accepted audio bounces should be collected as audio events, not immediately counted as FH/BH.
-- During a run, capture a small timestamp window of wrist-crop evidence around each accepted audio timestamp before the native frame buffer rolls past it.
-- After STOP, select the best crop per bounce, run/resolve the existing wrist-crop side model, and show final FH/BH/OSAKER counts.
-- Improve timestamp debug: store selected crop delay relative to the audio timestamp and the per-crop candidate delays.
-- Keep v1/v2/v3/v4/v5 behavior unchanged.
+- Add a new `Bounce audio test` model option for Edge Impulse v4.
+- Extract the Edge Impulse SDK locally into a gitignored folder for this machine only.
+- Add a native Android wrapper that can compile with or without the local SDK folder.
+- When the SDK is present, run the Edge Impulse classifier on a 16 kHz / 8000-sample centered window around each native peak candidate.
+- Feed the native Edge Impulse probabilities into the existing `Bounce audio test` threshold/dedupe/debug flow.
+- Save Edge Impulse probabilities, label, timing, threshold, and availability/error fields in debug JSON.
+- Keep existing `T0103`, `T0104E`, `T0104E Soft`, and `RMS+Fable` options unchanged.
 
 ## Non-Goals
 
 - No production promotion.
 - No STIGA/iOS port.
-- No new model training or threshold tuning.
-- No native-side side model rewrite.
+- No new model training or Edge Impulse project changes.
+- No commit of the generated SDK.
 - No full video recording.
 
 ## Acceptance Criteria
 
-- `Studs FH/BH LIVE v6` appears in setup and opens.
-- While running, V6 collects accepted audio bounces and crop evidence without requiring immediate FH/BH classification.
-- After STOP, V6 shows final FH/BH/OSAKER counts.
-- Debug JSON contains audio events, selected crop metadata, and crop timing candidates.
+- `Edge Impulse v4` appears in `Bounce audio test`.
+- Existing Bounce audio test model options still work.
+- With the local SDK present, Android emits Edge Impulse `Bounce`/`noise` probabilities for peak candidates.
+- With the local SDK missing, the app still builds and the Edge Impulse option reports unavailable rather than breaking the app.
+- Debug JSON contains Edge Impulse candidate metadata.
 - TypeScript validates.
-- Android/Kotlin validates if native code changes are made.
-- Docs record the new post-session comparison flow.
+- Android/Kotlin/CMake validates.
+- Docs record the diagnostic Edge Impulse integration and local-SDK caveat.
 
 ## Completion Notes
 
-- Added `Studs FH/BH LIVE v6` setup card and route.
-- V6 uses `audioTriggerMode="hybrid"` and `sideDecisionMode="wrist_crop_post"`.
-- Accepted audio bounces are collected during the run without immediate FH/BH side counting.
-- For each accepted audio bounce, V6 captures five timestamped wrist-crop candidates around the audio timestamp before the native frame buffer rolls past it.
-- After STOP, V6 waits for crop evidence, scores candidates by confidence, timing, ROI source, and decision source, then shows final FH/BH/OSAKER counts.
-- Debug JSON stores selected crop timing plus all crop candidate timing/score metadata for each bounce.
-- V1/V2/V3/V4/V5, `Bounce audio test`, model JSONs, STIGA code, raw/generated data, release APK, push, merge, and `main` promotion remain unchanged.
-- Installed and launched the debug/Metro Collector app on connected Motorola `ZY22KSPF5W`.
+- Added a guarded `Edge Impulse v4` option to `Bounce audio test`.
+- The generated Edge Impulse C++ SDK was extracted locally under the gitignored `apps/collector/android/app/src/main/cpp/edge_impulse_local/` folder and is not part of the repo.
+- Added a small Android JNI/Kotlin bridge that builds in full mode when the local SDK exists and as a stub when it is missing.
+- The local Edge Impulse `.so` is packaged for this machine from gitignored `apps/collector/android/app/src/main/jniLibs/**/libedge_impulse_pingpong.so`, so the app does not replace React Native's own native module CMake packaging.
+- The Edge Impulse option reuses the existing `Bounce audio test` peak candidate/debug/session flow, but classifies a centered `16 kHz / 8000 sample` window with the Edge Impulse model and uses the `Bounce` probability as the typed `p` threshold.
+- Existing `T0103`, `T0104E`, `T0104E Soft`, and `RMS+Fable` options remain unchanged.
 
 ## Validation
 
-- `cd apps/collector && npx tsc --noEmit`
-- `cd apps/collector/android && .\gradlew.bat :app:compileDebugKotlin --no-daemon --console plain`
-- `npm run validate`
-- `git diff --check` (passed with existing Windows LF-to-CRLF warnings only)
-- `.\install-android-dev.ps1`
-- `adb devices` -> `ZY22KSPF5W device`
-- `adb shell pidof com.collectorapp` -> `20010`
-- `adb shell dumpsys package com.collectorapp` -> `lastUpdateTime=2026-07-06 22:26:40`
+- `cd apps/collector && npx tsc --noEmit` passed.
+- `cd apps/collector/android && .\gradlew.bat :app:compileDebugKotlin --no-daemon --console plain` passed.
+- Direct Android CMake arm64 build of `edge_impulse_pingpong` passed with the local Edge Impulse SDK present.
+- `npm run validate` passed.
+- `git diff --check` passed with only existing Windows LF/CRLF warnings.
+- `.\install-android-dev.ps1` passed and installed/launched `com.collectorapp` on connected Motorola `ZY22KSPF5W`; package `lastUpdateTime=2026-07-07 14:31:52`.
+- Installed debug APK `C:\pcr\android\app\build\outputs\apk\debug\app-debug.apk` contains both `lib/arm64-v8a/libappmodules.so` and `lib/arm64-v8a/libedge_impulse_pingpong.so`.
+- Clean relaunch after `adb logcat -c` loaded `libappmodules.so` and logged `Running "CollectorApp"` with no `PlatformConstants`, `runtime not ready`, or script-load crash.

@@ -17,6 +17,7 @@ import java.nio.ByteOrder
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.log10
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -70,6 +71,10 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         // offline before the model/veto stage.
         const val PEAK_LOOKAHEAD_MS = 80.0
         const val PEAK_ROUGH_HEIGHT_FACTOR = 0.35
+
+        const val EDGE_IMPULSE_SOURCE_WINDOW_MS = 500.0
+        const val EDGE_IMPULSE_FALLBACK_SR = 16_000
+        const val EDGE_IMPULSE_FALLBACK_SAMPLES = 8_000
     }
 
     @Volatile private var isRunning     = false
@@ -102,6 +107,8 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
     @Volatile private var peakRatioMin = 2.0
     @Volatile private var peakZMin = 0.0
     @Volatile private var peakGateId = "peak_fast_balanced"
+    @Volatile private var edgeImpulseEnabled = false
+    @Volatile private var edgeImpulseThreshold = 0.6
 
     private val peakEnvRing = DoubleArray(RING_SIZE)
     private var peakSmoothWindow = DoubleArray(1)
@@ -195,6 +202,21 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         val peakAbsMin: Double? = null,
         val peakRatioMin: Double? = null,
         val peakZMin: Double? = null,
+        val edgeImpulseEnabled: Boolean = false,
+        val edgeImpulseAvailable: Boolean? = null,
+        val edgeImpulseOk: Boolean? = null,
+        val edgeImpulseErrorCode: Double? = null,
+        val edgeImpulseLabel: String? = null,
+        val edgeImpulseBounceProbability: Double? = null,
+        val edgeImpulseNoiseProbability: Double? = null,
+        val edgeImpulseConfidence: Double? = null,
+        val edgeImpulseThreshold: Double? = null,
+        val edgeImpulseDspMs: Double? = null,
+        val edgeImpulseClassificationMs: Double? = null,
+        val edgeImpulseAnomalyMs: Double? = null,
+        val edgeImpulseInputSampleRateHz: Int? = null,
+        val edgeImpulseInputSamples: Int? = null,
+        val edgeImpulseSourceWindowMs: Double? = null,
     )
 
     // ── ReactMethods ───────────────────────────────────────────────────────────
@@ -224,6 +246,8 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         absMinRms           = ABS_MIN_RMS
         peakGateEnabled     = false
         peakGateId          = "peak_fast_balanced"
+        edgeImpulseEnabled  = false
+        edgeImpulseThreshold = 0.6
         resetBandpassState()
         resetPeakGateState()
         val thread = Thread(::streamLoop, "AudioStreamThread")
@@ -300,6 +324,13 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
         peakGateEnabled = enabled
         resetPeakGateState()
         promise.resolve("ok")
+    }
+
+    @ReactMethod
+    fun setEdgeImpulseConfig(enabled: Boolean, threshold: Double, promise: Promise) {
+        edgeImpulseEnabled = enabled
+        edgeImpulseThreshold = threshold.coerceIn(0.0, 1.0)
+        promise.resolve(if (enabled && !EdgeImpulsePingpongBridge.isAvailable()) "unavailable" else "ok")
     }
 
     // ── Huvud-loop ─────────────────────────────────────────────────────────────
@@ -613,7 +644,8 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
 
     private fun scheduleExtraction(onsetPos: Int, debug: OnsetDebug) {
         Thread {
-            val targetWritePos = onsetPos + POST_SAMPLES
+            val eiPostSamples = if (edgeImpulseEnabled) edgeImpulseSourceSampleCount() / 2 else 0
+            val targetWritePos = onsetPos + maxOf(POST_SAMPLES, eiPostSamples)
             while (isRunning && writePos < targetWritePos) {
                 Thread.sleep(5)
             }
@@ -631,8 +663,78 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
                 .apply { clip.forEach { putShort(it) } }
                 .array()
 
-            emitCandidate(Base64.encodeToString(bytes, Base64.NO_WRAP), debug, null)
+            val enrichedDebug = if (edgeImpulseEnabled) {
+                classifyEdgeImpulseWindow(onsetPos, debug)
+            } else {
+                debug
+            }
+
+            emitCandidate(Base64.encodeToString(bytes, Base64.NO_WRAP), enrichedDebug, null)
         }.start()
+    }
+
+    private fun edgeImpulseSourceSampleCount(): Int {
+        val expectedRate = EdgeImpulsePingpongBridge.expectedSampleRateHz().takeIf { it > 0 }
+            ?: EDGE_IMPULSE_FALLBACK_SR
+        val expectedCount = EdgeImpulsePingpongBridge.expectedSampleCount().takeIf { it > 0 }
+            ?: EDGE_IMPULSE_FALLBACK_SAMPLES
+        return maxOf(1, (expectedCount.toDouble() * SR / expectedRate).roundToInt())
+    }
+
+    private fun classifyEdgeImpulseWindow(onsetPos: Int, debug: OnsetDebug): OnsetDebug {
+        val expectedRate = EdgeImpulsePingpongBridge.expectedSampleRateHz().takeIf { it > 0 }
+            ?: EDGE_IMPULSE_FALLBACK_SR
+        val expectedCount = EdgeImpulsePingpongBridge.expectedSampleCount().takeIf { it > 0 }
+            ?: EDGE_IMPULSE_FALLBACK_SAMPLES
+        val sourceCount = maxOf(1, (expectedCount.toDouble() * SR / expectedRate).roundToInt())
+        val sourceClip = readRingSamples(onsetPos - sourceCount / 2, sourceCount)
+        val resampled = resampleLinear(sourceClip, expectedCount)
+        val result = EdgeImpulsePingpongBridge.classify(resampled)
+        val label = if (result.bounceProbability >= result.noiseProbability) "Bounce" else "noise"
+        val confidence = maxOf(result.bounceProbability, result.noiseProbability)
+        return debug.copy(
+            edgeImpulseEnabled = true,
+            edgeImpulseAvailable = result.available,
+            edgeImpulseOk = result.ok,
+            edgeImpulseErrorCode = result.errorCode,
+            edgeImpulseLabel = if (result.ok) label else null,
+            edgeImpulseBounceProbability = if (result.ok) result.bounceProbability else null,
+            edgeImpulseNoiseProbability = if (result.ok) result.noiseProbability else null,
+            edgeImpulseConfidence = if (result.ok) confidence else null,
+            edgeImpulseThreshold = edgeImpulseThreshold,
+            edgeImpulseDspMs = if (result.ok) result.dspMs else null,
+            edgeImpulseClassificationMs = if (result.ok) result.classificationMs else null,
+            edgeImpulseAnomalyMs = if (result.ok) result.anomalyMs else null,
+            edgeImpulseInputSampleRateHz = expectedRate,
+            edgeImpulseInputSamples = expectedCount,
+            edgeImpulseSourceWindowMs = sourceCount.toDouble() * 1000.0 / SR,
+        )
+    }
+
+    private fun readRingSamples(startSample: Int, count: Int): ShortArray {
+        val out = ShortArray(count)
+        for (i in 0 until count) {
+            val pos = (startSample + i).let { ((it % RING_SIZE) + RING_SIZE) % RING_SIZE }
+            out[i] = ring[pos]
+        }
+        return out
+    }
+
+    private fun resampleLinear(input: ShortArray, outputCount: Int): ShortArray {
+        if (input.isEmpty() || outputCount <= 0) return ShortArray(0)
+        if (input.size == outputCount) return input.copyOf()
+        if (outputCount == 1) return shortArrayOf(input.first())
+        val out = ShortArray(outputCount)
+        val scale = (input.size - 1).toDouble() / (outputCount - 1).toDouble()
+        for (i in 0 until outputCount) {
+            val src = i * scale
+            val left = src.toInt().coerceIn(0, input.size - 1)
+            val right = minOf(left + 1, input.size - 1)
+            val frac = src - left
+            val value = input[left].toDouble() * (1.0 - frac) + input[right].toDouble() * frac
+            out[i] = value.roundToInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+        }
+        return out
     }
 
     private fun emitCandidate(audioB64: String?, debug: OnsetDebug, rejectedReason: String?) {
@@ -659,6 +761,21 @@ class AudioStreamModule(private val ctx: ReactApplicationContext)
             debug.peakAbsMin?.let { putDouble("peak_abs_min", it) }
             debug.peakRatioMin?.let { putDouble("peak_ratio_min", it) }
             debug.peakZMin?.let { putDouble("peak_z_min", it) }
+            putBoolean("edge_impulse_enabled", debug.edgeImpulseEnabled)
+            debug.edgeImpulseAvailable?.let { putBoolean("edge_impulse_available", it) }
+            debug.edgeImpulseOk?.let { putBoolean("edge_impulse_ok", it) }
+            debug.edgeImpulseErrorCode?.let { putDouble("edge_impulse_error_code", it) }
+            debug.edgeImpulseLabel?.let { putString("edge_impulse_label", it) }
+            debug.edgeImpulseBounceProbability?.let { putDouble("edge_impulse_bounce_probability", it) }
+            debug.edgeImpulseNoiseProbability?.let { putDouble("edge_impulse_noise_probability", it) }
+            debug.edgeImpulseConfidence?.let { putDouble("edge_impulse_confidence", it) }
+            debug.edgeImpulseThreshold?.let { putDouble("edge_impulse_threshold", it) }
+            debug.edgeImpulseDspMs?.let { putDouble("edge_impulse_dsp_ms", it) }
+            debug.edgeImpulseClassificationMs?.let { putDouble("edge_impulse_classification_ms", it) }
+            debug.edgeImpulseAnomalyMs?.let { putDouble("edge_impulse_anomaly_ms", it) }
+            debug.edgeImpulseInputSampleRateHz?.let { putDouble("edge_impulse_input_sample_rate_hz", it.toDouble()) }
+            debug.edgeImpulseInputSamples?.let { putDouble("edge_impulse_input_samples", it.toDouble()) }
+            debug.edgeImpulseSourceWindowMs?.let { putDouble("edge_impulse_source_window_ms", it) }
             if (rejectedReason == null) putNull("native_reject_reason") else putString("native_reject_reason", rejectedReason)
         }
         val payload = Arguments.createMap().apply {

@@ -28,6 +28,11 @@ interface AudioStreamInterface {
     ratioMin: number,
     zMin: number,
   ): Promise<string>;
+  /**
+   * Edge Impulse test runtime. Disabled by default on every startStreaming.
+   * Android-only; returns "unavailable" when the local generated SDK is absent.
+   */
+  setEdgeImpulseConfig(enabled: boolean, threshold: number): Promise<string>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
 }
@@ -57,6 +62,21 @@ export interface NativeAudioOnsetDebug {
   peak_abs_min?: number;
   peak_ratio_min?: number;
   peak_z_min?: number;
+  edge_impulse_enabled?: boolean;
+  edge_impulse_available?: boolean;
+  edge_impulse_ok?: boolean;
+  edge_impulse_error_code?: number;
+  edge_impulse_label?: string;
+  edge_impulse_bounce_probability?: number;
+  edge_impulse_noise_probability?: number;
+  edge_impulse_confidence?: number;
+  edge_impulse_threshold?: number;
+  edge_impulse_dsp_ms?: number;
+  edge_impulse_classification_ms?: number;
+  edge_impulse_anomaly_ms?: number;
+  edge_impulse_input_sample_rate_hz?: number;
+  edge_impulse_input_samples?: number;
+  edge_impulse_source_window_ms?: number;
   native_reject_reason?: string | null;
 }
 

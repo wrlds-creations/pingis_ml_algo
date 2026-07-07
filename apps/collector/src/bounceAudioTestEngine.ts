@@ -26,7 +26,7 @@ export interface CandidateModel extends RfJsonModel {
 }
 
 export type BounceAudioTestModelMetadata = NonNullable<CandidateModel['metadata']>;
-export type BounceAudioTestRuntimeMode = 'peak_extra_trees' | 'rms_fable';
+export type BounceAudioTestRuntimeMode = 'peak_extra_trees' | 'rms_fable' | 'edge_impulse_native';
 
 export interface BounceAudioTestPeakGateConfig {
   gateId: string;
@@ -82,6 +82,24 @@ const RMS_FABLE_METADATA: BounceAudioTestModelMetadata = {
   fable_live_engine_overrides: RMS_FABLE_ENGINE_OVERRIDES,
   fable_counter_config: BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG,
   gate_config: BOUNCE_AUDIO_TEST_RMS_FABLE_GATE_CONFIG,
+};
+
+const EDGE_IMPULSE_V4_METADATA: BounceAudioTestModelMetadata = {
+  model_version: 'edge_impulse_pingpong_cpp_mcu_v4_impulse_1',
+  source_ticket: 'T0139-bounce-audio-edge-impulse-v4-test',
+  model_type: 'edge_impulse_cpp_mcu_mfe_tflite_micro_android_native',
+  candidate_gate: 'peak_fast_soft_abs003',
+  runtime_status: 'diagnostic_bounce_audio_test_android_only_local_sdk_not_production_promotion',
+  positive_label: 'Bounce',
+  selected_threshold: 0.6,
+  smart_dedupe_ms: 180,
+  edge_impulse_project_id: 1051941,
+  edge_impulse_project_name: 'pingpong',
+  edge_impulse_deploy_version: 4,
+  edge_impulse_labels: ['Bounce', 'noise'],
+  edge_impulse_sample_rate_hz: 16000,
+  edge_impulse_raw_sample_count: 8000,
+  edge_impulse_source_zip: 'C:\\Development\\Wrlds\\edgeImpulse\\pingpong-cpp-mcu-v4-impulse-#1.zip',
 };
 
 export const BOUNCE_AUDIO_TEST_FIXED_PEAK_GATE_CONFIG: BounceAudioTestPeakGateConfig = {
@@ -141,6 +159,19 @@ export const BOUNCE_AUDIO_TEST_MODEL_OPTIONS: BounceAudioTestModelOption[] = [
     },
   },
   {
+    id: 'edge_impulse_v4',
+    title: 'Edge Impulse v4',
+    shortTitle: 'EI v4',
+    subtitle: 'native MFE model test',
+    runtimeMode: 'edge_impulse_native',
+    metadata: EDGE_IMPULSE_V4_METADATA,
+    peakGateConfig: BOUNCE_AUDIO_TEST_SOFT_PEAK_GATE_CONFIG,
+    defaultRuntimeConfig: {
+      threshold: 0.6,
+      fableNoiseVetoThreshold: 1.0,
+    },
+  },
+  {
     id: 'rms_fable',
     title: 'RMS + Fable baseline',
     shortTitle: 'RMS+Fable',
@@ -187,7 +218,7 @@ export const BOUNCE_AUDIO_TEST_DEFAULT_RUNTIME_CONFIG: BounceAudioTestRuntimeCon
 };
 
 export function modelOptionUsesTypedRuntimeConfig(option: BounceAudioTestModelOption): boolean {
-  return option.runtimeMode === 'peak_extra_trees';
+  return option.runtimeMode === 'peak_extra_trees' || option.runtimeMode === 'edge_impulse_native';
 }
 
 export function getBounceAudioTestModelMetadata(option: BounceAudioTestModelOption): BounceAudioTestModelMetadata {
@@ -234,6 +265,16 @@ function decisionConfigForOption(
       smartDedupeMs: 0,
       decisionDelayMs: 0,
       staleMs: BOUNCE_AUDIO_TEST_RMS_FABLE_ENGINE_CONFIG.staleMs,
+    };
+  }
+  if (option.runtimeMode === 'edge_impulse_native') {
+    return {
+      positiveLabel: 'Bounce',
+      threshold: runtimeConfig.threshold,
+      fableNoiseVetoThreshold: 1.0,
+      smartDedupeMs: metadataNumber(option.metadata?.smart_dedupe_ms, 180),
+      decisionDelayMs: 0,
+      staleMs: 2500,
     };
   }
   const model = requireCandidateModel(option);
@@ -329,6 +370,15 @@ export interface BounceAudioCandidateRow {
   classifier_confidence?: number;
   classifier_probability?: number;
   classifier_probabilities?: Record<string, number>;
+  edge_impulse_available?: boolean;
+  edge_impulse_ok?: boolean;
+  edge_impulse_error_code?: number;
+  edge_impulse_label?: string;
+  edge_impulse_bounce_probability?: number;
+  edge_impulse_noise_probability?: number;
+  edge_impulse_confidence?: number;
+  edge_impulse_dsp_ms?: number;
+  edge_impulse_classification_ms?: number;
   counted: boolean;
   decision: BounceAudioCandidateDecision;
   reject_reason?: string;
@@ -708,6 +758,78 @@ function buildRmsFableDebugExplanation(
   };
 }
 
+function buildEdgeImpulseDebugExplanation(
+  row: BounceAudioCandidateRow,
+  probability: number,
+  config: BounceAudioTestRuntimeConfig,
+  available: boolean,
+  ok: boolean,
+): BounceAudioDebugExplanation {
+  const threshold = config.threshold;
+  const margin = probability - threshold;
+  const noiseProbability = finiteNumber(row.native_debug?.edge_impulse_noise_probability);
+  const reasons: BounceAudioDebugReason[] = [];
+
+  if (!available) {
+    reasons.push({
+      code: 'edge_impulse_unavailable',
+      severity: 'blocker',
+      message: 'Edge Impulse native runtime is unavailable on this build/device.',
+    });
+  } else if (!ok) {
+    reasons.push({
+      code: 'edge_impulse_error',
+      severity: 'blocker',
+      message: `Edge Impulse native inference failed (code ${compactNumber(finiteNumber(row.native_debug?.edge_impulse_error_code, -1))}).`,
+      value: finiteNumber(row.native_debug?.edge_impulse_error_code, -1),
+    });
+  } else if (margin < 0) {
+    reasons.push({
+      code: 'below_threshold',
+      severity: 'blocker',
+      message: `Edge Impulse Bounce score ${percent(probability)} is ${percentagePoints(margin)} below ${percent(threshold)} threshold.`,
+      value: probability,
+      threshold,
+    });
+  } else {
+    reasons.push({
+      code: 'edge_impulse_count_candidate',
+      severity: 'info',
+      message: `Edge Impulse says Bounce ${percent(probability)} vs noise ${percent(noiseProbability)}.`,
+      value: probability,
+      threshold,
+    });
+  }
+
+  if (row.peak_value > 0 && row.peak_value < 0.18) {
+    reasons.push({
+      code: row.peak_value < 0.12 ? 'very_soft_peak' : 'soft_peak',
+      severity: row.peak_value < 0.12 ? 'warning' : 'info',
+      message: `Native peak is ${row.peak_value < 0.12 ? 'very soft' : 'soft'} (${compactNumber(row.peak_value)}).`,
+      value: row.peak_value,
+      threshold: row.peak_value < 0.12 ? 0.12 : 0.18,
+    });
+  }
+
+  return {
+    summary: reasons[0].message,
+    score: probability,
+    threshold,
+    margin,
+    reasons,
+    feature_diagnostics: [
+      { feature: 'edge_impulse_bounce_probability', value: probability },
+      { feature: 'edge_impulse_noise_probability', value: noiseProbability },
+      { feature: 'edge_impulse_dsp_ms', value: finiteNumber(row.native_debug?.edge_impulse_dsp_ms) },
+      { feature: 'edge_impulse_classification_ms', value: finiteNumber(row.native_debug?.edge_impulse_classification_ms) },
+      { feature: 'frame_rms', value: row.frame_rms },
+      { feature: 'peak_value', value: row.peak_value },
+      { feature: 'peak_ratio', value: row.peak_ratio },
+      { feature: 'peak_z', value: row.peak_z },
+    ],
+  };
+}
+
 function fableModelFlags(prediction: FablePrediction): Record<string, number> {
   return {
     model_is_racket: prediction.label === 'racket_bounce' ? 1 : 0,
@@ -908,6 +1030,10 @@ export class BounceAudioTestEngine {
       return this.classifyRmsFableRow(row, pcm, nowMs);
     }
 
+    if (this.modelOption.runtimeMode === 'edge_impulse_native') {
+      return this.classifyEdgeImpulseRow(row);
+    }
+
     try {
       const featureStart = Date.now();
       const fableFeatures = extractFableFeatures(pcm);
@@ -957,6 +1083,56 @@ export class BounceAudioTestEngine {
       this.pcmById.delete(row.id);
       return true;
     }
+  }
+
+  private classifyEdgeImpulseRow(row: BounceAudioCandidateRow): boolean {
+    const nativeDebug = row.native_debug;
+    const available = nativeDebug?.edge_impulse_available === true;
+    const ok = nativeDebug?.edge_impulse_ok === true;
+    const probability = probabilityOrFallback(nativeDebug?.edge_impulse_bounce_probability, 0);
+    const noiseProbability = probabilityOrFallback(nativeDebug?.edge_impulse_noise_probability, 0);
+    const confidence = probabilityOrFallback(nativeDebug?.edge_impulse_confidence, Math.max(probability, noiseProbability));
+    const label = nativeDebug?.edge_impulse_label ?? (probability >= noiseProbability ? 'Bounce' : 'noise');
+
+    row.edge_impulse_available = available;
+    row.edge_impulse_ok = ok;
+    row.edge_impulse_error_code = nativeDebug?.edge_impulse_error_code;
+    row.edge_impulse_label = label;
+    row.edge_impulse_bounce_probability = probability;
+    row.edge_impulse_noise_probability = noiseProbability;
+    row.edge_impulse_confidence = confidence;
+    row.edge_impulse_dsp_ms = nativeDebug?.edge_impulse_dsp_ms;
+    row.edge_impulse_classification_ms = nativeDebug?.edge_impulse_classification_ms;
+    row.classifier_label = label;
+    row.classifier_confidence = confidence;
+    row.classifier_probability = probability;
+    row.classifier_probabilities = {
+      Bounce: probability,
+      noise: noiseProbability,
+    };
+    row.debug_explanation = buildEdgeImpulseDebugExplanation(
+      row,
+      probability,
+      this.runtimeConfig,
+      available,
+      ok,
+    );
+
+    if (!available) {
+      row.decision = 'js_error';
+      row.reject_reason = 'edge_impulse_unavailable';
+    } else if (!ok) {
+      row.decision = 'js_error';
+      row.reject_reason = `edge_impulse_error:${finiteNumber(nativeDebug?.edge_impulse_error_code, -1)}`;
+    } else if (probability >= this.runtimeConfig.threshold) {
+      row.decision = 'accepted_pending_dedupe';
+      row.reject_reason = undefined;
+    } else {
+      row.decision = 'classified_low_probability';
+      row.reject_reason = 'below_threshold';
+    }
+    this.pcmById.delete(row.id);
+    return true;
   }
 
   private classifyRmsFableRow(
