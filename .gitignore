@@ -2,6 +2,7 @@
 
 # ML training data - can grow to hundreds of MB
 /data/
+/data-new/
 
 # Python
 __pycache__/
