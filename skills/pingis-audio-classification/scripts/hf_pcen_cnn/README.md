@@ -138,6 +138,44 @@ large per-scenario overcounts and undercounts. It is not evidence of a more
 reliable model. For example, it counted loud-background bounces at 17/40 while
 overcounting several easier positive scenarios.
 
+### Manually Reviewed Phone Audit (2026-07-17)
+
+A synchronized three-device pack was recorded through the STIGA native audio
+path and manually reviewed. It contains nine sessions: normal bounce,
+bounce-with-loud-background, and music/TV-only on Huawei, iPhone, and Motorola.
+Each positive session has 20 reviewed bounce timestamps, for 120 positives in
+total.
+
+The 7 kHz / onset-ratio 3 HF gate matched all 120 reviewed events. Replaying the
+deployed Fable classifier and timing logic at confidence 0.85 produced 114 true
+counts, 8 unmatched counts, and 6 misses. All six misses came from
+bounce-with-loud-background sessions:
+
+- three reviewed bounces had `noise` as the Fable top label;
+- three had racket probabilities of approximately 0.55, 0.60, and 0.76;
+- the eight false counts had overlapping racket probabilities from 0.67 to
+  0.99.
+
+A threshold sweep from 0.05 through 0.95 selected the deployed 0.85 value as
+the best F1 operating point on this pack. Lowering the threshold recovers the
+three low-confidence bounces but introduces seven additional false counts; it
+cannot recover the three top-label `noise` cases. This is a classifier
+separation problem, not evidence for another HF-gate or threshold adjustment.
+
+Reproduce the candidate-level audit with:
+
+```powershell
+$env:PYTHONPATH='skills/pingis-audio-classification/scripts'
+python -m hf_pcen_cnn.audit_review_pack `
+  --review-pack data-new/review/20260717_hf_fable_prefill
+```
+
+The ignored `analysis/fable_error_audit` directory contains candidate,
+session, final-miss, and threshold-sweep CSV evidence. Any next learned model
+must train on reviewed HF-gate candidates, include the gate's own false
+candidates as hard negatives, and beat this frozen Fable baseline under
+leave-device-out evaluation.
+
 ## Decision
 
 - Keep default Fable as the balanced deployed reference.
