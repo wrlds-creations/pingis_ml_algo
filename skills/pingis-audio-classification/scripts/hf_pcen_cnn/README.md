@@ -176,6 +176,70 @@ must train on reviewed HF-gate candidates, include the gate's own false
 candidates as hard negatives, and beat this frozen Fable baseline under
 leave-device-out evaluation.
 
+### Reviewed-Candidate Device Holdout (2026-07-17)
+
+The next experiment trained the four-class log-mel CNN directly on the
+manually reviewed HF-gate candidates and evaluated its racket-vs-not-racket
+decision. Reviewed bounces were positives, the gate's own false candidates
+were hard negatives, and ambiguous candidates were excluded from training.
+Each fold held out one complete reviewed phone while training with the other
+two phones plus the deduplicated colleague legacy corpus.
+
+Reproduce the manifest, feature cache, and three device folds with:
+
+```powershell
+$env:PYTHONPATH='skills/pingis-audio-classification/scripts'
+
+python -m hf_pcen_cnn.build_review_pack_manifest `
+  --review-pack data-new/review/20260717_hf_fable_prefill `
+  --model-json apps/collector/src/models/fable_audio_model.json `
+  --output data-new/review/20260717_hf_fable_prefill/analysis/review_candidate_manifest.csv
+
+python -m hf_pcen_cnn.build_feature_cache `
+  --manifest data-new/review/20260717_hf_fable_prefill/analysis/review_candidate_manifest.csv `
+  --output-dir data-new/review/20260717_hf_fable_prefill/analysis/review_candidate_cache
+
+python -m hf_pcen_cnn.train_reviewed_device_lodo `
+  --base-cache data/audio/processed/hf_pcen_cnn/issue_4_cache_dedup `
+  --review-cache data-new/review/20260717_hf_fable_prefill/analysis/review_candidate_cache `
+  --output-dir data-new/review/20260717_hf_fable_prefill/analysis/review_device_lodo `
+  --epochs 20 `
+  --batch-size 128 `
+  --seed 42
+```
+
+The candidate manifest contains 349 rows: 120 positives, 221 hard negatives,
+and 8 ambiguous candidates. The same Fable timing and dedupe logic was applied
+to both classifier outputs.
+
+| Path | TP | FP | FN | Precision | Recall | F1 | MAE/session |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reviewed-candidate log-mel CNN | 85 | 16 | 35 | 84.16% | 70.83% | 76.92% | 5.00 |
+| Frozen Fable | **114** | **8** | **6** | **93.44%** | **95.00%** | **94.21%** | **1.33** |
+
+The CNN lost to Fable on every held-out phone. A second diagnostic selected
+the best possible confidence threshold using each held phone's own labels.
+That oracle result is an intentionally leaky upper bound, not a deployable
+configuration, and it still lost on all three phones:
+
+| Held-out phone | CNN F1 | Oracle CNN F1 | Frozen Fable F1 |
+| --- | ---: | ---: | ---: |
+| Huawei VOG-L29 | 77.92% | 80.00% | **87.50%** |
+| Motorola moto g55 5G | 70.77% | 90.48% | **96.30%** |
+| Apple iPhone17,1 | 81.01% | 84.34% | **98.77%** |
+
+This is a strict physical-device holdout for the three reviewed phones. It is
+not a universal leave-device-out claim: the older colleague corpus does not
+contain sufficiently reliable physical-device identity. The report is saved
+under the ignored
+`analysis/review_device_lodo/device_lodo_report.json` path.
+
+The candidate-level retrain therefore fails the promotion gate decisively.
+The HF gate's own false candidates are useful hard negatives, but this amount
+and diversity of reviewed data is not enough for a learned classifier to
+generalize better than Fable. Another blind PCEN or threshold rerun is not
+justified by these results.
+
 ## Decision
 
 - Keep default Fable as the balanced deployed reference.
@@ -185,6 +249,9 @@ leave-device-out evaluation.
   iPhone scenarios. It needs classifier calibration and timing/dedupe tuning
   before runtime promotion.
 - Do not promote the four-class CNN or the current PCEN front end.
+- Do not promote the reviewed-candidate CNN. Frozen Fable remains the
+  reference after outperforming it on every held-out reviewed phone, even
+  against the CNN's non-deployable per-phone oracle threshold.
 - Collect more reviewed, device-diverse floor/other-impact examples. The
   training split contained only 73 floor/other-impact candidates.
 
