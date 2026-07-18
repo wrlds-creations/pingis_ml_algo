@@ -1,6 +1,6 @@
 # Multi-Phone Audio Recording Plan (2026-07-18)
 
-One session of ~75–90 minutes. All racket swaps and holdout assignments are
+One session of ~80–95 minutes. All racket swaps and holdout assignments are
 already applied — follow this file top to bottom, no free-text take metadata needed.
 
 **Recorder:** STIGA gh-219 `Audio dataset recorder`
@@ -40,6 +40,11 @@ must point toward the same bounce area.
 | 4     | Left   | Right    | Center | Flat        |
 | 5     | Right  | Center   | Left   | Flat        |
 | 6     | Center | Left     | Right  | Upright     |
+| 7     | Left   | Center   | Right  | Flat        |
+
+Block 6's upright placement is bonus device variation. It is confounded with
+that block's scenarios, so do not use this round to estimate an orientation
+effect.
 
 ## Rules for every take
 
@@ -53,9 +58,14 @@ must point toward the same bounce area.
 8. Save on all three phones before moving to the next take. Saving advances the Take ID automatically.
 9. If one phone retries, discards, or misses a save, use its Take stepper to realign it before continuing.
 
-Use `Final holdout` for T07, T12, T14, T17, T19, T23, T29, T32, T34,
-T36, T39, and T41. Use `Train` for every other take. This keeps all three
+Use `Final holdout` for T04, T07, T12, T14, T19, T23, T29, T32, T34,
+T41, and T42. Use `Train` for every other take. This keeps all three
 recordings of the same physical event in the same split.
+
+`Final holdout` is the unseen-physical-take test set. Do not use it for model
+selection or threshold tuning. Leave-device-out evaluation is separate: derive
+device folds from `Train` sessions, train on two phones, and evaluate on the
+third phone before opening the final holdout.
 
 Distances: close = 20–30 cm, medium = 40–70 cm, far = over 70 cm.
 
@@ -150,9 +160,19 @@ Count `0` on all. Each take ~40 seconds. Racket ID `none` except T35 and T36.
 | T40  | Racket bounce + speaking/counting   | Low / Speech     | medium   | B-black| 30    | `second person talking` — skip if nobody around |
 | T41  | Racket bounce + loud background     | Loud / Music-TV  | medium   | D-black| 30    | Music 1 |
 
+## Block 7 — Supplemental hard-negative coverage (2 takes, ~3 min)
+
+Count `0` on both. Each take ~40 seconds. Use the flat placement in the phone
+schedule. T42 is `Final holdout`; T43 is `Train`.
+
+| Take | Scenario                         | Level / Source | Distance | Racket      | What to do |
+|------|----------------------------------|----------------|----------|-------------|------------|
+| T42  | Racket drop, no bounce           | Medium / Other | close    | `A+B+C+D`   | drop each racket three times with 2-second gaps; no ball |
+| T43  | Mixed hard negatives, no bounce  | Medium / Other | close    | `none`      | separated coughs, keys, and cutlery sounds; no ball or racket bounce |
+
 ## Wrap-up (5 min)
 
-- [ ] Each phone's session list shows 41 takes, with matching Take IDs
+- [ ] Each phone's session list shows 43 takes, with matching Take IDs
 - [ ] Export the dataset zip from **each** phone
 - [ ] Copy all three zips to the computer before deleting anything
 - [ ] Spot-check one Train JSON and one Final holdout JSON for take, position, orientation, and dataset-use metadata
@@ -163,14 +183,14 @@ Count `0` on all. Each take ~40 seconds. Racket ID `none` except T35 and T36.
 
 | Side    | Takes                  | Total | Distances covered |
 |---------|------------------------|-------|-------------------|
-| A-red   | T1, T9, T17, T22       | 4     | close, far        |
-| A-black | T5, T12, T24, T37      | 4     | close, medium, far|
-| B-red   | T2, T13, T19, T26      | 4     | close, medium, far|
-| B-black | T7, T16, T20, T40      | 4     | close, medium, far|
-| C-red   | T6, T10, T23, T38      | 4     | close, medium, far|
-| C-black | T3, T14, T18, T27      | 4     | close, medium, far|
-| D-red   | T8, T11, T21, T39      | 4     | close, medium, far|
-| D-black | T4, T15, T25, T41      | 4     | close, medium, far|
+| A-red   | T01, T09, T17, T22     | 4     | close, far        |
+| A-black | T05, T12, T24, T37     | 4     | close, medium, far|
+| B-red   | T02, T13, T19, T26     | 4     | close, medium, far|
+| B-black | T07, T16, T20, T40     | 4     | close, medium, far|
+| C-red   | T06, T10, T23, T38     | 4     | close, medium, far|
+| C-black | T03, T14, T18, T27     | 4     | close, medium, far|
+| D-red   | T08, T11, T21, T39     | 4     | close, medium, far|
+| D-black | T04, T15, T25, T41     | 4     | close, medium, far|
 
 Every side appears 4 times, spread over different scenarios, distances, and noise
 conditions, so no racket sound is confounded with any single recording condition.
@@ -183,6 +203,6 @@ conditions, so no racket sound is confounded with any single recording condition
 - **Floor/table impacts** get three dedicated takes: only 73 such training rows
   exist in the entire current corpus.
 - Quiet baselines are kept small: historically well covered, easy for every model.
-- Three phones per take turn ~40 takes of effort into ~120 sessions, all with
+- Three phones per take turn 43 takes of effort into 129 sessions, all with
   device identity, noise level, and distance in metadata — ready for
   leave-device-out evaluation after timestamp review.
