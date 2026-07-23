@@ -1,4 +1,4 @@
-# Multi-Phone Audio Recording Plan (2026-07-22)
+# Multi-Phone Audio Recording Plan (2026-07-23)
 
 One official round takes about 80-95 minutes. All three phones record every take
 simultaneously, producing **43 recordings per phone / 129 recordings total**.
@@ -15,7 +15,7 @@ Follow T01-T43 in order. Do not improvise new official takes inside the round.
 Use the STIGA QA `Audio dataset recorder` in **Round plan** mode. Set these once
 before the official round:
 
-- The same **Round ID** on all phones, for example `CJ-20260722-01`.
+- The same **Round ID** on all phones, for example `CJ-20260723-01`.
 - A different **Device alias** on each phone: `CJ-iphone`, `CJ-moto`, and
   `CJ-huawei`.
 - **Take** `T01` on all phones.
@@ -40,14 +40,84 @@ from this plan during post-processing.
 - [ ] Device aliases are set once and the same official Round ID is on all phones.
 - [ ] Phones are side by side, screens up, and **flat for the whole round**.
 - [ ] The stated distance is measured from the phones to the bounce/sound point.
-- [ ] Speaker is ready with **Music 1** (percussion-heavy) and **Music 2**
-      (TV/speech/pop).
+- [ ] A separate playback device and speaker are ready with the downloaded
+      **Music 1** and **Music 2** files below.
+- [ ] The NIOSH Sound Level Meter app is ready on the iPhone for preflight
+      calibration only.
 - [ ] Rackets are labeled A-D; red/black means the side facing the ball.
 - [ ] A separate pilot has passed; the official round shows T01 on every phone.
 
+### Fixed local music
+
+Use these downloaded YouTube Audio Library files. Play the local MP3 files, not
+a streamed YouTube video, so an advertisement, network pause, or notification
+cannot enter a take.
+
+| ID | Track | Role | Fixed excerpt |
+|---|---|---|---|
+| Music 1 | `Beat Your Competition - Vibe Tracks.mp3` | percussion-heavy/transient | `01:00-02:00` |
+| Music 2 | `Spring In My Step - Silent Partner.mp3` | melodic/pop contrast | `00:10-01:10` |
+
+Use the same playback device, speaker/output path, speaker position, and volume
+for every music take. Do not use any of the three recorder phones as the music
+source. Put the playback device in Do Not Disturb and use offline playback;
+airplane mode is preferred when it does not disable the chosen local speaker.
+
+Cue the file to the listed start time and start it about two seconds before
+pressing Record. Play the 60-second excerpt once, with repeat, shuffle,
+crossfade, and sound enhancement disabled. Do not loop it: a loop boundary can
+become an artificial negative event. Keep the music running until all phones
+have stopped. If a take will not finish before the excerpt ends, retry it rather
+than recording the end fade or silence.
+
+### Loudness calibration
+
+Use the free **NIOSH Sound Level Meter** iOS app:
+<https://www.cdc.gov/niosh/noise/about/app.html>.
+
+Use these settings:
+
+- Calibration offset: `0.0 dB` unless a real calibrated reference meter is
+  available. Do not offset the app merely to match another phone.
+- Standard: `NIOSH`.
+- Threshold: `80 dB`.
+- Exchange rate: `3 dB`.
+- Time weighting: `Slow`.
+- Frequency weighting: `A`.
+- Read **LAeq** over a fresh 15-20 second measurement, not the changing
+  instantaneous number. Reset the measurement before each check.
+
+The Standard, Threshold, and Exchange rate settings mainly affect dose/TWA. This
+plan uses the LAeq reading as a repeatable sound-field estimate.
+
+| Sound condition | Takes | Where to place the meter | Target |
+|---|---|---|---:|
+| Music 1 or Music 2 | T09-T19, T29, T32-T34, T41 | center of the three-phone recording cluster, microphone at phone height | `75 +/- 3 dBA LAeq` |
+| Normal clear counting | T01-T08, T31 | exactly 1.0 m from the person's mouth, at mouth height | `63 +/- 3 dBA LAeq` |
+| Raised voice over music | T17-T19, T32 | exactly 1.0 m from the person's mouth, at mouth height | `73 +/- 3 dBA LAeq` |
+
+Calibrate each voice style by counting 1-30 at the intended pace. During the
+official takes, preserve that voice effort; do not speak louder for a far take
+or quieter for a close take. T40 deliberately remains natural low background
+speech rather than raised calibrated speech.
+
+For music, place the iPhone at the center of the planned recorder cluster,
+measure the selected excerpt, adjust the playback volume until it is in range,
+then close the NIOSH app and return the iPhone to the STIGA recorder. Keep that
+one volume setting for both tracks unless the two source files require one
+documented preflight correction to reach the same target.
+
+The three phones may still save different digital waveform levels from the same
+physical sound field. In particular, do not turn the music up only for the
+iPhone because its recording appears quieter. That device/microphone gain
+difference is valid cross-device evidence and is handled during
+post-processing, not by giving each phone a different acoustic source. Do not
+raise the music above the `78 dBA LAeq` upper tolerance to compensate for one
+phone.
+
 ### Pilot without consuming T01
 
-Use a separate Round ID, for example `CJ-20260722-PILOT`, and Take `T00`. Record,
+Use a separate Round ID, for example `CJ-20260723-PILOT`, and Take `T00`. Record,
 save, export, and open one WAV + JSON from every phone. Then set the official
 Round ID and reset every phone to T01. The pilot is not part of the 43 official
 takes and must not enter training or holdout data.
@@ -99,7 +169,8 @@ Distances: close = 20-30 cm, medium = 40-70 cm, far = over 70 cm.
 
 Recorder target: `Racket bounce`.
 
-Count aloud 1-30 continuously while bouncing. The room is otherwise quiet.
+Count aloud 1-30 continuously using the normal clear voice calibrated to
+`63 +/- 3 dBA LAeq` at 1 m. The room is otherwise quiet.
 
 | Take | Action | Racket | Distance | Background |
 |---|---|---|---|---|
@@ -116,8 +187,8 @@ Count aloud 1-30 continuously while bouncing. The room is otherwise quiet.
 
 Recorder target: `Racket bounce`.
 
-Music should be loud enough that a person would raise their voice over it. T09-
-T12 use Music 1; T13-T16 use Music 2.
+Use the fixed `75 +/- 3 dBA LAeq` music setting. T09-T12 use the Music 1
+excerpt; T13-T16 use the Music 2 excerpt.
 
 | Take | Action | Racket | Distance | Background |
 |---|---|---|---|---|
@@ -134,8 +205,9 @@ T12 use Music 1; T13-T16 use Music 2.
 
 Recorder target: `Racket bounce`.
 
-Count aloud 1-30 while loud Music 2 plays. This is the hardest combined positive
-condition.
+Count aloud 1-30 with the raised voice calibrated to `73 +/- 3 dBA LAeq` at
+1 m while the fixed `75 +/- 3 dBA LAeq` Music 2 excerpt plays. This is the
+hardest combined positive condition.
 
 | Take | Action | Racket | Distance | Background |
 |---|---|---|---|---|
@@ -177,6 +249,8 @@ contains zero ball-on-racket contacts.
 
 T30 is intentionally a **mixed household-impact** take, not a floor/table-impact
 take. This prevents its post-processing scenario from contradicting the action.
+T29, T33, and T34 use the fixed music level. T31 uses the normal clear counting
+voice. T32 uses the fixed Music 2 level plus the raised voice.
 
 ## Block 6 - Final positive variations (5 takes, about 10 min)
 
@@ -192,7 +266,8 @@ and all phones remain flat.
 | T41 | Normal bounce | D-black | medium | loud Music 1 |
 
 T39 supplies catch/after-sound variation. T40 is not optional; recorded speech
-is the fallback when no second person is available.
+is the fallback when no second person is available. T41 uses the fixed Music 1
+excerpt and level.
 
 ## Block 7 - Supplemental hard negatives (2 takes, about 3 min)
 
@@ -228,6 +303,9 @@ The manifest, not the phone operator, supplies:
   physical event can never cross train/evaluation boundaries;
 - block, planned action, scenario ID, racket ID/side, distance band, background
   level/source, and expected count (`30` for positives, `0` for negatives);
+- fixed music filename/track, excerpt start/end, playback target, sound-meter
+  app/settings, and the round-level measured LAeq values;
+- voice reference style and target for the calibrated counting/talking takes;
 - phone position derived from the placement schedule and device alias;
 - dataset use, using the fixed split below;
 - reviewed event timestamps, actual event count, sync offset, and the excluded

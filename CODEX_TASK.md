@@ -87,5 +87,10 @@ deterministic post-processing manifest.
 - Kept every phone flat, including Block 6, without removing T37-T41.
 - Corrected T30 to mixed household impacts, tagged T39 as catch/after-sound coverage, and made T40 mandatory with recorded speech as fallback.
 - Defined deterministic post-processing joins, physical-event grouping, fixed holdout assignment, timestamp review, sync-clap exclusion, and quality flags.
+- Fixed Music 1/Music 2 to downloaded local 60-second excerpts and documented
+  no-loop/no-ad playback.
+- Added NIOSH Sound Level Meter settings and round-level targets for music,
+  normal counting, and raised speech while preserving real cross-device gain
+  differences for post-processing.
 - Verified 43 unique contiguous take rows with no missing IDs.
 - `npm run validate` and `git diff --check` passed.
