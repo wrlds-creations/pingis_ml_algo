@@ -1,16 +1,15 @@
 # CODEX_TASK.md
 
-Fill this in before asking Codex to implement project work. Use one active ticket per implementation pass, and keep the scope small enough to verify manually.
-
-Quick read-only questions, repo exploration, and lightweight planning do not require a filled ticket. Code changes, infrastructure changes, dependency changes, and documentation updates that affect source-of-truth files should use a ticket.
+Use one active ticket per implementation pass. The active ticket for this branch
+is the approved GitHub issue below.
 
 ## Ticket ID
 
-`T0041-live-bounce-side-backhand-bias`
+`GH-5-simplify-43-take-recording-plan`
 
 ## Branch
 
-`claude/audio-noise-robust-racket-bounce`
+`codex/gh-5-simplify-recording-plan`
 
 ## Status
 
@@ -18,72 +17,75 @@ Quick read-only questions, repo exploration, and lightweight planning do not req
 
 ## Goal
 
-Diagnose and fix the current `Studs FH/BH LIVE` / `Video studs FH/BH` behavior where red-forehand racket bounces are being suggested almost entirely as backhand. Keep the fix limited to runtime side mapping/guarding and debug visibility; do not retrain or replace model artifacts in this ticket.
+Simplify the cross-device recording instructions so the phones capture only
+stable round/take identity, target class, automatic provenance, and exceptions,
+while retaining all 43 planned takes and moving experiment metadata to a
+deterministic post-processing manifest.
+
+## Approved Issue
+
+- https://github.com/wrlds-creations/pingis_ml_algo/issues/5
+- Approved directly by the user on 2026-07-22.
 
 ## Dependencies
 
-- Current installed Motorola APK from 2026-06-13 contains Fable v5 and `bounce_side_v2_2026_06_11_underangle`.
-- Latest device debug dumps from 2026-06-17 show `bounce_side_v2_2026_06_11_underangle` predicting almost all counted events as `backhand`, even when crops visibly include strong red racket evidence.
-- `node skills/pingis-stroke-detection/scripts/check_bounce_side_ts_parity.js` passes, so the TypeScript runtime matches the exported model on its fixture.
+- The current recording plan exists on the unmerged issue #4 branch.
+- This branch is based on `codex/gh-4-hf-four-class-cnn`.
+- STIGA recorder implementation is owned by a separate STIGA app issue.
 
 ## Allowed Areas
 
-- `apps/collector/src/bounceSideInference.ts`
-- `apps/collector/src/BounceSideLiveScreen.tsx`
-- `apps/collector/src/VideoOnlyStrokeCollectionScreen.tsx`
+- `RECORDING_PLAN.md`
 - `CODEX_TASK.md`
+- `DECISIONS.md`
 - `ITERATION_LOG.md`
-- `REPO_CURRENT_STATE.md`
-- Local ignored debug artifacts under `data/video/raw/live_sidedebug/`
 
 ## Do Not Touch
 
-- `apps/collector/src/models/bounce_side_model.json`
-- `apps/collector/src/models/fable_audio_model.json`
-- `apps/collector/src/models/video_stroke_model.json`
-- `audio_model.json`, `audio_contact_model.json`, or `playing_retro_audio_model.json`
-- Raw reviewed labels
-- Training scripts or model retraining
+- App/runtime source
+- Model artifacts, training code, or evaluation outputs
+- Raw or processed recordings
 - AWS or backend resources
 
 ## Requirements
 
-- Keep Fable audio detection unchanged.
-- Preserve the existing model and parity fixture.
-- Add a runtime color-evidence guard using the existing side features so visible red/black racket evidence can override an obviously wrong side suggestion.
-- Respect the user-selected forehand color: red forehand maps visible red to forehand; black forehand maps visible red to backhand.
-- Avoid confident wrong auto-suggestions when color evidence is ambiguous.
-- Include debug fields that make future live dumps explainable: raw model label/probability, visible color decision, red/dark evidence, and decision source.
+- Preserve T01-T43, all seven blocks, and three-phone simultaneous capture.
+- Separate the pilot from the official round.
+- Keep every phone flat, including Block 6.
+- Use one shared Round ID and stable Take IDs.
+- Move scenario, position, split, expected-count, and label details to
+  post-processing.
+- Correct T30, identify T39 catch/after-sound coverage, and require T40 with a
+  speech-playback fallback.
+- Keep the physical-event holdout grouping deterministic.
 
 ## Non-Goals
 
-- No model retraining.
-- No app model JSON export.
-- No changes to Fable audio model behavior.
-- No changes to video stroke FH/BH motion model.
-- No broad UI redesign.
+- No model or app change.
+- No reduction in take count.
+- No raw data generation.
 
 ## Acceptance Criteria
 
-- Today's 2026-06-17 live debug crops no longer collapse to all backhand under the runtime side resolver.
-- TypeScript validation passes.
-- Existing bounce-side TypeScript parity check still passes.
-- If APK build/install is run, record build/install result in the handoff.
-
-## Completion Notes
-
-- Pulled and inspected the latest 2026-06-17 live side debug dumps from Motorola.
-- Confirmed Fable audio was producing racket-bounce events; the failure was side resolution after the audio anchor.
-- Confirmed Collector TypeScript parity against the exported bounce-side model still passes, so the runtime model implementation is not the source of the backhand collapse.
-- Added a visible-color resolver that lets clear red/black racket evidence override the model side when it contradicts the selected forehand color.
-- Added explainability fields to live debug rows: raw side/confidence, visible color/confidence, red/dark totals, and decision source.
-- Updated `Video studs FH/BH` auto-suggestions so ambiguous color evidence becomes `unknown` instead of a confident wrong side.
+- The plan contains contiguous T01-T43 and totals 43 takes per phone / 129 files.
+- Operators enter only round/take identity, binary target, and exceptions.
+- Every take has one binary target and deterministic post-processing metadata.
+- The pilot cannot consume official T01.
+- Block 6 remains present and required.
 
 ## Validation
 
-- `cd apps/collector && npx tsc --noEmit`
-- `node skills/pingis-stroke-detection/scripts/check_bounce_side_ts_parity.js`
-- Root `npm run validate`
-- `git diff --check` passed with existing Windows line-ending warnings only.
-- Forced release bundle generation and `.\gradlew.bat assembleRelease` passed.
-- APK installed on Motorola `ZY22L6NDHV` at `2026-06-17 16:29:12`; SHA256 `BE0C3F21473A44AF99979A38DF55B19FCBB50C5A755EBB502A3D6D3CBA5A30D2`.
+- Manual take/target/holdout audit
+- `npm run validate`
+- `git diff --check`
+
+## Completion Notes
+
+- Preserved all seven blocks and contiguous T01-T43: 43 recordings per phone / 129 total.
+- Separated the pilot as a different Round ID at T00, then reset the official round to T01.
+- Removed per-phone scenario, position, orientation, split, distance, racket, background, and expected-count entry from the recording workflow.
+- Kept every phone flat, including Block 6, without removing T37-T41.
+- Corrected T30 to mixed household impacts, tagged T39 as catch/after-sound coverage, and made T40 mandatory with recorded speech as fallback.
+- Defined deterministic post-processing joins, physical-event grouping, fixed holdout assignment, timestamp review, sync-clap exclusion, and quality flags.
+- Verified 43 unique contiguous take rows with no missing IDs.
+- `npm run validate` and `git diff --check` passed.

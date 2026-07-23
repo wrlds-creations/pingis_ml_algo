@@ -1,208 +1,281 @@
-# Multi-Phone Audio Recording Plan (2026-07-18)
+# Multi-Phone Audio Recording Plan (2026-07-22)
 
-One session of ~80–95 minutes. All racket swaps and holdout assignments are
-already applied — follow this file top to bottom, no free-text take metadata needed.
+One official round takes about 80-95 minutes. All three phones record every take
+simultaneously, producing **43 recordings per phone / 129 recordings total**.
 
-**Recorder:** STIGA gh-219 `Audio dataset recorder`
-**Phones:** iPhone, Motorola, Huawei — all three record **every** take simultaneously.
-**Rackets:** label them A, B, C, D. Racket ID is always entered as `A-red`, `A-black`, `B-red`, … Same side for the whole take.
+The binary objective is only:
 
-The recorder stores these as structured metadata:
+- `racket_bounce`: a ball contacts the racket.
+- `not_racket`: no ball contacts any racket anywhere in the take.
 
-- **Take:** `T01`, `T02`, …; advances automatically only after a successful Save.
-- **Position:** `Left`, `Center`, or `Right`; remembered after each take.
-- **Orientation:** `Flat` or `Upright`; remembered after each take.
-- **Dataset use:** `Train` or `Final holdout`; remembered after each take.
+Follow T01-T43 in order. Do not improvise new official takes inside the round.
 
----
+## What the recorder must capture
+
+Use the STIGA QA `Audio dataset recorder` in **Round plan** mode. Set these once
+before the official round:
+
+- The same **Round ID** on all phones, for example `CJ-20260722-01`.
+- A different **Device alias** on each phone: `CJ-iphone`, `CJ-moto`, and
+  `CJ-huawei`.
+- **Take** `T01` on all phones.
+
+For each take, the phone operator only needs to confirm:
+
+- the same Take ID is shown on all three phones;
+- the target is `Racket bounce` or `Hard negative`; and
+- an exception note only if something departed from this plan.
+
+The recorder automatically stores the raw WAV, device/audio provenance, Round
+ID, Take ID, device alias, and target. A successful Save advances the Take ID.
+Retry, Discard, and a failed save do not advance it.
+
+Do **not** enter scenario, phone position, orientation, dataset split, racket,
+distance, background, or expected count on each phone. Those fields are joined
+from this plan during post-processing.
 
 ## Prep checklist (5 min)
 
-- [ ] Device alias set once per phone: `CJ-iphone`, `CJ-moto`, `CJ-huawei`
-- [ ] Bluetooth OFF on all three phones, no headsets plugged in (built-in mic only)
-- [ ] Phones side by side, screens up, at the distance stated per take (distance = phone to bounce point)
-- [ ] Speaker ready with two playlists: **Music 1** = percussion-heavy, **Music 2** = TV/speech/pop
-- [ ] Rackets labeled A–D
-- [ ] Take shows `T01` on all three phones
-- [ ] Dataset use is `Train` on all three phones
-- [ ] Record one short pilot take, save it, export it, and verify that WAV + JSON open on the computer
+- [ ] Bluetooth is OFF on all phones and no headset is connected.
+- [ ] Device aliases are set once and the same official Round ID is on all phones.
+- [ ] Phones are side by side, screens up, and **flat for the whole round**.
+- [ ] The stated distance is measured from the phones to the bounce/sound point.
+- [ ] Speaker is ready with **Music 1** (percussion-heavy) and **Music 2**
+      (TV/speech/pop).
+- [ ] Rackets are labeled A-D; red/black means the side facing the ball.
+- [ ] A separate pilot has passed; the official round shows T01 on every phone.
+
+### Pilot without consuming T01
+
+Use a separate Round ID, for example `CJ-20260722-PILOT`, and Take `T00`. Record,
+save, export, and open one WAV + JSON from every phone. Then set the official
+Round ID and reset every phone to T01. The pilot is not part of the 43 official
+takes and must not enter training or holdout data.
 
 ### Phone placement schedule
 
-Keep each phone in the same position for a whole block, then rotate. The phones
-must point toward the same bounce area.
+Keep each phone in the same physical position for a whole block, then rotate it
+as shown. All phones stay flat and point toward the same action area. Position
+is not entered on the phone; post-processing derives it from device alias,
+block, and this table.
 
-| Block | iPhone | Motorola | Huawei | Orientation |
-|-------|--------|----------|--------|-------------|
-| 1     | Left   | Center   | Right  | Flat        |
-| 2     | Right  | Left     | Center | Flat        |
-| 3     | Center | Right    | Left   | Flat        |
-| 4     | Left   | Right    | Center | Flat        |
-| 5     | Right  | Center   | Left   | Flat        |
-| 6     | Center | Left     | Right  | Upright     |
-| 7     | Left   | Center   | Right  | Flat        |
-
-Block 6's upright placement is bonus device variation. It is confounded with
-that block's scenarios, so do not use this round to estimate an orientation
-effect.
+| Block | iPhone | Motorola | Huawei |
+|---|---|---|---|
+| 1 | Left | Center | Right |
+| 2 | Right | Left | Center |
+| 3 | Center | Right | Left |
+| 4 | Left | Right | Center |
+| 5 | Right | Center | Left |
+| 6 | Center | Left | Right |
+| 7 | Left | Center | Right |
 
 ## Rules for every take
 
-1. Start background music/noise **before** pressing record.
-2. Stand still through the 2-second baseline; keep the background unchanged during the take.
-3. Confirm all three phones show the same Take ID before starting.
-4. After all phones show `GO`, wait one second, clap once as a synchronization marker, wait two seconds, then begin the planned activity. The clap is never a bounce label.
-5. Positives: bounce to **exactly 30**, then leave three seconds of silence before stopping. Lost count → enter best estimate + write `approx` in notes.
-6. Hard negatives: separate individual sounds by 1–2 seconds so review can identify them.
-7. Vary bounce tempo slightly between takes (don't metronome everything identically).
-8. Save on all three phones before moving to the next take. Saving advances the Take ID automatically.
-9. If one phone retries, discards, or misses a save, use its Take stepper to realign it before continuing.
+1. Start the planned background before pressing Record.
+2. Stay still and keep the background unchanged through the recorder's initial
+   noise-floor measurement.
+3. Confirm all three phones show the same Round ID and Take ID.
+4. After all phones show `GO`, wait one second, clap once, wait two seconds, and
+   begin the planned action. The clap is a sync marker, not a racket bounce.
+5. For positives, make **exactly 30 ball-on-racket contacts**, then leave three
+   seconds of silence before stopping. If the count is uncertain, add the
+   exception note `approx count` and continue; exact timestamps are reviewed
+   later.
+6. For hard negatives, separate individual sounds by 1-2 seconds. There must be
+   **zero ball-on-racket contacts** in the entire take.
+7. Vary bounce tempo slightly between positive takes.
+8. Save on all three phones before continuing. Confirm that every phone advanced
+   to the same next Take ID.
+9. If a phone retries, discards, fails to save, or drifts, use its Take control
+   to realign it before the next action.
+10. If an unplanned ball-on-racket contact occurs in a hard-negative take, retry
+    it. Do not describe a contaminated take as fully negative.
 
-Use `Final holdout` for T04, T07, T12, T14, T19, T23, T29, T32, T34,
-T41, and T42. Use `Train` for every other take. This keeps all three
-recordings of the same physical event in the same split.
-
-`Final holdout` is the unseen-physical-take test set. Do not use it for model
-selection or threshold tuning. Leave-device-out evaluation is separate: derive
-device folds from `Train` sessions, train on two phones, and evaluate on the
-third phone before opening the final holdout.
-
-Distances: close = 20–30 cm, medium = 40–70 cm, far = over 70 cm.
+Distances: close = 20-30 cm, medium = 40-70 cm, far = over 70 cm.
 
 ---
 
-## Block 1 — Counting aloud while bouncing (8 takes, ~13 min)
+## Block 1 - Counting aloud while bouncing (8 takes, about 13 min)
 
-Recorder fields: scenario `Racket bounce + speaking/counting`, noise level `Quiet`,
-noise source `Speech / counting`, count `30`.
-**Count aloud 1–30 continuously while bouncing.** Room otherwise quiet.
+Recorder target: `Racket bounce`.
 
-| Take | Distance | Racket |
-|------|----------|--------|
-| T01  | close    | A-red  |
-| T02  | close    | B-red  |
-| T03  | close    | C-black|
-| T04  | close    | D-black|
-| T05  | medium   | A-black|
-| T06  | medium   | C-red  |
-| T07  | far      | B-black|
-| T08  | far      | D-red  |
+Count aloud 1-30 continuously while bouncing. The room is otherwise quiet.
 
-## Block 2 — Loud music + bouncing, no talking (8 takes, ~13 min)
+| Take | Action | Racket | Distance | Background |
+|---|---|---|---|---|
+| T01 | Count aloud while bouncing | A-red | close | spoken counting |
+| T02 | Count aloud while bouncing | B-red | close | spoken counting |
+| T03 | Count aloud while bouncing | C-black | close | spoken counting |
+| T04 | Count aloud while bouncing | D-black | close | spoken counting |
+| T05 | Count aloud while bouncing | A-black | medium | spoken counting |
+| T06 | Count aloud while bouncing | C-red | medium | spoken counting |
+| T07 | Count aloud while bouncing | B-black | far | spoken counting |
+| T08 | Count aloud while bouncing | D-red | far | spoken counting |
 
-Recorder fields: scenario `Racket bounce + loud background sound`, noise level `Loud`,
-noise source `Music / TV`, count `30`.
-Music loud enough that you'd raise your voice to talk over it.
-**T9–T12 use Music 1 (percussion). T13–T16 use Music 2 (TV/speech/pop).**
+## Block 2 - Loud music + bouncing, no talking (8 takes, about 13 min)
 
-| Take | Distance | Racket | Music |
-|------|----------|--------|-------|
-| T09  | close    | A-red  | 1     |
-| T10  | close    | C-red  | 1     |
-| T11  | close    | D-red  | 1     |
-| T12  | far      | A-black| 1     |
-| T13  | far      | B-red  | 2     |
-| T14  | far      | C-black| 2     |
-| T15  | far      | D-black| 2     |
-| T16  | medium   | B-black| 2     |
+Recorder target: `Racket bounce`.
 
-## Block 3 — Counting aloud OVER loud music (3 takes, ~5 min)
+Music should be loud enough that a person would raise their voice over it. T09-
+T12 use Music 1; T13-T16 use Music 2.
 
-Recorder fields: scenario `Racket bounce + speaking/counting`, noise level `Loud`,
-noise source `Music / TV`, count `30`, notes: `counting aloud over loud music`.
-Count aloud 1–30 with loud music playing — the hardest combined case.
+| Take | Action | Racket | Distance | Background |
+|---|---|---|---|---|
+| T09 | Bounce, no talking | A-red | close | loud Music 1 |
+| T10 | Bounce, no talking | C-red | close | loud Music 1 |
+| T11 | Bounce, no talking | D-red | close | loud Music 1 |
+| T12 | Bounce, no talking | A-black | far | loud Music 1 |
+| T13 | Bounce, no talking | B-red | far | loud Music 2 |
+| T14 | Bounce, no talking | C-black | far | loud Music 2 |
+| T15 | Bounce, no talking | D-black | far | loud Music 2 |
+| T16 | Bounce, no talking | B-black | medium | loud Music 2 |
 
-| Take | Distance | Racket |
-|------|----------|--------|
-| T17  | close    | A-red  |
-| T18  | medium   | C-black|
-| T19  | far      | B-red  |
+## Block 3 - Counting aloud over loud music (3 takes, about 5 min)
 
-## Block 4 — Quiet baselines (8 takes, ~12 min)
+Recorder target: `Racket bounce`.
 
-Recorder fields: noise level `Quiet`, noise source `None`, count `30`. No talking.
+Count aloud 1-30 while loud Music 2 plays. This is the hardest combined positive
+condition.
 
-| Take | Scenario                 | Distance | Racket |
-|------|--------------------------|----------|--------|
-| T20  | Normal racket bounce     | close    | B-black|
-| T21  | Normal racket bounce     | medium   | D-red  |
-| T22  | Far/soft racket bounce   | far      | A-red  |
-| T23  | Far/soft racket bounce   | far      | C-red  |
-| T24  | Fast racket bounce       | close    | A-black|
-| T25  | Fast racket bounce       | close    | D-black|
-| T26  | Slow/high racket bounce  | medium   | B-red  |
-| T27  | Slow/high racket bounce  | medium   | C-black|
+| Take | Action | Racket | Distance | Background |
+|---|---|---|---|---|
+| T17 | Count aloud while bouncing | A-red | close | loud Music 2 + speech |
+| T18 | Count aloud while bouncing | C-black | medium | loud Music 2 + speech |
+| T19 | Count aloud while bouncing | B-red | far | loud Music 2 + speech |
 
-## Block 5 — Hard negatives (9 takes, ~11 min)
+## Block 4 - Quiet positive baselines (8 takes, about 12 min)
 
-Count `0` on all. Each take ~40 seconds. Racket ID `none` except T35 and T36.
-**Zero ball-on-racket bounces anywhere in this block.**
+Recorder target: `Racket bounce`. Do not talk.
 
-| Take | Scenario                        | Level / Source        | Distance | What to do |
-|------|---------------------------------|-----------------------|----------|------------|
-| T28  | Floor/table impact, no bounce   | Quiet / None          | close    | table taps, ball dropped on table and floor WITHOUT racket, knuckle knocks |
-| T29  | Floor/table impact, no bounce   | Loud / Music-TV (M1)  | close    | same impacts over loud music |
-| T30  | Floor/table impact, no bounce   | Quiet / None          | medium   | chair scrapes, footsteps, door close, object drops |
-| T31  | Talking/counting, no bounce     | Quiet / Speech        | close    | talk and count aloud 1–30, no bounces |
-| T32  | Talking/counting, no bounce     | Loud / Music-TV (M2)  | close    | talk loudly over music, no bounces |
-| T33  | Loud music/TV, no bounce        | Loud / Music-TV       | close    | Music 1 only, phones just listen |
-| T34  | Loud music/TV, no bounce        | Loud / Music-TV       | close    | Music 2 only, phones just listen |
-| T35  | Racket handling, no bounce      | Low / Room            | close    | racket ID `B+C`: pass, spin, re-grip both rackets, tap handles together |
-| T36  | Racket drop, no bounce          | Medium / Other        | close    | racket ID `A+B+C+D`: drop each racket three times with 2-second gaps; no ball |
+| Take | Action | Racket | Distance | Background |
+|---|---|---|---|---|
+| T20 | Normal racket bounce | B-black | close | quiet |
+| T21 | Normal racket bounce | D-red | medium | quiet |
+| T22 | Far/soft racket bounce | A-red | far | quiet |
+| T23 | Far/soft racket bounce | C-red | far | quiet |
+| T24 | Fast racket bounce | A-black | close | quiet |
+| T25 | Fast racket bounce | D-black | close | quiet |
+| T26 | Slow/high racket bounce | B-red | medium | quiet |
+| T27 | Slow/high racket bounce | C-black | medium | quiet |
 
-## Block 6 — Final variation block (5 takes, ~10 min)
+## Block 5 - Hard negatives (9 takes, about 11 min)
 
-| Take | Scenario                            | Level / Source   | Distance | Racket | Count | Notes field |
-|------|-------------------------------------|------------------|----------|--------|-------|-------------|
-| T37  | Racket bounce + background sound    | Medium / Room    | close    | A-black| 30    | `room background` (ventilation/street/kitchen) |
-| T38  | Racket bounce + background sound    | Medium / Room    | far      | C-red  | 30    | `room background` |
-| T39  | Normal racket bounce                | Quiet / None     | close    | D-red  | 30    | `catch after every 5th bounce` |
-| T40  | Racket bounce + speaking/counting   | Low / Speech     | medium   | B-black| 30    | `second person talking` — skip if nobody around |
-| T41  | Racket bounce + loud background     | Loud / Music-TV  | medium   | D-black| 30    | Music 1 |
+Change the recorder target to `Hard negative`. Each take is about 40 seconds and
+contains zero ball-on-racket contacts.
 
-## Block 7 — Supplemental hard-negative coverage (2 takes, ~3 min)
+| Take | Action | Racket | Distance | Background |
+|---|---|---|---|---|
+| T28 | Table taps, ball dropped on table/floor without racket, knuckle knocks | none | close | quiet |
+| T29 | Repeat T28 surface impacts | none | close | loud Music 1 |
+| T30 | Chair scrapes, footsteps, door close, separated object drops | none | medium | quiet |
+| T31 | Talk and count aloud 1-30 | none | close | speech only |
+| T32 | Talk loudly over music | none | close | loud Music 2 + speech |
+| T33 | Phones listen; no performed impacts | none | close | loud Music 1 |
+| T34 | Phones listen; no performed impacts | none | close | loud Music 2 |
+| T35 | Pass, spin, and re-grip rackets; tap handles together | B+C | close | low room noise |
+| T36 | Drop each racket three times with two-second gaps; no ball | A+B+C+D | close | medium room noise |
 
-Count `0` on both. Each take ~40 seconds. Use the flat placement in the phone
-schedule. T42 is `Final holdout`; T43 is `Train`.
+T30 is intentionally a **mixed household-impact** take, not a floor/table-impact
+take. This prevents its post-processing scenario from contradicting the action.
 
-| Take | Scenario                         | Level / Source | Distance | Racket      | What to do |
-|------|----------------------------------|----------------|----------|-------------|------------|
-| T42  | Racket drop, no bounce           | Medium / Other | close    | `A+B+C+D`   | drop each racket three times with 2-second gaps; no ball |
-| T43  | Mixed hard negatives, no bounce  | Medium / Other | close    | `none`      | separated coughs, keys, and cutlery sounds; no ball or racket bounce |
+## Block 6 - Final positive variations (5 takes, about 10 min)
+
+Change the recorder target back to `Racket bounce`. All five takes are required
+and all phones remain flat.
+
+| Take | Action | Racket | Distance | Background |
+|---|---|---|---|---|
+| T37 | Normal bounce | A-black | close | medium room noise: ventilation/street/kitchen |
+| T38 | Normal bounce | C-red | far | medium room noise: ventilation/street/kitchen |
+| T39 | Catch after every fifth bounce, then resume | D-red | close | quiet |
+| T40 | Bounce while a second person talks; if alone, play recorded speech from the speaker | B-black | medium | low speech |
+| T41 | Normal bounce | D-black | medium | loud Music 1 |
+
+T39 supplies catch/after-sound variation. T40 is not optional; recorded speech
+is the fallback when no second person is available.
+
+## Block 7 - Supplemental hard negatives (2 takes, about 3 min)
+
+Change the recorder target to `Hard negative`. Each take is about 40 seconds and
+contains zero ball-on-racket contacts.
+
+| Take | Action | Racket | Distance | Background |
+|---|---|---|---|---|
+| T42 | Drop each racket three times with two-second gaps; no ball | A+B+C+D | close | medium room noise |
+| T43 | Separated coughs, finger snaps, keys, glass/cutlery sounds, and small object set-downs | none | close | medium room noise |
 
 ## Wrap-up (5 min)
 
-- [ ] Each phone's session list shows 43 takes, with matching Take IDs
-- [ ] Export the dataset zip from **each** phone
-- [ ] Copy all three zips to the computer before deleting anything
-- [ ] Spot-check one Train JSON and one Final holdout JSON for take, position, orientation, and dataset-use metadata
+- [ ] Filter/check the official Round ID: every phone has T01-T43 exactly once.
+- [ ] Every take has the intended `Racket bounce` or `Hard negative` target.
+- [ ] Export the dataset ZIP from each phone.
+- [ ] Copy all three ZIPs to the computer before deleting anything.
+- [ ] Spot-check one positive and one hard-negative WAV + JSON per phone.
+- [ ] Keep the pilot export separate from the official round.
 
 ---
 
-## Racket-side coverage (for verification)
+## Post-processing manifest - not entered during recording
 
-| Side    | Takes                  | Total | Distances covered |
-|---------|------------------------|-------|-------------------|
-| A-red   | T01, T09, T17, T22     | 4     | close, far        |
-| A-black | T05, T12, T24, T37     | 4     | close, medium, far|
-| B-red   | T02, T13, T19, T26     | 4     | close, medium, far|
-| B-black | T07, T16, T20, T40     | 4     | close, medium, far|
-| C-red   | T06, T10, T23, T38     | 4     | close, medium, far|
-| C-black | T03, T14, T18, T27     | 4     | close, medium, far|
-| D-red   | T08, T11, T21, T39     | 4     | close, medium, far|
-| D-black | T04, T15, T25, T41     | 4     | close, medium, far|
+Create one manifest row for every official phone recording. Join recorder output
+to this plan by the composite key:
 
-Every side appears 4 times, spread over different scenarios, distances, and noise
-conditions, so no racket sound is confounded with any single recording condition.
+`round_id + take_id + device_alias`
 
-## Why the plan is weighted this way
+The manifest, not the phone operator, supplies:
 
-- **Counting aloud (Blocks 1+3)** and **loud music (Blocks 2+3)** get the most
-  takes: these are the two scenarios where live testing (gh-217) fails and where
-  no reviewed multi-device data exists yet.
-- **Floor/table impacts** get three dedicated takes: only 73 such training rows
-  exist in the entire current corpus.
-- Quiet baselines are kept small: historically well covered, easy for every model.
-- Three phones per take turn 43 takes of effort into 129 sessions, all with
-  device identity, noise level, and distance in metadata — ready for
-  leave-device-out evaluation after timestamp review.
+- `physical_event_group_id = round_id + take_id` so the three recordings of one
+  physical event can never cross train/evaluation boundaries;
+- block, planned action, scenario ID, racket ID/side, distance band, background
+  level/source, and expected count (`30` for positives, `0` for negatives);
+- phone position derived from the placement schedule and device alias;
+- dataset use, using the fixed split below;
+- reviewed event timestamps, actual event count, sync offset, and the excluded
+  sync-clap region;
+- quality flags such as approximate count, contamination, clipping, interruption,
+  route mismatch, missing device, or timing drift.
+
+Expected count is a collection check, **not** timestamp ground truth. Positive
+timestamps must be reviewed. A hard-negative take may be treated as negative
+only after confirming that it contains no ball-on-racket contact. Exclude the
+sync-clap region from both training and final evaluation so the repeated clap
+cannot become a class or split shortcut.
+
+### Fixed final holdout assignment
+
+Final holdout takes are:
+
+`T04, T07, T12, T14, T19, T23, T29, T32, T34, T41, T42`
+
+All other takes are Train. Apply this after import to the entire
+`physical_event_group_id`; never split the three phones from one take. The final
+holdout stays closed during model selection and threshold tuning.
+
+Leave-device-out evaluation is separate and uses only Train groups: train on two
+phones and evaluate on the third before opening the final holdout.
+
+### Canonical scenario corrections
+
+- T30: `mixed_household_impacts`, not `floor_table_impact`.
+- T39: `racket_bounce_catch_after_sound`.
+- T40: `racket_bounce_speech`, using live or recorded speech.
+- T43: `mixed_sharp_hard_negatives`.
+
+## Racket-side coverage verification
+
+| Side | Takes | Total | Distances covered |
+|---|---|---:|---|
+| A-red | T01, T09, T17, T22 | 4 | close, far |
+| A-black | T05, T12, T24, T37 | 4 | close, medium, far |
+| B-red | T02, T13, T19, T26 | 4 | close, medium, far |
+| B-black | T07, T16, T20, T40 | 4 | close, medium, far |
+| C-red | T06, T10, T23, T38 | 4 | close, medium, far |
+| C-black | T03, T14, T18, T27 | 4 | close, medium, far |
+| D-red | T08, T11, T21, T39 | 4 | close, medium, far |
+| D-black | T04, T15, T25, T41 | 4 | close, medium, far |
+
+Every racket side appears four times across different distances and background
+conditions. Blocks 5 and 7 cover surface impacts, household/object impacts,
+speech, music, racket handling/drop, and sharp mixed transients. That is enough
+physical coverage for this round's binary objective without adding more operator
+metadata or removing any of the 43 takes.
