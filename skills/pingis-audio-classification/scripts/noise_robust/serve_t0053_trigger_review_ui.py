@@ -395,6 +395,22 @@ HTML = r"""<!doctype html>
         <button id="panRightBtn">Right</button>
         <span class="status" id="zoomReadout">1x</span>
       </div>
+      <div class="toolbar-group">
+        <label>Wave gain
+          <select id="waveGainSelect">
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="4">4x</option>
+            <option value="8">8x</option>
+            <option value="16">16x</option>
+            <option value="32">32x</option>
+            <option value="64">64x</option>
+            <option value="128">128x</option>
+            <option value="256">256x</option>
+            <option value="auto">Auto</option>
+          </select>
+        </label>
+      </div>
       <button id="saveBtn">Save Labels</button>
       <button id="exportBtn">Export JSON</button>
       <span class="status" id="saveStatus">Not loaded</span>
@@ -470,6 +486,7 @@ HTML = r"""<!doctype html>
       drag: null,
       manualOnly: false,
       zoom: 1,
+      waveGain: 1,
       viewStart: 0,
       playheadTime: 0,
       pendingSeekTime: null,
@@ -810,14 +827,25 @@ HTML = r"""<!doctype html>
       ctx.lineTo(width, mid);
       ctx.stroke();
       const peaks = state.session.waveform;
+      const visiblePeaks = peaks.filter((_, index) => {
+        const time = index / Math.max(1, peaks.length - 1) * state.session.duration_s;
+        return time >= state.viewStart && time <= viewEnd();
+      });
+      const visibleMaximum = visiblePeaks.reduce(
+        (maximum, peak) => Math.max(maximum, Math.abs(peak[0]), Math.abs(peak[1])),
+        0
+      );
+      const displayGain = state.waveGain === 'auto'
+        ? Math.min(256, 0.88 / Math.max(visibleMaximum, 0.000001))
+        : state.waveGain;
       ctx.strokeStyle = '#3f4a4d';
       ctx.lineWidth = Math.max(1, dpr);
       for (let i = 0; i < peaks.length; i += 1) {
         const time = i / Math.max(1, peaks.length - 1) * state.session.duration_s;
         if (time < state.viewStart || time > viewEnd()) continue;
         const x = timeToCanvasX(time, width);
-        const y1 = mid - peaks[i][1] * mid * 0.92;
-        const y2 = mid - peaks[i][0] * mid * 0.92;
+        const y1 = mid - Math.max(-1, Math.min(1, peaks[i][1] * displayGain)) * mid * 0.92;
+        const y2 = mid - Math.max(-1, Math.min(1, peaks[i][0] * displayGain)) * mid * 0.92;
         ctx.beginPath();
         ctx.moveTo(x, y1);
         ctx.lineTo(x, y2);
@@ -853,7 +881,8 @@ HTML = r"""<!doctype html>
         ctx.fill();
       }
       document.getElementById('zoomReadout').textContent =
-        `${state.zoom}x | ${fmtTime(state.viewStart)} - ${fmtTime(viewEnd())}`;
+        `${state.zoom}x | gain ${state.waveGain === 'auto' ? 'auto' : state.waveGain + 'x'} | ` +
+        `${fmtTime(state.viewStart)} - ${fmtTime(viewEnd())}`;
     }
 
     function selectItem(id, seek) {
@@ -1090,6 +1119,10 @@ HTML = r"""<!doctype html>
     document.getElementById('playBtn').addEventListener('click', playWindow);
     document.getElementById('speedSelect').addEventListener('change', e => {
       audio.playbackRate = Number(e.target.value) || 1;
+    });
+    document.getElementById('waveGainSelect').addEventListener('change', e => {
+      state.waveGain = e.target.value === 'auto' ? 'auto' : Number(e.target.value) || 1;
+      drawWaveform();
     });
     document.getElementById('zoomInBtn').addEventListener('click', () => setZoom(state.zoom * 2));
     document.getElementById('zoomOutBtn').addEventListener('click', () => setZoom(state.zoom / 2));
