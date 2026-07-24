@@ -490,7 +490,8 @@ HTML = r"""<!doctype html>
       viewStart: 0,
       playheadTime: 0,
       pendingSeekTime: null,
-      pendingSeekStartedAt: 0
+      pendingSeekStartedAt: 0,
+      playbackFrameId: null
     };
 
     const audio = document.getElementById('audio');
@@ -557,6 +558,37 @@ HTML = r"""<!doctype html>
       document.getElementById('timeReadout').textContent = fmtTime(state.playheadTime);
       ensurePlayheadVisible();
       drawWaveform();
+    }
+
+    function enforcePlaybackWindow() {
+      if (!state.loopEnd || state.playheadTime < state.loopEnd) return;
+      if (state.loop) {
+        setPlayhead(state.loopStart);
+      } else {
+        audio.pause();
+        state.loopEnd = 0;
+      }
+    }
+
+    function animatePlayback() {
+      state.playbackFrameId = null;
+      if (audio.paused || audio.ended) return;
+      syncPlayheadFromAudio();
+      enforcePlaybackWindow();
+      if (!audio.paused && !audio.ended) {
+        state.playbackFrameId = window.requestAnimationFrame(animatePlayback);
+      }
+    }
+
+    function startPlaybackAnimation() {
+      if (state.playbackFrameId !== null) return;
+      state.playbackFrameId = window.requestAnimationFrame(animatePlayback);
+    }
+
+    function stopPlaybackAnimation() {
+      if (state.playbackFrameId === null) return;
+      window.cancelAnimationFrame(state.playbackFrameId);
+      state.playbackFrameId = null;
     }
 
     function viewDuration() {
@@ -1196,16 +1228,21 @@ HTML = r"""<!doctype html>
     });
     audio.addEventListener('timeupdate', () => {
       syncPlayheadFromAudio();
-      if (state.loopEnd && state.playheadTime >= state.loopEnd) {
-        if (state.loop) setPlayhead(state.loopStart);
-        else {
-          audio.pause();
-          state.loopEnd = 0;
-        }
-      }
+      enforcePlaybackWindow();
     });
     audio.addEventListener('seeked', () => syncPlayheadFromAudio(true));
-    audio.addEventListener('playing', () => syncPlayheadFromAudio(true));
+    audio.addEventListener('playing', () => {
+      syncPlayheadFromAudio(true);
+      startPlaybackAnimation();
+    });
+    audio.addEventListener('pause', () => {
+      stopPlaybackAnimation();
+      syncPlayheadFromAudio(true);
+    });
+    audio.addEventListener('ended', () => {
+      stopPlaybackAnimation();
+      syncPlayheadFromAudio(true);
+    });
     window.addEventListener('resize', drawWaveform);
     window.addEventListener('keydown', e => {
       const tag = (e.target?.tagName || '').toLowerCase();
