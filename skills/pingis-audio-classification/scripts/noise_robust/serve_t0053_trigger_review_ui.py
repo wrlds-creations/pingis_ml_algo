@@ -379,6 +379,10 @@ HTML = r"""<!doctype html>
       <div class="toolbar-group">
         <label>Speed
           <select id="speedSelect">
+            <option value="0.1">0.1x</option>
+            <option value="0.2">0.2x</option>
+            <option value="0.25">0.25x</option>
+            <option value="0.333333">0.33x</option>
             <option value="0.5">0.5x</option>
             <option value="0.75">0.75x</option>
             <option value="1" selected>1x</option>
