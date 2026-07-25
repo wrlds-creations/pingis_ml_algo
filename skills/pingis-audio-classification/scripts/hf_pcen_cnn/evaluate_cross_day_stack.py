@@ -18,7 +18,6 @@ from .train_reviewed_device_lodo import (
 from .train_round_lodo import (
     NO_CONFIDENCE_GATE,
     RACKET_INDEX,
-    TABULAR_MODELS,
     _feature_matrix,
     _model_probabilities,
     _thresholded_rows,
@@ -91,9 +90,20 @@ def evaluate_cross_day_stack(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     prediction_rows: list[pd.DataFrame] = []
-    for model_name in TABULAR_MODELS:
-        if model_name not in report["models"]:
-            continue
+    artifact_models = [
+        model_name
+        for model_name, model_report in report["models"].items()
+        if model_name != "frozen_fable"
+        and model_report.get("folds")
+        and all(
+            (
+                lodo_dir
+                / f"{model_name}_holdout_{fold_number}.joblib"
+            ).exists()
+            for fold_number in range(1, len(model_report["folds"]) + 1)
+        )
+    ]
+    for model_name in artifact_models:
         model_folds = report["models"][model_name]["folds"]
         fold_number_by_device = {
             str(fold["held_device"]): index
