@@ -240,6 +240,41 @@ and diversity of reviewed data is not enough for a learned classifier to
 generalize better than Fable. Another blind PCEN or threshold rerun is not
 justified by these results.
 
+### Expanded Reviewed Round And Frozen Holdout (2026-07-26)
+
+The synchronized `CJ-20260723-01` round expands the reviewed evidence to 43
+physical takes recorded on iPhone, Motorola, and Huawei: 129 sessions and
+2,865 reviewed bounce timestamps. Model selection used Train sessions only.
+The final 33-session holdout remained sealed until the candidate architecture
+and thresholds were frozen.
+
+| Path | Counting F1 | Precision | Recall | MAE/session | Candidate macro-F1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `dual_residual` | **0.7226** | **0.8131** | **0.6502** | **5.94** | **0.6065** |
+| `pcen_compact` | 0.6629 | 0.6777 | 0.6486 | 10.70 | 0.4846 |
+| Frozen Fable | 0.5636 | 0.6988 | 0.4722 | 12.48 | - |
+
+The expanded round changes the conclusion from the smaller July 17 pack:
+learned candidates are now useful enough for QA integration. It does not
+justify changing the production default before app-side frontend parity,
+latency, and physical-device false-positive testing.
+
+Export the frozen QA finalists with:
+
+```powershell
+$env:PYTHONPATH='skills/pingis-audio-classification/scripts'
+python -m hf_pcen_cnn.export_finalist_onnx `
+  --cache-dir data/audio/processed/hf_pcen_cnn/reviewed_round_20260723/cache `
+  --final-selection-dir data/audio/processed/hf_pcen_cnn/reviewed_round_20260723/final_selection `
+  --output-dir data/audio/processed/hf_pcen_cnn/reviewed_round_20260723/final_selection/deployment_qa `
+  --parity-rows 6
+```
+
+The ignored output package contains feature-input ONNX graphs, a deployment
+contract for the exact gate/frontend/clip/timing configuration, and PCM parity
+fixtures. ONNX Runtime parity maximum probability error is below `2.4e-7` for
+both finalists.
+
 ## Decision
 
 - Keep default Fable as the balanced deployed reference.
@@ -252,6 +287,9 @@ justified by these results.
 - Do not promote the reviewed-candidate CNN. Frozen Fable remains the
   reference after outperforming it on every held-out reviewed phone, even
   against the CNN's non-deployable per-phone oracle threshold.
+- Use `dual_residual` as the primary QA candidate and `pcen_compact` as its
+  challenger from the expanded reviewed round. These exports are for runtime
+  parity and Android/iOS device comparison only.
 - Collect more reviewed, device-diverse floor/other-impact examples. The
   training split contained only 73 floor/other-impact candidates.
 
@@ -263,6 +301,10 @@ leave-device-out validation and must not be described as one.
 ## Validation
 
 ```powershell
-python -m unittest discover -s hf_pcen_cnn/tests -v
-python -m compileall hf_pcen_cnn
+$env:PYTHONPATH='skills/pingis-audio-classification/scripts'
+python -m unittest discover `
+  -s skills/pingis-audio-classification/scripts/hf_pcen_cnn/tests `
+  -p "test_*.py" `
+  -v
+python -m compileall skills/pingis-audio-classification/scripts/hf_pcen_cnn
 ```
