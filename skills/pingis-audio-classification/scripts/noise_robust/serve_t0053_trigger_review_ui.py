@@ -15,6 +15,7 @@ import csv
 import json
 import mimetypes
 import sys
+import traceback
 import wave
 from array import array
 from datetime import datetime, timezone
@@ -1322,7 +1323,7 @@ def read_wav_peaks(path: Path, bins: int = 1800) -> tuple[list[list[float]], flo
 
 def load_review() -> dict[str, Any]:
     if LABELS_PATH.exists():
-        data = json.loads(LABELS_PATH.read_text(encoding="utf-8"))
+        data = json.loads(LABELS_PATH.read_text(encoding="utf-8-sig"))
         data.setdefault("trigger_labels", {})
         data.setdefault("manual_markers", [])
         return data
@@ -1424,7 +1425,11 @@ def build_payload() -> dict[str, Any]:
             raise FileNotFoundError(path)
 
     waveform, duration_s, sample_rate = read_wav_peaks(wav_path)
-    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
+    summary = (
+        json.loads(summary_path.read_text(encoding="utf-8-sig"))
+        if summary_path.exists()
+        else {}
+    )
     if TRIGGER_CSV is not None:
         if not TRIGGER_CSV.exists():
             raise FileNotFoundError(TRIGGER_CSV)
@@ -1462,7 +1467,8 @@ def build_payload() -> dict[str, Any]:
 
 def save_review(payload: dict[str, Any]) -> dict[str, Any]:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    review = {
+    review = load_review() if LABELS_PATH.exists() else {}
+    review.update({
         "session_id": SESSION_ID,
         "source_wav": str(RAW_DIR / f"{SESSION_ID}.wav"),
         "source_json": str(RAW_DIR / f"{SESSION_ID}.json"),
@@ -1472,7 +1478,7 @@ def save_review(payload: dict[str, Any]) -> dict[str, Any]:
         "trigger_labels": payload.get("trigger_labels") or {},
         "manual_markers": payload.get("manual_markers") or [],
         "saved_at": datetime.now(timezone.utc).isoformat(),
-    }
+    })
     LABELS_PATH.write_text(json.dumps(review, indent=2), encoding="utf-8")
     return {"ok": True, "saved_at": review["saved_at"], "path": str(LABELS_PATH)}
 
@@ -1571,6 +1577,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
         except Exception as exc:
+            traceback.print_exc()
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def do_POST(self) -> None:
@@ -1584,6 +1591,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode("utf-8"))
             self.send_json(save_review(payload))
         except Exception as exc:
+            traceback.print_exc()
             self.send_json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
 
