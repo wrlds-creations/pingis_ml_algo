@@ -32,7 +32,20 @@ from .train_reviewed_device_lodo import (
 
 
 RACKET_INDEX = CLASS_TO_INDEX["racket_bounce"]
+NOISE_INDEX = CLASS_TO_INDEX["voice_music_noise"]
 TRAINABLE_DISPOSITIONS = frozenset({"positive", "hard_negative"})
+TABULAR_MODELS = (
+    "extra_trees",
+    "histgb",
+    "extra_trees_binary",
+    "histgb_binary",
+)
+FABLE_PROBABILITY_COLUMNS = (
+    "fable_prob_racket_bounce",
+    "fable_prob_table_bounce",
+    "fable_prob_floor_bounce",
+    "fable_prob_noise",
+)
 NO_CONFIDENCE_GATE = FableTimingConfig(
     quiet_confidence=0.0,
     loud_confidence=0.0,
@@ -222,6 +235,19 @@ def _feature_matrix(metadata: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
         column for column in metadata.columns if column.startswith("fable_feature_")
     )
     values = metadata[feature_names].to_numpy(dtype=np.float64)
+    fable_probability_names = list(FABLE_PROBABILITY_COLUMNS)
+    missing_probability_names = [
+        name for name in fable_probability_names if name not in metadata.columns
+    ]
+    if missing_probability_names:
+        raise ValueError(
+            "Missing frozen-Fable probability columns: "
+            + ", ".join(missing_probability_names)
+        )
+    fable_values = metadata[fable_probability_names].to_numpy(dtype=np.float64)
+    fable_confidence = (
+        metadata["fable_confidence"].to_numpy(dtype=np.float64).reshape(-1, 1)
+    )
     eps = 1e-12
     derived = np.column_stack(
         (
@@ -241,9 +267,15 @@ def _feature_matrix(metadata: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
         "gate_hf_background_ratio",
         "gate_threshold_ratio",
     ]
-    matrix = np.column_stack((values, derived))
+    matrix = np.column_stack((values, fable_values, fable_confidence, derived))
     matrix = np.where(np.isfinite(matrix), matrix, 0.0)
-    return matrix, feature_names + derived_names
+    return (
+        matrix,
+        feature_names
+        + fable_probability_names
+        + ["fable_confidence"]
+        + derived_names,
+    )
 
 
 def _binary_metrics(labels: np.ndarray, probabilities: np.ndarray) -> dict[str, object]:
@@ -324,7 +356,10 @@ def _fit_tabular(
     train_indexes: np.ndarray,
     seed: int,
 ) -> object:
-    if name == "extra_trees":
+    family = name.removesuffix("_binary")
+    binary_target = name.endswith("_binary")
+    target = (labels == RACKET_INDEX).astype(np.int64) if binary_target else labels
+    if family == "extra_trees":
         model = ExtraTreesClassifier(
             n_estimators=500,
             max_features="sqrt",
@@ -333,7 +368,7 @@ def _fit_tabular(
             n_jobs=-1,
             random_state=seed,
         )
-    elif name == "histgb":
+    elif family == "histgb":
         model = HistGradientBoostingClassifier(
             learning_rate=0.06,
             max_iter=240,
@@ -345,12 +380,24 @@ def _fit_tabular(
         )
     else:
         raise ValueError(f"Unknown tabular model: {name}")
-    return model.fit(features[train_indexes], labels[train_indexes])
+    return model.fit(features[train_indexes], target[train_indexes])
 
 
-def _model_probabilities(model: object, features: np.ndarray, indexes: np.ndarray) -> np.ndarray:
+def _model_probabilities(
+    model: object,
+    features: np.ndarray,
+    indexes: np.ndarray,
+    *,
+    binary_target: bool,
+) -> np.ndarray:
     raw = np.asarray(model.predict_proba(features[indexes]), dtype=np.float64)
     output = np.zeros((len(indexes), len(FOUR_CLASSES)), dtype=np.float64)
+    if binary_target:
+        class_indexes = {int(label): index for index, label in enumerate(model.classes_)}
+        racket_probabilities = raw[:, class_indexes[1]]
+        output[:, RACKET_INDEX] = racket_probabilities
+        output[:, NOISE_INDEX] = 1.0 - racket_probabilities
+        return output
     for source_index, class_index in enumerate(model.classes_):
         output[:, int(class_index)] = raw[:, source_index]
     return output
@@ -466,6 +513,7 @@ def run_round_lodo(
     batch_size: int,
     seed: int,
     tolerance_ms: float,
+    include_cnns: bool = True,
 ) -> dict[str, object]:
     metadata = pd.read_csv(cache_dir / "metadata.csv")
     if set(metadata["dataset_split"].astype(str)) != {"train", "holdout"}:
@@ -477,10 +525,14 @@ def run_round_lodo(
     if len(devices) != 3:
         raise ValueError(f"Expected exactly three physical devices, got {devices}")
 
-    frontends = {
-        "logmel": np.load(cache_dir / "logmel.npy", mmap_mode="r"),
-        "pcen": np.load(cache_dir / "pcen.npy", mmap_mode="r"),
-    }
+    frontends = (
+        {
+            "logmel": np.load(cache_dir / "logmel.npy", mmap_mode="r"),
+            "pcen": np.load(cache_dir / "pcen.npy", mmap_mode="r"),
+        }
+        if include_cnns
+        else {}
+    )
     cnn_specs = (
         CnnSpec(
             "logmel_compact",
@@ -508,9 +560,10 @@ def run_round_lodo(
     output_dir.mkdir(parents=True, exist_ok=True)
     reports: dict[str, dict[str, object]] = {
         name: {"folds": []}
-        for name in ("frozen_fable", "extra_trees", "histgb")
+        for name in ("frozen_fable", *TABULAR_MODELS)
     }
-    reports.update({spec.name: {"folds": []} for spec in cnn_specs})
+    if include_cnns:
+        reports.update({spec.name: {"folds": []} for spec in cnn_specs})
 
     for fold_number, held_device in enumerate(devices, start=1):
         train_indexes, validation_trainable, validation_all, held_all = _fold_indexes(
@@ -547,7 +600,8 @@ def run_round_lodo(
             {**fold_common, "counting": fable_counting}
         )
 
-        for model_name in ("extra_trees", "histgb"):
+        for model_name in TABULAR_MODELS:
+            binary_target = model_name.endswith("_binary")
             print(f"Training {model_name} with held device {held_device}", flush=True)
             model = _fit_tabular(
                 model_name,
@@ -560,6 +614,7 @@ def run_round_lodo(
                 model,
                 tabular_features,
                 validation_all,
+                binary_target=binary_target,
             )
             threshold, validation_counting = _select_count_threshold(
                 validation_metadata,
@@ -570,11 +625,13 @@ def run_round_lodo(
                 model,
                 tabular_features,
                 held_all,
+                binary_target=binary_target,
             )
             held_trainable_probabilities = _model_probabilities(
                 model,
                 tabular_features,
                 held_trainable,
+                binary_target=binary_target,
             )
             held_counting = _score_counting(
                 held_metadata,
@@ -587,6 +644,7 @@ def run_round_lodo(
                     "model": model,
                     "feature_names": tabular_feature_names,
                     "classes": FOUR_CLASSES,
+                    "binary_target": binary_target,
                     "threshold": threshold,
                 },
                 output_dir / f"{model_name}_holdout_{fold_number}.joblib",
@@ -604,7 +662,7 @@ def run_round_lodo(
                 }
             )
 
-        for spec in cnn_specs:
+        for spec in cnn_specs if include_cnns else ():
             print(f"Training {spec.name} with held device {held_device}", flush=True)
             selected_features = tuple(frontends[name] for name in spec.feature_names)
             model, training = _train_cnn(
@@ -713,6 +771,8 @@ def run_round_lodo(
                 "selected by this script"
             ),
         },
+        "tabular_features": tabular_feature_names,
+        "include_cnns": include_cnns,
         "leaderboard": leaderboard,
         "models": reports,
     }
@@ -731,6 +791,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--tolerance-ms", type=float, default=140.0)
+    parser.add_argument(
+        "--tabular-only",
+        action="store_true",
+        help="Run frozen Fable and tabular stacking candidates without CNN training.",
+    )
     args = parser.parse_args()
     report = run_round_lodo(
         args.cache_dir,
@@ -739,6 +804,7 @@ def main() -> None:
         batch_size=args.batch_size,
         seed=args.seed,
         tolerance_ms=args.tolerance_ms,
+        include_cnns=not args.tabular_only,
     )
     print(json.dumps({"leaderboard": report["leaderboard"]}, indent=2))
 

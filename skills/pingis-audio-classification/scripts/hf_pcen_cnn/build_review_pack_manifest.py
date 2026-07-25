@@ -140,6 +140,8 @@ def build_review_pack_manifest(
                 "fable_predicted_label": str(fable_prediction["label"]),
                 "fable_confidence": float(fable_prediction["confidence"]),
             }
+            for feature_name, feature_value in fable_features.items():
+                row[f"fable_feature_{feature_name}"] = float(feature_value)
             for label, probability in probabilities.items():
                 row[f"fable_prob_{label}"] = float(probability)
             rows.append(row)
