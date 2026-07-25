@@ -16,13 +16,14 @@ import pandas as pd
 import torch
 from sklearn.ensemble import ExtraTreesClassifier, HistGradientBoostingClassifier
 from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.model_selection import StratifiedGroupKFold
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
 from .candidate_labels import FOUR_CLASSES
 from .fable_baseline import FableTimingConfig
 from .model import BounceCandidateCnn, ResidualBounceCandidateCnn
-from .train_ablation import CLASS_TO_INDEX, _choose_grouped_split
+from .train_ablation import CLASS_TO_INDEX
 from .train_reviewed_device_lodo import (
     _aggregate_count_reports,
     _fable_rows_for_timing,
@@ -355,6 +356,51 @@ def _model_probabilities(model: object, features: np.ndarray, indexes: np.ndarra
     return output
 
 
+def _choose_round_grouped_split(
+    labels: np.ndarray,
+    groups: np.ndarray,
+    indexes: np.ndarray,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Keep rare classes in fitting while creating a useful binary validation split."""
+    splitter = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=seed)
+    overall = np.bincount(labels[indexes], minlength=len(FOUR_CLASSES)) / len(indexes)
+    best: tuple[float, np.ndarray, np.ndarray] | None = None
+    for train_local, validation_local in splitter.split(
+        indexes,
+        labels[indexes],
+        groups[indexes],
+    ):
+        train_indexes = indexes[train_local]
+        validation_indexes = indexes[validation_local]
+        train_counts = np.bincount(
+            labels[train_indexes],
+            minlength=len(FOUR_CLASSES),
+        )
+        if np.any(train_counts == 0):
+            continue
+        validation_labels = labels[validation_indexes]
+        validation_has_racket = np.any(validation_labels == RACKET_INDEX)
+        validation_has_non_racket = np.any(validation_labels != RACKET_INDEX)
+        if not validation_has_racket or not validation_has_non_racket:
+            continue
+        validation_distribution = np.bincount(
+            validation_labels,
+            minlength=len(FOUR_CLASSES),
+        ) / len(validation_indexes)
+        distribution_error = float(np.abs(validation_distribution - overall).sum())
+        size_error = abs(len(validation_indexes) / len(indexes) - 0.2)
+        score = distribution_error + size_error
+        if best is None or score < best[0]:
+            best = (score, train_indexes, validation_indexes)
+    if best is None:
+        raise RuntimeError(
+            "Could not create a grouped split with every class in fitting and "
+            "both racket/non-racket candidates in validation"
+        )
+    return best[1], best[2]
+
+
 def _fold_indexes(
     metadata: pd.DataFrame,
     labels: np.ndarray,
@@ -370,7 +416,7 @@ def _fold_indexes(
     held = metadata["device_id"].astype(str).eq(held_device).to_numpy()
     development = np.flatnonzero(train_split & trainable & ~held)
     groups = metadata["physical_event_group_id"].astype(str).to_numpy()
-    train_indexes, validation_trainable = _choose_grouped_split(
+    train_indexes, validation_trainable = _choose_round_grouped_split(
         labels,
         groups,
         development,
