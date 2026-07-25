@@ -250,9 +250,14 @@ and thresholds were frozen.
 
 | Path | Counting F1 | Precision | Recall | MAE/session | Candidate macro-F1 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `dual_residual` | **0.7226** | **0.8131** | **0.6502** | **5.94** | **0.6065** |
-| `pcen_compact` | 0.6629 | 0.6777 | 0.6486 | 10.70 | 0.4846 |
-| Frozen Fable | 0.5636 | 0.6988 | 0.4722 | 12.48 | - |
+| `dual_residual` | **0.7220** | **0.8131** | **0.6492** | **5.97** | **0.6065** |
+| `pcen_compact` | 0.6623 | 0.6777 | 0.6476 | 10.73 | 0.4846 |
+| Frozen Fable | 0.5630 | 0.6988 | 0.4714 | 12.52 | - |
+
+These counting metrics include all 630 reviewed holdout bounces. One T12
+Huawei bounce was absent from the HF candidate stream and is therefore
+correctly scored as a false negative for every path. Candidate-level metrics,
+saved predictions, frozen thresholds, and the finalist ranking are unchanged.
 
 The expanded round changes the conclusion from the smaller July 17 pack:
 learned candidates are now useful enough for QA integration. It does not
