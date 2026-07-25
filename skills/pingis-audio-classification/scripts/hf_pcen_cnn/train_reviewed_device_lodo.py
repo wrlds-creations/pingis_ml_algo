@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -96,7 +97,29 @@ def _fable_rows_for_timing(metadata: pd.DataFrame) -> list[dict[str, object]]:
     ]
 
 
+@lru_cache(maxsize=None)
+def _reviewed_racket_times(labels_path: str) -> tuple[float, ...]:
+    payload = json.loads(Path(labels_path).read_text(encoding="utf-8"))
+    return tuple(
+        sorted(
+            float(marker["time_s"]) * 1000.0
+            for marker in payload.get("manual_markers", [])
+            if str(marker.get("label", "")).strip().lower()
+            in {"racket", "racket_bounce"}
+        )
+    )
+
+
 def _truth_times(session_rows: pd.DataFrame) -> list[float]:
+    if "labels_path" in session_rows:
+        labels_paths = [
+            str(value)
+            for value in session_rows["labels_path"].dropna().unique()
+            if str(value).strip()
+        ]
+        if len(labels_paths) == 1 and Path(labels_paths[0]).is_file():
+            return list(_reviewed_racket_times(labels_paths[0]))
+
     positives = session_rows.loc[
         session_rows["disposition"].eq("positive"),
         ["matched_event_index", "reviewed_event_ms"],

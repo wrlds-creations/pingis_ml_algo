@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
@@ -8,11 +10,38 @@ import pandas as pd
 from hf_pcen_cnn.train_reviewed_device_lodo import (
     _binary_racket_metrics,
     _oracle_threshold_diagnostic,
+    _truth_times,
     review_fold_indexes,
 )
 
 
 class ReviewedDeviceLodoTests(unittest.TestCase):
+    def test_truth_times_include_reviewed_event_without_gate_candidate(self) -> None:
+        with TemporaryDirectory() as temporary:
+            labels_path = Path(temporary) / "review_labels.json"
+            labels_path.write_text(
+                """
+                {
+                  "manual_markers": [
+                    {"time_s": 1.0, "label": "racket"},
+                    {"time_s": 2.0, "label": "racket_bounce"},
+                    {"time_s": 3.0, "label": "other"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            rows = pd.DataFrame(
+                {
+                    "labels_path": [str(labels_path)],
+                    "disposition": ["positive"],
+                    "matched_event_index": [0],
+                    "reviewed_event_ms": [1000.0],
+                }
+            )
+
+            self.assertEqual(_truth_times(rows), [1000.0, 2000.0])
+
     def test_held_device_never_enters_review_training(self) -> None:
         metadata = pd.DataFrame(
             {
