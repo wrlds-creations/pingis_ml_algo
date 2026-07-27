@@ -10,12 +10,24 @@ The binary objective is only:
 
 Follow T01-T43 in order. Do not improvise new official takes inside the round.
 
+## Recorded round and racket identities
+
+The data corresponding to this plan is recording round `CJ-20260723-01`. Its
+local corrected metadata is under `data/rounds/CJ-20260723-01/`.
+
+| Racket ID | Physical racket |
+|---|---|
+| A | `CJ-Long handle Racket` |
+| B | `CJ-short handle Racket` |
+| C | `Stiga hex Racket - star club 68-061` |
+| D | `Stiga Racket - royal 3 start` |
+
 ## What the recorder must capture
 
 Use the STIGA QA `Audio dataset recorder` in **Round plan** mode. Set these once
 before the official round:
 
-- The same **Round ID** on all phones, for example `CJ-20260723-01`.
+- The same **Round ID** `CJ-20260723-01` on all phones.
 - A different **Device alias** on each phone: `CJ-iphone`, `CJ-moto`, and
   `CJ-huawei`.
 - **Take** `T01` on all phones.
