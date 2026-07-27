@@ -409,6 +409,14 @@ checks.
 
 ## Post-processing manifest
 
+The recording-level correction layer now exists at:
+
+`data/rounds/CJ-20260727-01/manifest.json`
+
+It contains 12 corrected recording rows and the 44 planned logical sub-blocks.
+`manifest.csv` contains the recording rows, while `subblocks.csv` contains the
+logical sub-block schedule with reviewed timestamp/count fields still empty.
+
 Join each saved recording by:
 
 `round_id + take_id + device_alias`
