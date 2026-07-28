@@ -115,7 +115,7 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 | Ticket | Goal | Status | Notes |
 |---|---|---|---|
-| `T0041` | Fix `Studs FH/BH LIVE` red-forehand backhand bias | `Completed` | Fable audio unchanged. `bounce_side_model.json` unchanged. Runtime now uses clear visible red/black evidence against selected forehand color before accepting raw side; live debug dumps are explainable with raw side, visible color, red/dark totals, and decision source. |
+| `GH-6` | Retrain Dual V2 for edge-racket contacts | `Completed` | Fresh `dual_residual_v2_edge_racket` improves same-day edge diagnostic counting F1 from `0.6247` to `0.8269` and unchanged original holdout F1 from `0.7220` to `0.7483`. Generated artifacts remain ignored; no STIGA runtime or production default changed. |
 
 ## Confirmed Next Tickets
 
@@ -139,6 +139,9 @@ FOLLOWUPS.md                            out-of-scope issues and future tickets
 
 ## Validation Status
 
+- GH-6 model: 9,838 edge candidate features cached with 0 errors; all 1,338 reviewed T01-T04 events matched by the frozen HF gate. Dual V2 trained from scratch on 16,343 rows, including 1,020 reviewed T01/T02 additions. T03/T04 and the original final holdout were excluded from training and threshold selection.
+- GH-6 evaluation: same-day T03/T04 counting precision/recall/F1 `0.8013/0.8542/0.8269`, original final holdout `0.8123/0.6937/0.7483`. Remaining concentrated miss is racket D black top-edge at `22/48` candidate recall.
+- GH-6 validation: all 45 focused HF/PCEN tests passed, Python compilation passed, root `npm run validate` passed, and `git diff --check` passed with Windows line-ending warnings only.
 - Build: `T0041 APK installed on Motorola ZY22L6NDHV at 2026-06-17 16:29:12; SHA256 BE0C3F21473A44AF99979A38DF55B19FCBB50C5A755EBB502A3D6D3CBA5A30D2; app pid 2566`. Fable and model JSON artifacts were not retrained or replaced in T0041.
 - Tests: `cd apps/collector && npx tsc --noEmit`, bounce-side TS parity, root `npm run validate`, forced Metro bundle, and Gradle `assembleRelease` passed on 2026-06-17 for T0041.
 - Lint: `git diff --check` passed on 2026-06-17 with existing Windows line-ending warnings only.

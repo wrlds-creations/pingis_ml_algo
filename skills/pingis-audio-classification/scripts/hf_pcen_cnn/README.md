@@ -264,6 +264,77 @@ learned candidates are now useful enough for QA integration. It does not
 justify changing the production default before app-side frontend parity,
 latency, and physical-device false-positive testing.
 
+### Dual V2 Edge-Racket Retrain (2026-07-28)
+
+Physical QA of the first Dual model exposed a concentrated miss family when
+the ball contacted near the racket edge. The reviewed `CJ-20260727-01` round
+adds four rackets, both rubber faces, several edge zones, and synchronized
+iPhone, Motorola, and Huawei recordings.
+
+The derived intake applies the documented T01 target correction without
+editing raw session JSON. T01/T02 are training-only. T03/T04 are same-day
+diagnostics and are not an independent holdout. The original 33-session final
+holdout remains unchanged.
+
+Rebuild the edge manifest and cache with:
+
+```powershell
+$env:PYTHONPATH='skills/pingis-audio-classification/scripts'
+python -m hf_pcen_cnn.build_edge_round_manifest `
+  --round-dir "C:\Development\Wrlds\android\pingis_ml_algo\data\rounds-CJ-20260727-01-labeled\rounds\CJ-20260727-01" `
+  --raw-root "C:\Development\Wrlds\android\pingis_ml_algo\data\rounds-CJ-20260727-01-labeled\CJ-20260727-01" `
+  --output data/audio/processed/hf_pcen_cnn/edge_round_20260727/candidates.csv
+
+python -m hf_pcen_cnn.build_feature_cache `
+  --manifest data/audio/processed/hf_pcen_cnn/edge_round_20260727/candidates.csv `
+  --output-dir data/audio/processed/hf_pcen_cnn/edge_round_20260727/cache
+```
+
+Train a fresh Dual V2 and compare it with the frozen V1 artifact:
+
+```powershell
+python -m hf_pcen_cnn.train_dual_v2_edge `
+  --base-cache data/audio/processed/hf_pcen_cnn/reviewed_round_20260723/cache `
+  --edge-cache data/audio/processed/hf_pcen_cnn/edge_round_20260727/cache `
+  --frozen-artifact data/audio/processed/hf_pcen_cnn/reviewed_round_20260723/final_selection/artifacts/dual_residual.pt `
+  --output-dir data/audio/processed/hf_pcen_cnn/dual_v2_edge_20260727
+```
+
+The fixed training policy uses 13 epochs, seed `20260727`, and the unchanged
+V1 racket threshold `0.775`. It trains from scratch on 16,343 rows, including
+1,020 reviewed T01/T02 rows. The 9,838-row edge cache is complete and the HF
+gate matched all 1,338 reviewed T01-T04 events.
+
+| Evaluation | Model | Precision | Recall | F1 | MAE/session |
+| --- | --- | ---: | ---: | ---: | ---: |
+| T03/T04 edge diagnostic | Frozen Dual V1 | 0.7884 | 0.5174 | 0.6247 | 17.17 |
+| T03/T04 edge diagnostic | **Dual V2** | **0.8013** | **0.8542** | **0.8269** | **3.17** |
+| Original final holdout | Frozen Dual V1 | **0.8131** | 0.6492 | 0.7220 | 5.97 |
+| Original final holdout | **Dual V2** | 0.8123 | **0.6937** | **0.7483** | **4.48** |
+
+On T03 candidate classification, V2 recalled 262/288 reviewed edge contacts
+with 0/30 reviewed table candidates called racket. End-to-end counting on
+T04 produced one unmatched false count across the three sessions. Original
+holdout table-to-racket candidate errors changed from 37 to 39 and
+voice/music/noise-to-racket errors from 90 to 109, while overall counting
+precision stayed effectively flat and recall improved.
+
+The remaining concentrated weakness is racket D, black face, top-edge contact:
+V2 recalls 22/48 candidates across the three diagnostic phones. Treat V2 as a
+stronger QA candidate, not a production promotion. T03/T04 share the same day,
+rooms, and placements as training, so an independent physical round is still
+required before promotion.
+
+Generated outputs remain ignored:
+
+- `edge_round_20260727/candidates.contract.json`
+- `dual_v2_edge_20260727/dual_residual_v2_edge_racket.pt`
+- `dual_v2_edge_20260727/dual_v2_edge_report.json`
+- `dual_v2_edge_20260727/edge_diagnostic_predictions.csv`
+
+The V2 checkpoint SHA256 is
+`35254daad9cf3be02d60f26cc7f0de3ab00609f5e4b9e9875a005df626a53b50`.
+
 Export the frozen QA finalists with:
 
 ```powershell
@@ -295,6 +366,10 @@ both finalists.
 - Use `dual_residual` as the primary QA candidate and `pcen_compact` as its
   challenger from the expanded reviewed round. These exports are for runtime
   parity and Android/iOS device comparison only.
+- Keep `dual_residual_v2_edge_racket` as the next Dual QA candidate. It fixes
+  most of the measured edge-contact regression and improves the unchanged
+  final holdout, but it still needs an independent edge round and runtime
+  parity before production promotion.
 - Collect more reviewed, device-diverse floor/other-impact examples. The
   training split contained only 73 floor/other-impact candidates.
 

@@ -1,15 +1,15 @@
 # CODEX_TASK.md
 
-Use one active ticket per implementation pass. The active ticket for this branch
-is the approved GitHub issue below.
+Use one active ticket per implementation pass. The active ticket for this
+branch is the approved GitHub issue below.
 
 ## Ticket ID
 
-`GH-5-simplify-43-take-recording-plan`
+`GH-6-dual-v2-edge-racket`
 
 ## Branch
 
-`codex/gh-5-simplify-recording-plan`
+`codex/gh-6-dual-v2-edge-racket`
 
 ## Status
 
@@ -17,80 +17,86 @@ is the approved GitHub issue below.
 
 ## Goal
 
-Simplify the cross-device recording instructions so the phones capture only
-stable round/take identity, target class, automatic provenance, and exceptions,
-while retaining all 43 planned takes and moving experiment metadata to a
-deterministic post-processing manifest.
+Retrain a versioned V2 `dual_residual` bounce classifier that improves recall
+for ball contacts near the racket edge without weakening the frozen model's
+cross-device noise resistance.
 
 ## Approved Issue
 
-- https://github.com/wrlds-creations/pingis_ml_algo/issues/5
-- Approved directly by the user on 2026-07-22.
+- https://github.com/wrlds-creations/pingis_ml_algo/issues/6
+- Approved directly by the user on 2026-07-28.
 
 ## Dependencies
 
-- The current recording plan exists on the unmerged issue #4 branch.
-- This branch is based on `codex/gh-4-hf-four-class-cnn`.
-- STIGA recorder implementation is owned by a separate STIGA app issue.
+- The frozen Dual baseline and reproducible training/evaluation pipeline from
+  issue #4.
+- The completed edge-racket recording and review round
+  `CJ-20260727-01`.
+- `RECORDING_PLAN_EDGE_RACKET.md` as the source of truth for corrections,
+  split policy, and evaluation boundaries.
 
 ## Allowed Areas
 
-- `RECORDING_PLAN.md`
+- `skills/pingis-audio-classification/scripts/hf_pcen_cnn/`
+- `data/rounds-CJ-20260727-01-labeled/` derived manifests and ignored outputs
 - `CODEX_TASK.md`
 - `DECISIONS.md`
 - `ITERATION_LOG.md`
+- `RECORDING_PLAN_EDGE_RACKET.md`
+- focused tests and validation configuration required by the pipeline
 
 ## Do Not Touch
 
-- App/runtime source
-- Model artifacts, training code, or evaluation outputs
-- Raw or processed recordings
+- Raw WAV or source session JSON data
+- STIGA application/runtime source
+- Production model defaults
 - AWS or backend resources
+- The sealed final holdout's membership or labels
 
 ## Requirements
 
-- Preserve T01-T43, all seven blocks, and three-phone simultaneous capture.
-- Separate the pilot from the official round.
-- Keep every phone flat, including Block 6.
-- Use one shared Round ID and stable Take IDs.
-- Move scenario, position, split, expected-count, and label details to
-  post-processing.
-- Correct T30, identify T39 catch/after-sound coverage, and require T40 with a
-  speech-playback fallback.
-- Keep the physical-event holdout grouping deterministic.
+- Initialize a fresh `dual_residual` model and train from scratch.
+- Use the original Train split plus reviewed T01/T02 from
+  `CJ-20260727-01`.
+- Correct T01 iPhone/Motorola target metadata only in a derived manifest.
+- Keep T03/T04 diagnostic-only and exclude the original final holdout from
+  training and threshold selection.
+- Compare V2 with the unchanged frozen Dual baseline.
+- Report edge-racket and center-racket recall, table and speech/noise false
+  positives, per-device metrics, count error, and sealed-holdout metrics.
+- Keep generated checkpoints, features, and reports ignored.
 
 ## Non-Goals
 
-- No model or app change.
-- No reduction in take count.
-- No raw data generation.
+- No STIGA export, runtime promotion, or production-default change.
+- No HF-gate retuning unless the reviewed evidence shows gate misses.
+- No mutation of raw recordings or sealed evaluation membership.
 
 ## Acceptance Criteria
 
-- The plan contains contiguous T01-T43 and totals 43 takes per phone / 129 files.
-- Operators enter only round/take identity, binary target, and exceptions.
-- Every take has one binary target and deterministic post-processing metadata.
-- The pilot cannot consume official T01.
-- Block 6 remains present and required.
+- Intake audit confirms complete reviewed T01-T04 device coverage.
+- The expanded manifest and training command are reproducible.
+- Evaluation separates Train-derived validation, T03/T04 diagnostics, and the
+  untouched final holdout.
+- The final report records both improvements and regressions against frozen
+  Dual and makes an evidence-based promotion recommendation.
 
 ## Validation
 
-- Manual take/target/holdout audit
+- Focused dataset, training, and evaluation tests
+- Python compile checks
 - `npm run validate`
 - `git diff --check`
 
-## Completion Notes
+## Outcome
 
-- Preserved all seven blocks and contiguous T01-T43: 43 recordings per phone / 129 total.
-- Separated the pilot as a different Round ID at T00, then reset the official round to T01.
-- Removed per-phone scenario, position, orientation, split, distance, racket, background, and expected-count entry from the recording workflow.
-- Kept every phone flat, including Block 6, without removing T37-T41.
-- Corrected T30 to mixed household impacts, tagged T39 as catch/after-sound coverage, and made T40 mandatory with recorded speech as fallback.
-- Defined deterministic post-processing joins, physical-event grouping, fixed holdout assignment, timestamp review, sync-clap exclusion, and quality flags.
-- Fixed Music 1/Music 2 to downloaded local 60-second excerpts and documented
-  no-loop/no-ad playback.
-- Added NIOSH Sound Level Meter settings and round-level targets for music,
-  normal counting, and raised speech while preserving real cross-device gain
-  differences for post-processing.
-- Verified 43 unique contiguous take rows with no missing IDs.
-- `npm run validate` and `git diff --check` passed.
+- Built a reproducible 9,838-row edge-round manifest and complete
+  log-mel/PCEN feature cache from `CJ-20260727-01`.
+- Trained `dual_residual_v2_edge_racket` from scratch on 16,343 rows, including
+  1,020 reviewed T01/T02 additions.
+- Improved same-day T03/T04 counting F1 from `0.6247` to `0.8269` and original
+  final-holdout counting F1 from `0.7220` to `0.7483`.
+- Preserved the frozen `0.775` threshold and original holdout membership.
+- Left STIGA runtime and production model defaults unchanged. V2 remains a QA
+  candidate pending an independent edge-contact round, especially for racket D
+  black top-edge contacts.
